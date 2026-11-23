@@ -2348,9 +2348,8 @@ sabotage-verified (hover reading flipped, LSP refresh removed, image-hit mtimes 
 `defserver`/`defstatem` now runs redefined clauses — the loop is a clause of the server's own
 function reached through its global name — and `code-change` runs the CURRENT definition's
 migration. (2) KI-407: superseded code is reclaimed in a multi-process runtime — the waiting
-root thread reports for itself, the free is tried at every collector entry (the 1-in-64
-stride compounded with the doubling back-off into never) and by the report that completes a
-drain. (3) `seq` of any empty collection is nil (`(seq [])` was `[]`, truthy; std/tool/audit
+root thread reports for itself, and the free is tried at every collector entry (the 1-in-64
+stride compounded with the doubling back-off into never). (3) `seq` of any empty collection is nil (`(seq [])` was `[]`, truthy; std/tool/audit
 printed empty groups). (4) `(def x:int 3)` is refused naming `(sig x int)`; `defrecord` reads
 `n:int` as a typed field. (5) A misspelled type name is reported even capitalised (`x:Strng`),
 and an unknown name in a runtime contract raises instead of admitting anything; `numeric`,

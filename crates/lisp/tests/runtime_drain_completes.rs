@@ -12,10 +12,7 @@
 //! 2. The free was attempted once per 64 collector entries, and entries come only at
 //!    doublings of the code region — so in practice never. It is attempted at every entry.
 //!
-//! 3. The free ran only from the collector, so a drain that completed just after an attempt
-//!    waited for the region to double again. The report that completes a drain now frees it.
-//!
-//! The program below has all three: the root context is minted before the program starts (as
+//! The program below has both: the root context is minted before the program starts (as
 //! the check-cache replay's `require` mints it), a peer process parks for the whole run, and a
 //! reloader redefines one function 36 000 times.
 //!

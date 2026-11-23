@@ -37,7 +37,7 @@ stdlib image's id (version, sha, source hash) does not change for a Rust-side ch
 times: `(dev/gc-stats)` showed `:runtime-aged 1`, `:runtime-draining true` for the rest of the
 run, and `:runtime-closures` climbing to 116 281.
 
-**Cause.** Three, each enough on its own to hold the first drain open (and a new drain waits
+**Cause.** Two, each enough on its own to hold the first drain open (and a new drain waits
 for the previous free, so nothing was reclaimed after it). A root thread waiting on its
 top-level program (every `brood FILE` run, ADR-135) held a root context in the live set — one
 minted before the program started, by the check-cache replay's `require` — that reached no
@@ -53,13 +53,15 @@ back-off it relied on was added after the stride and compounded with it.
 
 **Fix.** The root's wait (`ProgramExit::wait_with_heap`) wakes every 50 ms during a drain and
 reports, and rehomes, for its own heap (`report_root_wait_liveness`); the free is attempted at
-every collector entry; the report that completes a drain frees it (`free_if_last_to_ack`).
+every collector entry. A free from the report that completes a drain was tried too and taken
+out: with cold caches it freed a generation still in use under `BROOD_GC_STRESS` (CI's
+`gcstress`, 2026-11-23) — the collector's own entry is the safe point to free from.
 Not fixed: a process whose running code reaches the draining generation holds it until that code
 returns (`rehome_drain_pins` cannot rewrite a live arm) — `live-editing.md` Stage 5.
 
 **Guard.** `crates/lisp/tests/runtime_drain_completes.rs` — 36 000 redefinitions under a
-reloader and a parked peer must leave under 20 000 closures. Red with the root report and the
-completing free made no-ops (32 000 closures).
+reloader and a parked peer must leave under 20 000 closures. Red with the root report made a
+no-op (32 000 closures).
 
 ## KI-406 — a running `defserver` never ran redefined clauses, and `code-change` ran the old migration ✅ fixed 2026-11-20
 

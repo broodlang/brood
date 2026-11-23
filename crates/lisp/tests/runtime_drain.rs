@@ -71,9 +71,9 @@ fn parked_process_clean_of_the_draining_gen_does_not_block_it() {
     // worker would pin gen 0 forever; with it, the generation drains.
     let deadline = Instant::now() + Duration::from_secs(5);
     let drained = loop {
-        // Freed already counts: the report that completes a drain frees it at once
-        // (`free_if_last_to_ack`, KI-407), and a free requires every live process — the
-        // parked one included — to have acked.
+        // Freed already counts: the collector may free a completed drain at any entry
+        // (KI-407), and a free requires every live process — the parked one included — to
+        // have acked.
         if !interp.heap.drain_active() || process::old_gen_drained(&interp.heap) {
             break true;
         }
@@ -143,9 +143,9 @@ fn parked_process_whose_data_pins_the_drain_copies_it_out() {
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let drained = loop {
-        // Freed already counts: the report that completes a drain frees it at once
-        // (`free_if_last_to_ack`, KI-407), and a free requires every live process — the
-        // parked one included — to have acked.
+        // Freed already counts: the collector may free a completed drain at any entry
+        // (KI-407), and a free requires every live process — the parked one included — to
+        // have acked.
         if !interp.heap.drain_active() || process::old_gen_drained(&interp.heap) {
             break true;
         }
