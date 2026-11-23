@@ -174,20 +174,16 @@ pub(crate) fn internals_grant_key(mod_name: &str) -> value::Symbol {
     value::intern(&format!("/internals/{mod_name}"))
 }
 
-/// The import-table key under which `(:shadow name)` records that this file defines the root
-/// name `name` on purpose (ADR-423, ADR-735) — the same leading-`/` trick as
-/// [`internals_grant_key`].
-pub(crate) fn shadow_declared_key(name: &str) -> value::Symbol {
+/// The import-table key under which `(:use mod :only [name])` records that this file named the
+/// import `name` (ADR-784), so a bare `name` means the import even where the language ships a
+/// `name` too — the same leading-`/` trick as [`internals_grant_key`].
+pub(crate) fn named_import_key(name: &str) -> value::Symbol {
     value::intern(&format!("/shadow/{name}"))
 }
 
-/// A module definition of a bare name the language ships fails compilation unless the header
-/// declares it with `(:shadow name)` (ADR-735, extending ADR-423's macro warning to every
-/// root name and making it an error): inside the module its own definition wins, so every
-/// bare use there means something else, and that must be visible where a reader looks first.
-/// A bare `name` this module imports, where the language ships a `name` too (ADR-750): the
-/// import wins only when the header says so with `(:shadow name)`; otherwise the use fails
-/// compilation, naming both. Checked where the name is USED, as an import clash is
+/// A bare `name` this module imports, where the language ships a `name` too (ADR-750, ADR-784):
+/// the import wins only when the module named it in `:only`; otherwise the use fails
+/// compilation, naming both. (A module's own DEFINITION of such a name simply shadows it.) Checked where the name is USED, as an import clash is
 /// (ADR-235): a module that never writes the name bare has nothing to confuse.
 fn refuse_undeclared_import_shadow(
     heap: &Heap,
@@ -199,26 +195,11 @@ fn refuse_undeclared_import_shadow(
     if bare.starts_with('%')
         || !heap.is_root_name(name)
         || heap.is_private(name)
-        || heap.import_of(shadow_declared_key(bare)).is_some()
+        || heap.import_of(named_import_key(bare)).is_some()
     {
         return;
     }
     crate::eval::derive::record_undeclared_import_shadow(name, imported, value::intern(ns_name));
-}
-
-fn refuse_undeclared_shadow(heap: &Heap, ns_name: &str, name: value::Symbol) {
-    let bare = value::symbol_name_ref(name);
-    if bare.contains('/')
-        || bare.starts_with('%')
-        || !heap.is_root_name(name)
-        // a PRIVATE root name (a prelude `def-`) is unreachable outside the prelude, so a
-        // module spelling one shadows nothing a reader could have meant
-        || heap.is_private(name)
-        || heap.import_of(shadow_declared_key(bare)).is_some()
-    {
-        return;
-    }
-    crate::eval::derive::record_undeclared_shadow(name, value::intern(ns_name));
 }
 
 /// Enforce module privacy (ADR-146) over a resolved form: an error for any
@@ -1365,7 +1346,6 @@ fn resolve_def(
                 if let Some(target) = visible {
                     crate::eval::derive::record_dynamic_def(name, target, value::intern(ns_name));
                 }
-                refuse_undeclared_shadow(heap, ns_name, name);
                 heap.add_ns_known_name(name);
             }
             out.push(Value::symbol(qualify_name(ns_name, name)));

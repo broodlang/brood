@@ -45,8 +45,7 @@ an empty query returns the candidates unchanged. `top` is `filter` stopping at t
 rows a UI can actually show. Its options say what is being ranked: `:category :file` scores
 a path's file name above its directories, `:boost` maps a candidate to a number added to its
 score when it matches (frecency, history), and a candidate that IS the query ranks first.
-`fuzzy/*scorer*` replaces the rules."
-  (:shadow match))
+`fuzzy/*scorer*` replaces the rules.")
 
 ;; ---- the rules --------------------------------------------------------------
 

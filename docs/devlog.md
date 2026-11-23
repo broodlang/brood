@@ -2509,3 +2509,14 @@ The walk now visits each arm's body and its parameters' default expressions, nev
 itself (`caller_derived.rs` `fn_arm_parts` / `param_defaults`); two `caps.rs` tests pin both
 halves, the first red with the parameter list walked again. `editor/treesit/block-entry-holds?`,
 ADR-766's one-release deprecated alias, is removed and ledgered as a call shape.
+
+2026-11-23. **Shadowing like other languages, and a named fn (ADR-784, ADR-785).** A module's own
+definition of `drop`, `update` or `when` now shadows the language's with no header clause;
+`(:shadow …)` is deleted outright (greenfield: no compatibility shim), from std's 21 modules and
+the tests, and refused with a hint where a header still writes it. The import half of the old
+rule stays, since an import is not in sight: a bare use of an imported language name compiles
+once `:only` names it. `(fn name (params) body…)` rewrites to `letrec` in `macroexpand_all`, so
+no engine learns a new form. Guards: `root_name_shadow.rs` (renamed from
+`macro_shadow_warning.rs`), `import_shadow.rs`, `prelude_capture_test`, `modules_test`,
+`named_fn_test`. The writing-brood skill's trap 14 had told agents never to define a shipped name,
+which is why they renamed defensively; it now says the opposite.

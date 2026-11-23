@@ -13,8 +13,7 @@ terminal facts. Distinct from `system`, which is the Brood RUNTIME itself (`syst
 The two boundaries this module used to get wrong, both fixed 2026-08-27: `os/env` was
 literally `(os/env name)` — one function, two names, two modules — and the CHILD-PROCESS
 functions lived in `proc`, whose other half is green-process introspection, so `os/spawn`
-started an operating-system process while the bare `spawn` special form started a green one."
-  (:shadow spawn))
+started an operating-system process while the bare `spawn` special form started a green one.")
 
 (defn hostname ()
   "This machine's short hostname (no domain). Used to qualify a node name as name@host.

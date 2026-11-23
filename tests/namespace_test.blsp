@@ -209,7 +209,7 @@
 ;;; original — `/map` is prelude's `map` even where the module defined its own.
 (describe "namespaces: the /name root escape"
   :isolated (test "a module shadowing a prelude name reaches the original via /name"
-    (%load-string (str "(defmodule nsroot1 (:shadow map))"
+    (%load-string (str "(defmodule nsroot1)"
                     " (defn map (x) (list :mine x))" " (defn mine (x) (map x))"
                     " (defn orig () (/map (list 1 2 3) (fn (x) (* x x))))"))
     ;; the module's own `map` wins for a bare reference…
@@ -403,11 +403,11 @@
 ;; foreign private name still refused.
 (describe "namespaces: reflect/eval of a bare symbol"
   (test "a bare name evaluated inside a module is the module's own definition"
-    (%load-string "(defmodule nsEvA (:shadow count)) (defn count (x) :mine) (def got ((reflect/eval 'count) [1 2]))")
+    (%load-string "(defmodule nsEvA) (defn count (x) :mine) (def got ((reflect/eval 'count) [1 2]))")
     (is (= nsEvA/got :mine)))
 
   (test "the root escape reaches the root binding a module shadows"
-    (%load-string "(defmodule nsEvB (:shadow count)) (defn count (x) :mine) (def got ((reflect/eval '/count) [1 2]))")
+    (%load-string "(defmodule nsEvB) (defn count (x) :mine) (def got ((reflect/eval '/count) [1 2]))")
     (is (= nsEvB/got 2)))
 
   (test "a qualified name evaluated at root is that global"

@@ -44,8 +44,7 @@ plus any surplus already read past it. Both take an options map bounding an
 untrusted peer — `:timeout-ms` (idle), `:max-bytes`, and `:deadline-ms` (total) —
 so a server can answer 408 / 413 instead of holding a process open, accumulating
 without limit, or being drip-fed indefinitely. Policy is Brood; only the syscalls
-are Rust."
-  (:shadow send))
+are Rust.")
 
 ;; ---- raw socket primitives ----------------------------------------------
 ;; Thin Brood wrappers over the kernel's `%tcp-*` syscalls, so callers use

@@ -38,8 +38,7 @@ The low-level primitives (`string/substring` `string/split`
 `string/upper` `string/lower` …) are Rust builtins; the rest is pure Brood over them.
 Bare-in-the-prelude by contrast: the generic collection ops (`map`/`filter`/`count`/
 `contains?`/`includes?`/`index-of`). The scalar bridges that reinterpret a string as
-another type live here too, module-rooted: `string/->number`, `string/->symbol`."
-  (:shadow fields))
+another type live here too, module-rooted: `string/->number`, `string/->symbol`.")
 
 ;; ---- case -------------------------------------------------------------------
 

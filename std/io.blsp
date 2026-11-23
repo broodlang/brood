@@ -43,8 +43,7 @@ do not reach a `spawn`ed child — a child starts from the default `*out*`; pass
 a port explicitly if it should redirect too.)
 
 Your own port type is a `defrecord` plus an `impl Port` for it — `io/write`,
-`with-out`, and every logger backend then accept it with no change here."
-  (:shadow inspect))
+`with-out`, and every logger backend then accept it with no change here.")
 
 ;; ---- the Port ability -------------------------------------------------------
 

@@ -27,8 +27,7 @@
 and the questions every tool asks of it: where the checkout's top is ([[locate]]), which
 files are the project's ([[files]]), which this work changed ([[changed]]), what a file said
 before it was edited ([[base-text]]), and what the tree is at ([[id]])."
-  (:use registry)
-  (:shadow fields)) ; the backend table: a row per VCS, keyed by its kind
+  (:use registry)) ; the backend table: a row per VCS, keyed by its kind
 
 ;; --- running a VCS's command line ----------------------------------------------------------
 

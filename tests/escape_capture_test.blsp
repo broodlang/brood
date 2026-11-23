@@ -98,7 +98,7 @@
 
   (test "string/interp under a local or module `str`"
     (assert= (let (str "S") (string/interp "a={str}")) "a=S")
-    (assert= (%load-string "(defmodule capture-interp (:shadow str)) (defn str (& xs) :CAPTURED) (string/interp \"a={1}\")")
+    (assert= (%load-string "(defmodule capture-interp) (defn str (& xs) :CAPTURED) (string/interp \"a={1}\")")
       "a=1"))
 
   (test "a method parameter named `empty?` keeps next-impl's arguments"
@@ -116,7 +116,7 @@
   (test "a module defining `list` does not capture a sealed ability's members"
     (assert=
       (%load-string
-        "(defmodule capture-sealed (:shadow list))
+        "(defmodule capture-sealed)
          (defn list (& xs) :CAPTURED)
          (defrecord cap-circle (r))
          (defrecord cap-rect (w h))
@@ -127,7 +127,7 @@
   (test "the fold rewrites under a module's own nth, failure?, type-of or ="
     (assert=
       (%load-string
-        "(defmodule capture-fold (:shadow nth failure? type-of =))
+        "(defmodule capture-fold)
          (defn nth (c i) 1)
          (defn failure? (x) true)
          (defn type-of (x) :other)
@@ -139,7 +139,7 @@
   (test "a module defining its own `match` keeps its pattern fns and destructuring lets"
     (assert=
       (%load-string
-        "(defmodule capture-match (:shadow match))
+        "(defmodule capture-match)
          (defmacro match (& xs) :CAPTURED)
          [((fn ([a b]) (+ a b)) [1 2]) (let ((c d) (list 3 4)) (+ c d))]")
       [3 7]))

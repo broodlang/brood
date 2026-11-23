@@ -6,6 +6,16 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Changed: a module's own definition shadows a name the language ships, with no declaration
+(ADR-784).** `(defn drop …)` in a module just works: bare `drop` there is yours, `/drop` the
+language's. The `(:shadow …)` header clause is gone (a header that writes one is refused, saying
+why). An imported name the language also ships is used bare once it is named:
+`(:use version :only [compare])`.
+
+**Added: named `fn` (ADR-785).** `(fn name (params) body…)` calls itself by `name`:
+`((fn fact (n) (if (= n 0) 1 (* n (fact (dec n))))) 5)` is 120. A local loop no longer needs
+`letrec`.
+
 **Removed: `editor/treesit/block-entry-holds?`** (deprecated in v0.57, ADR-766). Ask
 `indent-entry-holds?` with the chain: `(indent-entry-holds? entries [parent node] 1)`.
 

@@ -330,7 +330,6 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
         UseExcept(Symbol, Vec<Symbol>, Option<Pos>), // (:use mod :exclude [names]) — all public minus names
         Alias(Symbol, Symbol, Option<Pos>),          // (short-prefix-name, module)
         UseInternals(Symbol),                        // (:use-internals mod) — ADR-146 grant
-        Shadow(Symbol), // (:shadow name …) — a declared root-name shadow, ADR-423/735
     }
     let mut clauses: Vec<Clause> = Vec::new();
     {
@@ -426,12 +425,6 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                     ));
                 } else {
                     clauses.push(Clause::Use(mod_sym, None, heap.form_pos_only(*clause)));
-                }
-            } else if value::symbol_is(*kw_sym, "shadow") {
-                for name in citems.iter().skip(1) {
-                    if let Value::Sym(name) = *name {
-                        clauses.push(Clause::Shadow(name));
-                    }
                 }
             } else if value::symbol_is(*kw_sym, "alias") {
                 let Some(&Value::Sym(mod_sym)) = citems.get(1) else {
@@ -533,6 +526,14 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                                 ));
                             }
                             heap.add_import_lazy(bare, qual);
+                            // Named in `:only`, as the runtime `%refer` records it (ADR-784): a
+                            // bare use means the import even where the language ships the name.
+                            if heap.is_root_name(bare) {
+                                heap.add_import(
+                                    crate::eval::macros::named_import_key(&bare_name),
+                                    bare,
+                                );
+                            }
                         }
                     }
                     None => {
@@ -560,12 +561,6 @@ pub(super) fn setup_check_imports(heap: &mut Heap, header: Value) -> ImportScope
                 let mod_sym = heap.root_module_name(mod_sym); // ADR-070, as in Clause::Use
                 let key = crate::eval::macros::internals_grant_key(&value::symbol_name(mod_sym));
                 heap.add_import(key, mod_sym);
-            }
-            Clause::Shadow(name) => {
-                // What the runtime clause's `%declare-shadow` records, so checking the module
-                // compiles it as loading does — without the shadow warning it declared away.
-                let key = crate::eval::macros::shadow_declared_key(&value::symbol_name(name));
-                heap.add_import(key, name);
             }
             Clause::Alias(short, mod_sym, pos) => {
                 // Root the alias TARGET (ADR-070) so `short/name` resolves to `pkg/mod/name`;

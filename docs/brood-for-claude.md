@@ -17,7 +17,8 @@ A small, dynamic Lisp implemented in Rust.
   list *comprehension* that returns a value). Iterate with recursion — proper
   tail calls are guaranteed (including calls to *other* functions), so it's O(1)
   stack — or the combinators `fold` / `reduce` / `map` / `seq/filter`. A *local*,
-  self-contained loop is a `letrec`-bound closure called by name.
+  self-contained loop is a named `fn` (`(fn go (n acc) … (go …))`, ADR-785) or a `letrec`-bound
+  closure, called by name.
 - **Truthy / falsy**: only `nil` and `false` are falsy. `0`, `""`, `[]`, `{}`,
   `#{}` are *truthy*. **The one trap: an empty *list* is falsy**, because `()` ≡
   `nil` — so `(if [] …)`/`(if "" …)`/`(if {} …)` take the `then` branch but
@@ -212,15 +213,14 @@ name is the thing readers look up later. Confining the rule there preserves
 the ergonomic `(map … (fn ([k v]) …))` idiom, which reads locally and never
 gets looked up by name.
 
-**Reserved names: you cannot redefine what Brood ships.** `(def get …)`,
-`(defn map …)`, `(defmacro when …)`, `(def set/union …)` are all errors (ADR-166) —
-the prelude, the builtins and the embedded std modules are reserved. Your own globals
-and your packages stay fully redefinable, which is what hot reload is for. If a name
-you want is taken: pick another, shadow it locally (`(let (get …) …)` is fine), or
-define it in a `(defmodule your/mod …)` — that makes `your/mod/get`, which is yours.
-Inside that module your definition wins every bare call, even over a prelude **macro**
-(`(defn when …)` → `(when x)` calls yours; `/when` reaches the macro). Defining a prelude
-macro's name warns at load unless the header says `(:shadow when)` (ADR-423).
+**Shadowing a name Brood ships is fine inside a module.** In a `(defmodule your/mod …)`,
+`(defn drop …)`, `(defn update …)` or `(defn when …)` just works, with no declaration (ADR-784):
+it makes `your/mod/drop`, every bare `drop` in that module calls yours, even over a prelude
+**macro** (`(defn when …)` → `(when x)` calls yours), and `/drop` reaches the language's. A local
+binding shadows too (`(let (get …) …)`). Do not rename a function just because its natural name
+is taken. What stays reserved (ADR-166) is redefining the language's OWN binding: a top-level
+`(def get …)` in a file with no `defmodule`, or `(def set/union …)`, is an error. Your own
+globals and packages stay fully redefinable, which is what hot reload is for.
 The rule reserves shipped **functions**; a dynamic variable is never reserved whatever it
 holds. Inside a module, set a root one with the `/name` root escape —
 `(def /*print-length* 3)`, `(def /*out* my-port)` redirects output permanently; a bare
@@ -500,11 +500,12 @@ x                bind x; a repeated x is an equality constraint (non-linear)
     (sum-to (- n 1) (+ acc n))))         ; tail-recursive: O(1) stack
 ```
 
-For a *self-contained* loop, use a `letrec`-bound closure called by name — it stays
-inline instead of forcing a top-level helper, and threads only the *changing* state
-(it closes over the rest):
+For a *self-contained* loop, use a named `fn` (ADR-785) or a `letrec`-bound closure, called by
+name — it stays inline instead of forcing a top-level helper, and threads only the *changing*
+state (it closes over the rest):
 
 ```lisp
+((fn go (n acc) (if (= n 0) acc (go (- n 1) (+ acc n)))) 100000 0)   ;=> 5000050000
 (letrec (go (fn (n acc)
               (if (= n 0) acc (go (- n 1) (+ acc n)))))
   (go 100000 0))                                   ;=> 5000050000   ; O(1) stack
@@ -1430,7 +1431,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   (ADR-227 follow-up), for any module, so naming where something comes from loads
   it on demand (`mod/foo`). No bare-name magic, though — a bare `sqrt` with no
   `math/` prefix and no `(:use math)` stays unbound. The header understands exactly `(:use …)`,
-  `(:use-internals …)`, `(:alias …)`, `(:shadow …)`, `(:check-allow …)` and `(:load a b …)`
+  `(:use-internals …)`, `(:alias …)`, `(:check-allow …)` and `(:load a b …)`
   (load now, refer nothing — the eager request, since a plain reference loads on first
   use, ADR-335); **anything else is an error** —
   `(:require …)` and a misspelled `(:use-internal …)` are rejected rather than

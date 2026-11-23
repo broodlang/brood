@@ -468,7 +468,7 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
   root home vs. a prefix is a per-name call.
 - **`defmodule` *is* the namespace form** (inc-3 dropped `ns`). It takes name +
   optional docstring and understands exactly six header clauses — `(:use …)` (with
-  `:only`/`:exclude`), `(:use-internals …)`, `(:alias … :as …)`, `(:load …)`, `(:shadow …)`
+  `:only`/`:exclude`), `(:use-internals …)`, `(:alias … :as …)`, `(:load …)`
   and `(:check-allow …)` — anything else is a hard error. (The migration-era `:export` clause was never built;
   visibility is def-site privacy, `defn-`/`def-`, ADR-146.) `provide`/`require`/
   `*load-path*`/`*features*` are the loader underneath — not replaced.

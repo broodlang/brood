@@ -760,6 +760,23 @@ fn macroexpand_all_depth_step_inner(
                 // Typed parameters (ADR-420): `(def NAME (fn (x:int -> int) …))` — what
                 // `defn` expands to — becomes the plain definition plus its declaration,
                 // before anything below sees the parameter list.
+                // A NAMED fn (ADR-785): `(fn name (params) body…)` is a function that can call
+                // itself by `name` — `(letrec (name (fn (params) body…)) name)`. A symbol where
+                // the parameter list goes was an error before, so nothing else is read so.
+                if value::symbol_is(s, kw::FN)
+                    && items.len() >= 3
+                    && let Some(ValueRef::Sym(name)) = items.get(1).map(|v| v.unpack())
+                    && !value::symbol_name_ref(name).starts_with('&')
+                {
+                    let mut anonymous = vec![value::sym(kw::FN)];
+                    anonymous.extend_from_slice(&items[2..]);
+                    let anonymous = heap.list(anonymous);
+                    let binding = heap.list(vec![items[1], anonymous]);
+                    let rewritten = heap.list(vec![value::sym(kw::LETREC), binding, items[1]]);
+                    heap.copy_form_pos(original, rewritten);
+                    heap.copy_form_pos(original, anonymous);
+                    return macroexpand_all_depth(heap, rewritten, env, depth + 1);
+                }
                 if value::symbol_is(s, kw::DEF) {
                     refuse_typed_def_name(heap, &items)?;
                 }

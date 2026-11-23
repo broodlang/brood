@@ -90,7 +90,7 @@
   :serial (test "the fold rewrites leave a call to a module's own fold alone"
     (assert=
       (%load-string
-        "(defmodule ew-own-fold (:shadow fold))
+        "(defmodule ew-own-fold)
          (defn fold (c init f) :MINE)
          (fold (range 5) 0 (fn (acc x) (+ acc x)))")
       :MINE)))

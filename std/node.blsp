@@ -6,8 +6,7 @@
   "Distributed nodes: start a node, connect to a peer, spawn a process on one, and monitor
   for `[:nodedown …]`. A pid is location-transparent, so `send` reaches a process on another
   machine unchanged."
-  (:use file)
-  (:shadow spawn list monitor demonitor))
+  (:use file))
 
 ;; ---- node info + link ops: thin wrappers over the kernel primitives ---------
 ;; These shadow no kernel call in this file. Note `name` shadows the kernel

@@ -1093,6 +1093,7 @@ highlighter-facing list that also names the core macros.)
 | `(do body...)` | Evaluate forms in order; result is the last. |
 | `(def name value)` | Define/redefine `name` in the **global** environment — redefinable, the language's only mutation. |
 | `(fn (params) body...)` | A lexical closure. `fn` is the only spelling — the `lambda` alias was retired (ADR-162), so `(lambda …)` is an unbound symbol whose error hints at `fn`. |
+| `(fn name (params) body...)` | A **named** closure that can call itself by `name` (ADR-785): `((fn fact (n) (if (= n 0) 1 (* n (fact (dec n))))) 5)` is 120. The name is bound inside the body only; it is `(letrec (name (fn (params) body...)) name)`. |
 | `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). Brood's `let` is already sequential, so there is no separate `let*`. |
 | `(letrec (f (fn ...) g (fn ...)) body...)` | Local **mutually recursive** bindings — every name is visible in every RHS (and to itself). Plain-symbol targets only; meant for fn definitions. |
 | `` (quasiquote tmpl) `` / `` `tmpl `` | Template: literal except `~x` inserts a value and `~@xs` splices a sequence. |
@@ -1489,11 +1490,12 @@ section re-matches the shapes that did not. Brood has a failure kind, so both ar
 always a failure, and `if`/`match`/`failure?` handle it at the call site.
 
 **Local loops** — there is **no `loop`/`recur`**; Brood has proper tail calls, so a
-self-contained loop is a `letrec`-bound closure you call by name (it closes over the
-enclosing scope, so you thread only the *changing* state, and the tail call is O(1)
+self-contained loop is a named `fn` you call by its name, or a `letrec`-bound closure (it closes
+over the enclosing scope, so you thread only the *changing* state, and the tail call is O(1)
 stack):
 
 ```clojure
+((fn go (n acc) (if (= n 0) acc (go (- n 1) (+ acc n)))) 100000 0)   ;=> 5000050000
 (letrec (go (fn (n acc) (if (= n 0) acc (go (- n 1) (+ acc n)))))
   (go 100000 0))                                ;=> 5000050000   ; O(1) stack
 ```
@@ -4171,14 +4173,11 @@ unchanged.
 (def text/insert (fn …))         ; advice / hot reload works
 ```
 
-**A module may own a root name — function or macro — and declares it in its header**
-(ADR-423, ADR-735). `(defmodule m (:shadow get when-let))` then `(defn get …)` makes every bare
-`(get …)` in `m` call the module's own, and every `(when-let …)` call its function in place of
-the prelude's macro; `/get` and `/when-let` still reach the root ones. **Without the
-declaration the definition fails compilation**, naming the header clause to add: inside the
-module a bare `get` means something other than the language's `get`, and the header is where a
-reader looks first. Modules owning `get`, `map` or `count` stays the designed style (ADR-236) —
-`std/sorted`, `std/table` and `std/stream` all do, and each says so.
+**A module's own definition shadows a root name — function or macro — with no declaration**
+(ADR-784). `(defn get …)` in module `m` makes every bare `(get …)` in `m` call the module's own,
+and a `(defn when-let …)` makes every `(when-let …)` call its function in place of the prelude's
+macro; `/get` and `/when-let` still reach the root ones. Modules owning `get`, `map` or `count`
+are the designed style (ADR-236): `std/sorted`, `std/table` and `std/stream` all do.
 
 The same rule cannot let a module capture a *macro's* expansion. When a macro is defined,
 every call head in its quasiquote templates that names a root binding is written `/name`
@@ -4203,10 +4202,11 @@ Import other namespaces' names with `(:use …)` clauses in the header. `(:use m
 refers all of `mod`'s public names bare; `(:use mod :only [a b])` refers just
 those. A bare reference resolves **current namespace → imports → root**, so an
 own-namespace definition shadows an import. **An import spelled like a name the language
-ships is held to the same header rule** (ADR-750): `(:use version)` brings in
+ships is used bare only once it is named** (ADR-750, ADR-784): `(:use version)` brings in
 `version/compare`, and a bare `(compare …)` in the importer fails compilation, naming both
-meanings, until the header says `(:shadow compare)`; then the import wins and `/compare` is the
-language's. An importer that never writes the name bare needs nothing, and
+meanings, until the import is named: `(:use version :only [compare])` (beside the refer-all
+`(:use version)` when the rest is wanted too); then the import wins and `/compare` is the
+language's. Unlike a definition, an import is not in sight in the file. An importer that never writes the name bare needs nothing, and
 `(:use version :exclude [compare])` keeps the language's. `:use` auto-loads the module (it never
 *fetches* a package — declared deps only). There is **no `require` form** — you load
 a module by *referencing* it: a `(:use mod)` clause loads `mod` and refers its names
@@ -4225,8 +4225,8 @@ first use; a broken or absent module errors at first use (the checker still repo
 statically). A file that needs a module loaded *before* its first call says so with
 `(:use mod)` or `(:alias mod)`, which load at the referencing file's load as they always have.
 There is **no bare-name magic**: a bare
-`sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. The header understands exactly six clauses — `(:use …)`,
-`(:use-internals …)`, `(:alias …)`, `(:shadow …)`, `(:check-allow …)` (see
+`sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. The header understands exactly five clauses — `(:use …)`,
+`(:use-internals …)`, `(:alias …)`, `(:check-allow …)` (see
 [Type annotations](#type-annotations)) and `(:load a b …)`, which loads modules at this file's load
 and refers nothing: the explicit eager request for code that must have a module BEFORE its first
 call reaches it (ADR-335 — the test runner declares its whole dependency closure this way, since

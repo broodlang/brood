@@ -5,7 +5,7 @@
 ;;
 ;; The deliberate design choice these pin: comparison reads a MISSING segment as 0, so
 ;; `">= 1.2"` means 1.2.0 — what a human writing a short constraint means by it.
-(defmodule version-test (:use test) (:use version) (:shadow compare satisfies?))
+(defmodule version-test (:use test) (:use version) (:use version :only [compare satisfies?]))
 
 (describe "core / valid?"
   (test "the numeric core, ignoring any prerelease or build suffix"

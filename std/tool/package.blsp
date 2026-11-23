@@ -17,8 +17,7 @@ transitively-closed lock file and puts each dep's source on *load-path*."
   (:use project)
   ;; `project-cache-dir` is module-private (ADR-146); the manifest lock lives there
   ;; (beside the project's other derived state) rather than in the project tree.
-  (:use-internals project)
-  (:shadow update))
+  (:use-internals project))
 
 ; tree hashing over hash/sha256 + hash/sha256-bytes
 ; version-range predicates + the backtracking version resolver (ADR-209)

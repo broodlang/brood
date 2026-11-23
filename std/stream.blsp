@@ -29,8 +29,7 @@ transformers, and terminals — each transformer adds one green process.
   ;; Lazy integer processing:
   (->list
     (take (map (range 1 100) (fn (n) (* n n))) 5))
-  ;; => [1 4 9 16 25]"
-  (:shadow range map take drop append fold each count))
+  ;; => [1 4 9 16 25]")
 
 ;; ---- protocol helpers -------------------------------------------------------
 

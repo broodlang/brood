@@ -42,7 +42,7 @@
       (assert= [:a :b :c] (table/get t :order))))
 
   (test "a module that defines its own `vector` still calls it"
-    (%load-string "(defmodule vci-own (:shadow vector)) (def vector (fn (& xs) :own)) (defn mk (a b) (vector a b))")
+    (%load-string "(defmodule vci-own) (def vector (fn (& xs) :own)) (defn mk (a b) (vector a b))")
     (assert= :own (reflect/eval-string "(vci-own/mk 1 2)")))
 
   (test "an arm whose only vector is built by `vector` is native (was: call-mediated, bailed)"
