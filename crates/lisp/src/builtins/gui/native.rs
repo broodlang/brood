@@ -1798,6 +1798,7 @@ fn lights_spec(
 /// `:color` (linear, 0 or more; white by default) is a point or spot light's light 1 m away.
 /// `:range` (above 0) windows its falloff to nothing there. `:shadow` is `true`, `false` or a
 /// map of `:resolution` (texels, 16 … 4096), `:bias` and `:normal-bias` (texels, 0 or more),
+/// `:softness` (metres, 0 or more: the radius its edge is filtered over at the receiver),
 /// for a directional light `:extent` (metres, above 0) and `:center [x y z]`, for a spot or
 /// point light `:near` (metres, above 0).
 fn light_spec(
@@ -1956,9 +1957,19 @@ fn light_spec(
                                     shadow.center = Some(triple("center", setting)?)
                                 }
                                 ("near", false) => shadow.near = positive("near", setting)?,
+                                ("softness", _) => {
+                                    shadow.softness = number(setting)
+                                        .filter(|amount| *amount >= 0.0 && amount.is_finite())
+                                        .ok_or_else(|| {
+                                            format!(
+                                                ":shadow :softness is 0 or more metres, not {}",
+                                                shown(setting)
+                                            )
+                                        })?
+                                }
                                 _ => {
                                     return Err(format!(
-                                        "{name}'s :shadow has no {}; it takes :resolution :bias :normal-bias {}",
+                                        "{name}'s :shadow has no {}; it takes :resolution :bias :normal-bias :softness {}",
                                         shown(option),
                                         if directional {
                                             ":extent :center"

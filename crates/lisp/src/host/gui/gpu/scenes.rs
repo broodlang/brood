@@ -1072,7 +1072,9 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan) -> Vec<u32> {
                     &[position[0], position[1], position[2], light.range],
                 );
                 floats(&mut words, &[direction[0], direction[1], direction[2], 0.0]);
-                floats(&mut words, &[color[0], color[1], color[2], 0.0]);
+                // the shadow's softness rides in the colour's spare fourth
+                let softness = light.shadow.as_ref().map_or(0.0, |shadow| shadow.softness);
+                floats(&mut words, &[color[0], color[1], color[2], softness]);
                 let (bias, normal_bias) = light
                     .shadow
                     .as_ref()

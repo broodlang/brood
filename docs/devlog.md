@@ -2639,6 +2639,21 @@ form-tool block of `tests/mcp_test.blsp` (sabotaged: the edit guard disabled tur
 `embedded_paths_tracked`, `doc_refs`, `error_format_parity`, the reader unit tests and the
 touched test files one by one; the suites are CI's (desktop rule).
 
+2026-11-24 (ADR-788 follow-up). **Soft shadows: `:shadow {:softness metres}`.** A shadow's edge
+was a 3×3 PCF of bilinear taps, a texel or two wide, so hair cards and a figure's own forms
+cast hard, stair-stepped edges (womanblend: under the breasts, on the forearm, strands on the
+chest). `:softness` is the radius, in metres at the receiver, over which the edge is filtered:
+16 bilinear taps of a Poisson disc, turned per point by a hash of where it is (`soft_turn`, the
+same on both painters) so the edge reads as grain, not rings; the reach in texels is the
+softness over the texel's size there, held to 1 … 24. The receiver is also moved toward the
+light by the softness times its slope to the light (held at 2), since taps that far out read the
+surface deeper. Default 0 keeps the tight filter. The disc's classic points lie out to 1.234; it
+is scaled by 0.81 into the unit circle, without which the outer taps outran the slope bias and a
+lit floor shadowed itself by 4% (found by the acne check). The GPU target packs the softness into
+the light colour's spare fourth. Guards: `a_soft_shadow_grades_its_edge_and_keeps_its_middle_dark_without_acne`
+(CPU) and `a_soft_shadow_draws_on_the_gpu_as_on_the_cpu` (both adapters here, within 11 of 255).
+Run here: fmt, clippy, the 268 `gui` unit tests; suites are CI's.
+
 2026-11-24. **Matrix math stays on the fast path: the straight-line vector hoist (ADR-790).**
 A 3D kernel benchmark (mat4 multiply, point transform, projection, a 1 000-point frame) found
 `mat4-mul` making 100 runtime calls a product: the JIT's vector-base hoist served only loops

@@ -986,7 +986,7 @@ code paints to a terminal or a GUI window unchanged.
   attribute bytes) drawn into a pixel rect with a camera matrix, up to 8 lights — directional
   `{:direction}`, point `{:position :range}` (`:color` is the light 1 m away, inverse-square
   falloff), spot `{:position :direction :range :cone [inner outer]}` — and `:shadow true` (or
-  `{:resolution :bias :normal-bias …}`) on up to 4 of them for PCF shadow maps (ADR-788), the
+  `{:resolution :bias :normal-bias :softness …}`, `:softness` a soft edge's radius in metres) on up to 4 of them for PCF shadow maps (ADR-788), the
   skeletons' joint palettes and a fixed material model (`:skin`, `:standard`, `:cutout`,
   `:blend`, `:cast-shadow`), composited in op order — 2D before it is behind, after it in
   front (ADR-786). A malformed light raises from `gui/draw`. Both window painters draw it;
