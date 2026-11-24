@@ -4035,13 +4035,38 @@ iolist in memory.
   `:spawned − :exited` is the live-process figure, `:preempts` counts
   reduction-budget quantum exhaustions, `:steals`/`:migrations` count
   work-stealing activity.
-- `(dev/profile-start [hz])` / `(dev/profile-stop)` — the **sampling CPU profiler**:
-  arm at `hz` samples/sec (default 99), run the workload, and `dev/profile-stop`
-  returns a histogram — a list of `{:stack (fn-names… innermost-first)
-  :count n}` maps, most-sampled first. Sampling walks each process's reified
-  call stack at its next VM frame boundary after every tick: no signals, and
-  near-zero cost when off. (A JIT-resident loop is attributed when it yields
-  at its reduction-budget preempt; the legacy tree-walker isn't sampled.)
+- **The sampling CPU profiler** (ADR-789) answers *which functions the time went to*, by
+  qualified name, with nothing changed in the program. `(:use profile)` is the policy;
+  `dev/profile-start` / `dev/profile-stop` are the raw mechanism beneath it.
+  - `(profile/run thunk [opts])` runs `(thunk)` under the profiler and returns its
+    **profile**, the thunk's value under `:result`. It samples the calling process unless
+    `:pid` names another (`:all` for every process); `:hz` sets the rate (default 997,
+    at most 10000).
+  - `(profile/start [opts])` returns a session; `(profile/stop session)` its profile. Use the
+    pair around a region that is not one call: a few seconds of a running game loop.
+    `(profile/sample ms [opts])` profiles whatever runs in the next `ms` (from a REPL, or a
+    process the program spawned, `:pid` naming the one to watch).
+  - A profile is `{:hz :wall-ms :ticks :cpu-ms :stacks}`, `:stacks` a list of
+    `{:stack (names… innermost first) :count ticks}`. A tick is 1/hz s of one process's
+    running time.
+  - `(profile/report profile [{:top n}])` is the text to read: a summary line, then the
+    top functions by **self** time (the function itself and the builtins it called) and by
+    **total** time (with everything it called; a recursive function counts once a stack).
+    `(profile/functions profile)` is the same as data, most total first, and
+    `(profile/folded profile)` the folded stacks flamegraph.pl, inferno and speedscope read.
+    `nest profile FILE` prints the report and writes the folded file.
+  - **What a sample is.** Each tick, a running process records its whole call stack at its
+    next frame boundary (or, in native code, at its next reduction poll — every 128 back
+    edges or calls): interpreted frames, native (JIT) activations, and the frames of the
+    drivers around a builtin that called back into Brood. It is charged the ticks since
+    its last sample, so a long builtin is charged to its caller in full. Time a process
+    spends waiting — in `receive`, or queued behind others — is not charged. An anonymous
+    `fn` names nothing; its time goes to the nearest named function around it. The
+    legacy tree-walker (`BROOD_TIER=0`) is not sampled.
+  - **Cost.** Off: one relaxed load per frame boundary and per native reduction poll, a
+    thread-local count per driver entry, one store per native call. On: a stack walk and a
+    mutex insert per sample, a few microseconds, so well under 1% of a process at 997 Hz
+    (an estimate from the code path; not yet measured on the benchmark machine).
 - `(proc/system-monitor [pid opts])` — the **runtime event stream**: the kernel
   pushes selected runtime events to subscriber processes as ordinary
   `[:system kind subject-pid detail]` mailbox messages — `:gc` (a collection

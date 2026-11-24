@@ -28,6 +28,17 @@ into `.claude/settings.json`, keeping what is there; a second run changes nothin
 **Changed: `nest test --watch` waits on the OS.** It watches each directory holding a source or
 test file (`file/watch`, ADR-782) and reruns when a save is reported, instead of reading every
 file's mtime five times a second; a slow look every 5 s is the backstop.
+**Added: the profiler attributes time to Brood functions (ADR-789).** `(profile/run thunk)` runs a
+thunk under the sampling profiler and returns its profile; `(profile/report profile)` prints the
+top functions by self and by total time, `(profile/functions profile)` gives the same as data and
+`(profile/folded profile)` folded stacks for flamegraph.pl, inferno and speedscope.
+`(profile/start)` … `(profile/stop session)` profile any region, and `(profile/sample ms {:pid
+pid})` a running program from outside it. `nest profile FILE` now prints the report too. The
+samples themselves are fixed: a stack now holds every frame around the running code — native
+(JIT) callers, and the frames outside a builtin that called back into Brood — and a sample is
+worth the ticks since the process's last one, where code reached through a nested driver used to
+be sampled once per call. **Breaking:** `dev/profile->folded` is `profile/folded`, which takes a
+profile (`{:stacks histogram}` for a bare `dev/profile-stop` result).
 
 **Added: signed-distance scenes evaluated natively (ADR-787).** The `sdf` module takes a model of
 shapes and joins LOWERED to flat records (`sdf/record`, `sdf/material`, `sdf/field`), checks it

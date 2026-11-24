@@ -1319,6 +1319,10 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   probing names one at a time.
 - **timing**: `os/now` (ms since epoch) `os/now-ns` (ns since epoch) `dev/bench`
   (macro: `(dev/bench "label" expr)` prints `label: N ms`, returns `expr`)
+- **which function is slow**: `(io/puts (profile/report (profile/run (fn () work))))` — the
+  sampling profiler: top functions by self and total time, by qualified name, nothing in the
+  program changed (don't hand-wrap functions in timers); `profile/start`/`profile/stop` around
+  part of a running loop, `nest profile FILE` for a whole program
 - **I/O**: `io/write` `io/puts` `io/inspect` `file/slurp` `file/spit` `reflect/load` `reflect/eval-string`
   `reflect/read-string`. `io/puts` is the everyday one (newline); `io/write` omits it and
   `io/inspect` prints the re-readable form. Each takes an optional trailing `:to <port>`
