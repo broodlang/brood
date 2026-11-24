@@ -1,4 +1,4 @@
-;;; Guards for the JIT's two straight-line caches (ADR-789): a slot read as a number is kept
+;;; Guards for the JIT's two straight-line caches (ADR-790): a slot read as a number is kept
 ;;; for the rest of its run (`Frame::slot_num_cache`), and a vector slot read element by
 ;;; element decodes its storage once (`Frame::slot_vec_cache`). Both are what make a
 ;;; destructured 4x4 matrix product fast, and both are only sound if they keep the VM's

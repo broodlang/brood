@@ -296,8 +296,7 @@ pub(crate) fn vector_reads_reused(code: &[Inst], is_leader: &[bool]) -> Vec<bool
         let Some(slot) = read_slot(inst) else {
             continue;
         };
-        for later in code.iter().enumerate().skip(start + 1) {
-            let (ip, next) = later;
+        for (ip, next) in code.iter().enumerate().skip(start + 1) {
             if is_leader[ip] || !keeps_vector_storage(next) {
                 break;
             }

@@ -2573,7 +2573,7 @@ unit tests (`host::gui::mesh`, `gui_scene_light_tests`, `the_mesh_shader_validat
 guard sabotaged; the suites are CI's (desktop rule).
 
 2026-11-24. **Float-heavy code: a JIT run keeps what it has read; long float vectors cross
-processes packed (ADR-789).** b3d's `mat4-multiply` (two destructured 16-vectors, 112 ops, a
+processes packed (ADR-790).** b3d's `mat4-multiply` (two destructured 16-vectors, 112 ops, a
 fresh vector) cost ~680 ns native. Profiled, it was not boxing: ~185 ns was the destructure —
 each of sixteen `(nth a k)` re-checked tag, region and storage and called for the slab base —
 and ~270 ns re-reading and re-tag-testing each destructured element at each of its four uses.

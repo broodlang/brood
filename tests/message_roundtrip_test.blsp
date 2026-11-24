@@ -67,7 +67,7 @@
     (is (check-rt 20260717 300))))
 
 ;; A vector of sixteen or more floats crosses as one packed buffer of doubles
-;; (`Message::FloatVector`, ADR-789) instead of a message per element. It must arrive as
+;; (`Message::FloatVector`, ADR-790) instead of a message per element. It must arrive as
 ;; the same vector of floats — never ints, never a list — whichever route it takes: a send,
 ;; a captured local in a spawned closure, nested in a map, as a table key and value, and
 ;; next to the shorter or mixed vectors that do not pack.
