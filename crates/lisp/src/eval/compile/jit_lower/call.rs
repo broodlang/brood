@@ -547,7 +547,7 @@ pub(super) fn emit_call(
                 b.ins().stack_store(pt, mine, ctx_slot, unw_o);
                 let z8 = b.ins().iconst(types::I8, 0);
                 b.ins().stack_store(pt, z8, ctx_slot, pin_o);
-                // ADR-789: this activation's own context is the callee's parent, so the
+                // ADR-791: this activation's own context is the callee's parent, so the
                 // sampling profiler can name the native callers of a sample taken in it.
                 // One store; nothing reads it unless a sample is taken.
                 let parent_o = std::mem::offset_of!(JitCallCtx, parent) as i32;

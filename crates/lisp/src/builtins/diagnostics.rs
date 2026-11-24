@@ -75,7 +75,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(0, 2),
         Sig::new(vec![any, any], nil_ty),
         &["&optional", "hz", "pid"],
-        "Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram — only process `pid` when one is given, else every process. A running process samples its whole call stack — interpreted frames, native (JIT) activations and the frames of the drivers around a nested one — at its next frame boundary or native reduction poll after each tick, charged with the ticks since its last sample (ADR-789). No signals; off, one relaxed load per frame boundary. The legacy tree-walker is not sampled. Stop and read with (dev/profile-stop); `profile/run` and `profile/report` are the policy over it.",
+        "Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram — only process `pid` when one is given, else every process. A running process samples its whole call stack — interpreted frames, native (JIT) activations and the frames of the drivers around a nested one — at its next frame boundary or native reduction poll after each tick, charged with the ticks since its last sample (ADR-791). No signals; off, one relaxed load per frame boundary. The legacy tree-walker is not sampled. Stop and read with (dev/profile-stop); `profile/run` and `profile/report` are the policy over it.",
         profile_start);
     primitives.def(
         "%profile-stop",

@@ -78,7 +78,7 @@ pub unsafe extern "C" fn brood_rt_tick_n(
     // profiler sample writes only its `profile_mark`; `ctx` is the running activation's
     // context (contract: ctx), whose parents are its live callers.
     unsafe {
-        // The sampling profiler (ADR-789): a native activation reaches no driver boundary
+        // The sampling profiler (ADR-791): a native activation reaches no driver boundary
         // until it returns, so it samples here — the full chain of native callers, held for
         // the drivers around it. Off: one relaxed load per poll.
         if crate::diagnostics::profile::armed() {
@@ -1443,7 +1443,7 @@ pub unsafe extern "C" fn brood_rt_call_slow(
     unsafe {
         // Rung A1: this callback consults activation state, so it asserts its own first.
         crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);
-        // ADR-789: what the call runs samples its stack on into this activation.
+        // ADR-791: what the call runs samples its stack on into this activation.
         let _caller = crate::diagnostics::profile::NativeCallerScope::enter(ctx.cast());
         #[cfg(debug_assertions)]
         if crate::diagnostics::debug_flags::jit_callback_trace() {
@@ -1595,7 +1595,7 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
         // Rung A1: this callback consults activation state, so it asserts its own first.
         crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);
         use crate::eval::compile::FastLinkOutcome;
-        // ADR-789: what the call runs samples its stack on into this activation.
+        // ADR-791: what the call runs samples its stack on into this activation.
         let _caller = crate::diagnostics::profile::NativeCallerScope::enter(ctx.cast());
         // Copy the whole slot BY VALUE before anything can run: the dispatch below can compile
         // and publish, which grows `vm_fast_links` and reallocates the buffer `slot` points
@@ -1682,7 +1682,7 @@ pub unsafe extern "C" fn brood_rt_xcall_cold(
     unsafe {
         // Rung A1: this callback consults activation state, so it asserts its own first.
         crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);
-        // ADR-789: a staged tail call's callee (or a re-run of a deopted one) samples its
+        // ADR-791: a staged tail call's callee (or a re-run of a deopted one) samples its
         // stack on into this activation.
         let _caller = crate::diagnostics::profile::NativeCallerScope::enter(ctx.cast());
         let site = (site_head >> 32) as u32;

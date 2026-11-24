@@ -1,4 +1,4 @@
-;; std/tool/profile.blsp — the sampling CPU profiler's policy (ADR-789): run a region under
+;; std/tool/profile.blsp — the sampling CPU profiler's policy (ADR-791): run a region under
 ;; it, and read what it caught as per-function times, a readable report, or folded stacks.
 ;;
 ;; The mechanism is the kernel's (`dev/profile-start`, `dev/profile-stop`,

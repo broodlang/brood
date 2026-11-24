@@ -1309,7 +1309,7 @@ pub struct Heap {
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_dbg_fn: u32,
     /// The sampling profiler's per-process state: the profile and the tick this process last
-    /// sampled at (`diagnostics::profile::Mark`, ADR-789). On the heap so it moves with the
+    /// sampled at (`diagnostics::profile::Mark`, ADR-791). On the heap so it moves with the
     /// process between worker threads.
     pub(crate) profile_mark: crate::diagnostics::profile::Mark,
     /// An error parked by a JIT runtime callback (the C ABI can't return a `Value` *and* an

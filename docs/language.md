@@ -4035,7 +4035,7 @@ iolist in memory.
   `:spawned − :exited` is the live-process figure, `:preempts` counts
   reduction-budget quantum exhaustions, `:steals`/`:migrations` count
   work-stealing activity.
-- **The sampling CPU profiler** (ADR-789) answers *which functions the time went to*, by
+- **The sampling CPU profiler** (ADR-791) answers *which functions the time went to*, by
   qualified name, with nothing changed in the program. `(:use profile)` is the policy;
   `dev/profile-start` / `dev/profile-stop` are the raw mechanism beneath it.
   - `(profile/run thunk [opts])` runs `(thunk)` under the profiler and returns its

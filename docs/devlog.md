@@ -2693,7 +2693,8 @@ turns alpha into coverage: a sample mask on the GPU, the same steps as a 2×2 di
 Guards: mip averaging, a fine checker seen small reading as an even grey, the highlight across
 and not along a strand, half coverage drawing half a pixel, and the GPU drawing hair as the CPU
 does. Run here: fmt, clippy (`--all-features`); the tests are CI's (desktop rule).
-2026-11-24. **The sampling profiler answers "which function" (ADR-789).** A game's author wrote
+
+2026-11-24. **The sampling profiler answers "which function" (ADR-791).** A game's author wrote
 a tool that redefined ~25 functions with timing wrappers to find where a 20 ms frame went; it
 could not wrap reserved names and inflated a recursive 4 ms layer to 129 ms. The profiler that
 existed since July could not have answered either: on a 160 ms smoke run (a JIT loop, a native

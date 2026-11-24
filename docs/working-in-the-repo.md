@@ -69,7 +69,7 @@ here. The ones you reach for first: `BROOD_GC_STRESS` / `BROOD_GC_VERIFY` (GC ra
 `BROOD_JIT_BAIL_TRACE` (did an arm lower, and why not), `BROOD_PERF_STATS` (counters; needs
 `make perf-brood`).
 
-**Which Brood functions is the time going to? The sampling profiler** (ADR-789,
+**Which Brood functions is the time going to? The sampling profiler** (ADR-791,
 `std/tool/profile.blsp`; the API is in `docs/language.md` under the observability
 instruments). It attributes running time to Brood functions by qualified name — interpreted,
 native (JIT) and through builtins that call back — with nothing in the program changed, so it

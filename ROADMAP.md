@@ -1671,7 +1671,7 @@ mechanism/policy split: kernel primitive, Brood policy.
   frame-boundary probe in `vm_run_bc` that records each process's reified
   named-frame stack into a histogram — no signals, one relaxed load per frame
   boundary when off (exactly what the state-capture rewrite made possible).
-  The tree-walker isn't sampled. ✅ **2026-11-24 (ADR-789): whole stacks, charged by
+  The tree-walker isn't sampled. ✅ **2026-11-24 (ADR-791): whole stacks, charged by
   ticks** — native callers through `JitCallCtx::parent`, the frames of enclosing drivers
   read through the pointers they publish while calling out,
   a sample worth the ticks since the process's last; the `profile` module

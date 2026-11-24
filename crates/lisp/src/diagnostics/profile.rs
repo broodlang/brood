@@ -1,5 +1,5 @@
 //! Sampling CPU profiler over the reified call stacks of the VM and the native tier: the
-//! mechanism under `std/tool/profile.blsp` (ADR-789; first shipped in the observability timing
+//! mechanism under `std/tool/profile.blsp` (ADR-791; first shipped in the observability timing
 //! tier, ROADMAP survey gap #4).
 //!
 //! **Where samples come from.** A ticker thread bumps [`EPOCH`] at the requested rate. Code

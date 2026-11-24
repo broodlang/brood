@@ -864,7 +864,7 @@ fn rebuild_unwound_frames(heap: &mut Heap, frames: &mut Vec<BcFrame>) -> BcFrame
     cur.expect("the innermost unwound activation")
 }
 
-/// The sampling profiler's reader of a driver's pending frames (ADR-789): the names of the
+/// The sampling profiler's reader of a driver's pending frames (ADR-791): the names of the
 /// frames under the current one, innermost first, from the pointer `vm_run_bc` publishes.
 ///
 /// # Safety
@@ -904,7 +904,7 @@ pub(crate) fn vm_run_bc(
         },
     );
     // The sampling profiler's link for this driver in the thread's chain of open drivers
-    // (ADR-789): a sample taken in what this driver calls walks outward through it, reading the
+    // (ADR-791): a sample taken in what this driver calls walks outward through it, reading the
     // frames it publishes around each run below. A top-level entry starts the process's charge
     // afresh, so the time it spent parked or queued is not charged to its frames.
     let profile_level = crate::diagnostics::profile::Level::new(profile_frame_names);
@@ -1293,7 +1293,7 @@ pub(crate) fn vm_run_bc(
         // Either run the arm natively (if it's flagged for a tier check) or interpret it.
         // Both yield a `Result<ChunkExit, _>` handled uniformly below. A tail-position
         // interrupt region that ended returns its answer from this frame (ADR-491).
-        // ADR-789: while the arm runs, what it calls may sample, and reads this driver's pending
+        // ADR-791: while the arm runs, what it calls may sample, and reads this driver's pending
         // frames through the published pointer; nothing below changes `frames` before the
         // `unpublish` after it.
         profile_level.publish(&raw const frames as *const (), cur_arm.fn_name);
@@ -1520,7 +1520,7 @@ pub(crate) fn vm_run_bc(
             }
         };
         profile_level.unpublish();
-        // Profiler sample (ADR-789), at the boundary where the frame that just ran is still
+        // Profiler sample (ADR-791), at the boundary where the frame that just ran is still
         // current: what ran since the last boundary is charged to it. Off (the default): one
         // relaxed load per boundary.
         if crate::diagnostics::profile::armed() {

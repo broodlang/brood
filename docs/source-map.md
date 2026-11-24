@@ -83,7 +83,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `diagnostics/coverage.rs` — Line-coverage recording — the second tier of ADR-148.
   - `diagnostics/debug_flags.rs` — The `BROOD_*` diagnostic-flag catalogue — what `brood --debug-flags` prints.
   - `diagnostics/perf.rs` — VM work-attribution counters — the `perf-stats` feature (see `docs/benchmarking.md`).
-  - `diagnostics/profile.rs` — Sampling CPU profiler over the reified call stacks of the VM and the native tier: the mechanism under `std/tool/profile.blsp` (ADR-789; first shipped in the observability timing tier, ROADMAP survey gap #4).
+  - `diagnostics/profile.rs` — Sampling CPU profiler over the reified call stacks of the VM and the native tier: the mechanism under `std/tool/profile.blsp` (ADR-791; first shipped in the observability timing tier, ROADMAP survey gap #4).
 - `dist.rs` — Distributed nodes: connect two Brood runtimes and route messages between them.
   - `dist/admission.rs` — Bounding unauthenticated peers before a handshake completes: the whole-handshake [`Deadline`] a trickling peer cannot restart, the [`HandshakeSlot`] permit that caps handshakes in flight, and the rate-limited warning when connections are shed at that cap.
   - `dist/couplings.rs` — Monitors and links across nodes: the control frames that set up and tear down a process monitor or link whose other end lives on a peer (ADR-067), and node monitors (`monitor-node`) with their `[:nodedown name]` message.

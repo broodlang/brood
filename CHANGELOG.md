@@ -28,7 +28,7 @@ into `.claude/settings.json`, keeping what is there; a second run changes nothin
 **Changed: `nest test --watch` waits on the OS.** It watches each directory holding a source or
 test file (`file/watch`, ADR-782) and reruns when a save is reported, instead of reading every
 file's mtime five times a second; a slow look every 5 s is the backstop.
-**Added: the profiler attributes time to Brood functions (ADR-789).** `(profile/run thunk)` runs a
+**Added: the profiler attributes time to Brood functions (ADR-791).** `(profile/run thunk)` runs a
 thunk under the sampling profiler and returns its profile; `(profile/report profile)` prints the
 top functions by self and by total time, `(profile/functions profile)` gives the same as data and
 `(profile/folded profile)` folded stacks for flamegraph.pl, inferno and speedscope.

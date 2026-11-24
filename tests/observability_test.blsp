@@ -76,7 +76,7 @@
           (is (includes? frames "observability-test/obs-churn"))
           (is (not (includes? frames "observability-test/obs-other-churn"))))))))
 
-;; ---- the profiler's stacks and charges (ADR-789) -------------------------------------
+;; ---- the profiler's stacks and charges (ADR-791) -------------------------------------
 ;; A sample must carry every frame around the code that was running — through a builtin that
 ;; runs Brood in a nested driver, and through native activations calling each other — and a
 ;; process must never be charged more ticks than passed while it ran.

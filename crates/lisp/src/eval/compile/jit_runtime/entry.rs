@@ -108,7 +108,7 @@ pub(crate) fn enter_native(heap: &mut Heap, entry: NativeEntry, out: *mut Value)
     let saved_gw = std::mem::replace(&mut heap.cur_native_gateway, gateway);
     let mut ctx = crate::jit::JitCallCtx::from_heap(heap);
     ctx.unwind = entry.unwind as u8;
-    // The sampling profiler's chain (ADR-789): a driver's activation ends at the driver; one
+    // The sampling profiler's chain (ADR-791): a driver's activation ends at the driver; one
     // entered on a native caller's behalf continues into that caller, when a runtime
     // callback has named it (`profile::NativeCallerScope`).
     ctx.parent = match entry.from {

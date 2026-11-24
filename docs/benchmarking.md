@@ -254,7 +254,7 @@ This is cheap — two runs instead of one — and it is the difference between t
 `perf` answers the one question brood's own counters cannot: **self time per Rust symbol** —
 where the *runtime* spends its time. The counters say *how much* work of each kind happened; they
 have no per-function attribution, which is the wall the 2026-08-28 call-path profiling hit. For
-time per *Brood* function, use the sampling profiler (`profile/run`, `nest profile`, ADR-789),
+time per *Brood* function, use the sampling profiler (`profile/run`, `nest profile`, ADR-791),
 which needs no perf setup and works on any build. Two things block a readable profile, and
 fixing one without the other fails in a way that looks like a different problem:
 

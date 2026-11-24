@@ -246,7 +246,7 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
              :positional ["spec" nil]
              :arity 1
              :run (fn (options) (run-attach options))}
-   "profile" {:about "Run a `.blsp` FILE under the sampling CPU profiler (`profile/start`, ADR-789): print the top functions by self and total time (`--top`, default 20) and write the samples as folded stacks — the format flamegraph.pl, inferno and speedscope read — to `--out` (default FILE.folded). The file is loaded, then `--function` (default its `main`) is called; `--hz` sets the rate (default 997)."
+   "profile" {:about "Run a `.blsp` FILE under the sampling CPU profiler (`profile/start`, ADR-791): print the top functions by self and total time (`--top`, default 20) and write the samples as folded stacks — the format flamegraph.pl, inferno and speedscope read — to `--out` (default FILE.folded). The file is loaded, then `--function` (default its `main`) is called; `--hz` sets the rate (default 997)."
               :flags {"--out" "PATH" "--hz" "N" "--function" "NAME" "--top" "N"}
               :positional ["file" nil]
               :arity 1

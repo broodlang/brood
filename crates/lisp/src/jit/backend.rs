@@ -156,7 +156,7 @@ pub(crate) struct JitCallCtx {
     /// native call site of an arm that can be rebuilt passes its `unwind` on directly, and
     /// one that cannot passes 0. The unboxed register worker reaches neither.
     pub no_child_unwind: u8,
-    /// The activation that called this one, for the sampling profiler (ADR-789): a native
+    /// The activation that called this one, for the sampling profiler (ADR-791): a native
     /// call site stores its own context here, so a sample taken in native code walks the
     /// native callers' names without any per-call bookkeeping beyond this one store. Not a
     /// pointer in two cases: null when Rust entered the activation with no native caller to
