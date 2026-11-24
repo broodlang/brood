@@ -65,7 +65,7 @@
       (read-warnings "(config :a 1\n" 'config "init.blsp")))
   (test "a stray paren after the form names where, and that the form still applies"
     (assert= {:a 1} (read-form "(config :a 1))" 'config))
-    (assert= ["init.blsp:1:14: unexpected ')' — nothing is open here: the form `(config` that started at 1:1 closed at 1:13 — after the (config …) form, which still applies"]
+    (assert= ["init.blsp:1:14: unexpected ')' — after the (config …) form, which still applies"]
       (read-warnings "(config :a 1))" 'config "init.blsp")))
   (test "another form first, or text after the form, is said"
     (assert= ["init.blsp: the file is not a (config …) form, so none of it applies"]
