@@ -59,6 +59,7 @@ fn scene() -> Scene {
         lights: vec![Light::directional([0.0, 0.0, 1.0], [1.0, 1.0, 1.0])],
         sky: [0.1, 0.1, 0.1],
         ground: [0.1, 0.1, 0.1],
+        ambient_sh: None,
         exposure: 1.0,
         ambient_occlusion: None,
         background: [0.0, 0.0, 0.0, 0.0],

@@ -12,8 +12,8 @@ use crate::host::gui::mesh::{
 
 /// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4.
 const VERTEX_FLOATS: usize = 20;
-/// The `SceneU` uniform (2688 bytes), padded to the dynamic-offset alignment.
-const SCENE_BYTES: u64 = 2816;
+/// The `SceneU` uniform (2832 bytes), padded to the dynamic-offset alignment.
+const SCENE_BYTES: u64 = 3072;
 /// The `DrawU` uniform, padded to the dynamic-offset alignment.
 const DRAW_BYTES: u64 = 256;
 const SAMPLES: u32 = 4;
@@ -248,6 +248,7 @@ impl MeshGpu {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                texture(3),
             ],
         });
         let layouts = [
@@ -688,6 +689,7 @@ impl MeshGpu {
                 } else {
                     None
                 };
+                let occlusion = material.occlusion.and_then(|handle| textures.get(&handle));
                 // where the draw's palette starts in the shared buffer and how many joints it holds;
                 // none for a rigid draw (`Scene::palette_of`, as the CPU painter skins)
                 let palette = scene.palette_of(draw).and_then(|joints| {
@@ -702,12 +704,14 @@ impl MeshGpu {
                     Surface::Hair => 4,
                 };
                 let premultiplied = |texture: Option<&GpuTexture>| {
-                    texture.is_some_and(|texture| texture.filter == TextureFilter::Smooth)
+                    texture.is_some_and(|texture| texture.filter != TextureFilter::Nearest)
                 };
                 let bits = u32::from(base.is_some())
                     | (u32::from(premultiplied(base)) << 1)
                     | (u32::from(normal.is_some()) << 2)
-                    | (u32::from(premultiplied(normal)) << 3);
+                    | (u32::from(premultiplied(normal)) << 3)
+                    | (u32::from(occlusion.is_some()) << 4)
+                    | (u32::from(premultiplied(occlusion)) << 5);
                 // its morphs blended here, sparse, into one offset a vertex (none when no target
                 // it names moves anything, or the frame's offsets would pass the binding limit)
                 let vertex_count = mesh.vertex_count as usize;
@@ -735,6 +739,8 @@ impl MeshGpu {
                     material.rim,
                     material.cutoff,
                 ]);
+                let lobes = material.lobes();
+                floats.extend_from_slice(&[lobes[0], lobes[1], lobes[2], material.f0()]);
                 let mut bytes = floats_bytes(&floats);
                 let (palette_start, palette_joints) = palette.unwrap_or((0, 0));
                 let skinned = u32::from(mesh.skinned && palette_joints > 0);
@@ -881,6 +887,7 @@ impl MeshGpu {
                         None
                     }
                     .unwrap_or(&self.flat);
+                    let occlusion = view(draw.material.occlusion).unwrap_or(&self.white);
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("mesh material"),
                         layout: &self.material_layout,
@@ -896,6 +903,10 @@ impl MeshGpu {
                             wgpu::BindGroupEntry {
                                 binding: 2,
                                 resource: wgpu::BindingResource::Sampler(&self.sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(occlusion),
                             },
                         ],
                     })
@@ -1048,6 +1059,7 @@ pub(super) fn scene_uniform_len() -> usize {
         lights: Vec::new(),
         sky: [0.0; 3],
         ground: [0.0; 3],
+        ambient_sh: None,
         exposure: 1.0,
         ambient_occlusion: None,
         background: [0.0; 4],
@@ -1076,8 +1088,13 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan) -> Vec<u32> {
                     &mut words,
                     &[position[0], position[1], position[2], light.range],
                 );
-                floats(&mut words, &[direction[0], direction[1], direction[2], 0.0]);
-                // the shadow's softness rides in the colour's spare fourth
+                // a soft shadow's light size, and its softness in metres (the shader's
+                // `shadow_softness` turns it into texels where the receiver stands, as
+                // `mesh::shadow_softness` does; 0 and no size: the 3×3 filter)
+                floats(
+                    &mut words,
+                    &[direction[0], direction[1], direction[2], light.size],
+                );
                 let softness = light.shadow.as_ref().map_or(0.0, |shadow| shadow.softness);
                 floats(&mut words, &[color[0], color[1], color[2], softness]);
                 let (bias, normal_bias) = light
@@ -1099,19 +1116,10 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan) -> Vec<u32> {
             None => words.extend_from_slice(&[0; 20]),
         }
     }
-    // the ambient occlusion rides in the ambient's spare fourths: its radius (0: none) and
-    // strength, and its view (one past the index, 0: none) in the params'
-    let (radius, strength) = match (scene.ambient_occlusion, shadows.occlusion) {
-        (Some(settings), Some(_)) => (settings.radius, settings.strength),
-        _ => (0.0, 0.0),
-    };
+    floats(&mut words, &[scene.sky[0], scene.sky[1], scene.sky[2], 0.0]);
     floats(
         &mut words,
-        &[scene.sky[0], scene.sky[1], scene.sky[2], radius],
-    );
-    floats(
-        &mut words,
-        &[scene.ground[0], scene.ground[1], scene.ground[2], strength],
+        &[scene.ground[0], scene.ground[1], scene.ground[2], 0.0],
     );
     floats(
         &mut words,
@@ -1119,17 +1127,49 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan) -> Vec<u32> {
             scene.exposure,
             scene.lights.len().min(MAX_LIGHTS) as f32,
             shadows.layer_side.max(1) as f32,
-            shadows.occlusion.map_or(0.0, |view| (view + 1) as f32),
+            f32::from(u8::from(scene.ambient_sh.is_some())),
         ],
     );
+    for index in 0..9 {
+        let coefficient = scene
+            .ambient_sh
+            .map_or([0.0; 3], |coefficients| coefficients[index]);
+        floats(
+            &mut words,
+            &[coefficient[0], coefficient[1], coefficient[2], 0.0],
+        );
+    }
     for index in 0..MAX_SHADOW_VIEWS {
         match shadows.views.get(index) {
             Some(view) => {
                 floats(&mut words, &view.view_proj);
-                floats(&mut words, &[view.texel, view.resolution as f32, 0.0, 0.0]);
+                floats(
+                    &mut words,
+                    &[
+                        view.texel,
+                        view.resolution as f32,
+                        view.depth_range[0],
+                        view.depth_range[1],
+                    ],
+                );
             }
             None => words.extend_from_slice(&[0; 20]),
         }
     }
+    // the ambient occlusion: its radius (0: none), strength, and view (one past its index, 0:
+    // none)
+    let (radius, strength) = match (scene.ambient_occlusion, shadows.occlusion) {
+        (Some(settings), Some(_)) => (settings.radius, settings.strength),
+        _ => (0.0, 0.0),
+    };
+    floats(
+        &mut words,
+        &[
+            radius,
+            strength,
+            shadows.occlusion.map_or(0.0, |view| (view + 1) as f32),
+            0.0,
+        ],
+    );
     words
 }

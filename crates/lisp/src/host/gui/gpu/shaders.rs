@@ -632,38 +632,43 @@ fn fs_particle(in: ParticleOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// The mesh shader (ADR-786, ADR-788): morph, skin and transform a vertex; shade a fragment
-/// with the fixed model `host::gui::mesh` writes for the CPU painter (`shade`, `tone`,
-/// `light_arrival`, `shadow_visibility`, `sample_shadow`) — keep the two in step. Writes
+/// The mesh shader (ADR-786, ADR-788, ADR-793): morph, skin and transform a vertex; shade a
+/// fragment with the fixed model `host::gui::mesh` writes for the CPU painter (`shade`, `tone`,
+/// `ambient`, `sh_irradiance`, `fresnel`, `specular_lobes`, `light_arrival`,
+/// `shadow_visibility`, `sample_shadow`, `soft_shadow`, `receiver_slope`, `bilinear_tap`,
+/// `stored_depth`, `pixel_noise`, `disc_tap`) — keep the two in step. Writes
 /// premultiplied, sRGB-encoded colour, the space the scene's picture is composited in.
 /// `vs_shadow` / `fs_shadow` render a shadow map: the same posing, seen through the shadow
 /// view the instance index names, alpha-tested for a `:cutout` or `:blend` surface.
 pub(super) const MESH_SRC: &str = r#"
 struct Light {
     position: vec4<f32>,        // xyz, range (0: no window)
-    direction: vec4<f32>,       // xyz: the way the light travels
-    color: vec4<f32>,           // rgb, shadow softness (metres)
+    direction: vec4<f32>,       // xyz: the way the light travels, size (metres; radians directional)
+    color: vec4<f32>,           // rgb, shadow softness (metres at the receiver; 0 and no size: 3×3)
     cone: vec4<f32>,            // cos inner, cos outer, shadow bias, shadow normal bias
     shadow: vec4<u32>,          // kind (0 directional, 1 point, 2 spot), first view, view count
 };
 struct ShadowView {
     view_proj: mat4x4<f32>,
-    info: vec4<f32>,            // texel size (at 1 m for a perspective view), resolution
+    info: vec4<f32>,            // texel size (at 1 m for a perspective view), resolution, near, far
 };
 struct SceneU {
     view_proj: mat4x4<f32>,
     eye: vec4<f32>,
     lights: array<Light, 8>,
-    sky: vec4<f32>,             // rgb, ambient occlusion radius (metres; 0: none)
-    ground: vec4<f32>,          // rgb, ambient occlusion strength
-    params: vec4<f32>,          // exposure, light count, shadow layer side, occlusion view + 1 (0: none)
+    sky: vec4<f32>,
+    ground: vec4<f32>,
+    params: vec4<f32>,          // exposure, light count, shadow layer side, ambient is SH (0 or 1)
+    ambient_sh: array<vec4<f32>, 9>,    // L00, L1-1, L10, L11, L2-2, L2-1, L20, L21, L22 (rgb)
     shadows: array<ShadowView, 24>,
+    occlusion: vec4<f32>,       // ambient occlusion radius (metres; 0: none), strength, view + 1 (0: none)
 };
 struct DrawU {
     model: mat4x4<f32>,
     color: vec4<f32>,
     scatter: vec4<f32>,         // rgb, wrap
     material: vec4<f32>,        // roughness, specular, rim, cutoff
+    lobes: vec4<f32>,           // roughness times a, times b, mix of a, F0
     flags: vec4<u32>,           // surface, texture bits, palette offset, skinned
     morph_info: vec4<u32>,      // morphed (0 or 1), vertex count, palette joint count, first offset
 };
@@ -679,6 +684,7 @@ struct DrawU {
 @group(3) @binding(0) var base_texture: texture_2d<f32>;
 @group(3) @binding(1) var normal_texture: texture_2d<f32>;
 @group(3) @binding(2) var texture_sampler: sampler;
+@group(3) @binding(3) var occlusion_texture: texture_2d<f32>;
 
 struct VertexIn {
     @builtin(vertex_index) index: u32,
@@ -828,20 +834,43 @@ fn cube_face(offset: vec3<f32>) -> u32 {
     return select(5u, 4u, offset.z >= 0.0);
 }
 
+// the CPU's `project_raw`: where `point` falls in shadow view `view`'s map, as texels (a
+// texel's centre at its index + 0.5) and clip depth, wherever it is; `inside` false only
+// behind the view
+struct Projected {
+    at: vec2<f32>,
+    depth: f32,
+    inside: bool,
+};
+
+fn project_raw(view: ShadowView, point: vec3<f32>) -> Projected {
+    let clip = view.view_proj * vec4<f32>(point, 1.0);
+    if (!(clip.w > 1e-6)) {
+        return Projected(vec2<f32>(0.0), 0.0, false);
+    }
+    let unit = vec2<f32>(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+    return Projected(unit * view.info.y, clip.z / clip.w, true);
+}
+
+// the CPU's `project_into`: `inside` false outside the map or past its depth too
+fn project_into(view: ShadowView, point: vec3<f32>) -> Projected {
+    var projected = project_raw(view, point);
+    let side = view.info.y;
+    projected.inside = projected.inside && projected.depth >= 0.0 && projected.depth <= 1.0
+        && projected.at.x >= 0.0 && projected.at.x <= side && projected.at.y >= 0.0 && projected.at.y <= side;
+    return projected;
+}
+
 // the CPU's `sample_shadow`: a 3×3 filter of bilinear taps is a 4×4 block of comparisons
 // weighted (1 − f, 1, 1, f) each way, gathered here 2×2 at a time
 fn shadow_sample(view_index: u32, point: vec3<f32>) -> f32 {
     let view = scene.shadows[view_index];
-    let clip = view.view_proj * vec4<f32>(point, 1.0);
-    if (!(clip.w > 1e-6)) {
+    let projected = project_into(view, point);
+    if (!projected.inside) {
         return 1.0;
     }
-    let depth = clip.z / clip.w;
-    let unit = vec2<f32>(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
-    if (!(depth >= 0.0 && depth <= 1.0 && unit.x >= 0.0 && unit.x <= 1.0 && unit.y >= 0.0 && unit.y <= 1.0)) {
-        return 1.0;
-    }
-    let texels = unit * view.info.y - vec2<f32>(0.5);
+    let depth = projected.depth;
+    let texels = projected.at - vec2<f32>(0.5);
     let corner = floor(texels);
     let fraction = texels - corner;
     let weights_x = vec4<f32>(1.0 - fraction.x, 1.0, 1.0, fraction.x);
@@ -866,58 +895,129 @@ fn shadow_sample(view_index: u32, point: vec3<f32>) -> f32 {
     return lit / 9.0;
 }
 
-// the CPU's `POISSON`: a soft shadow's taps, out to 1.234 from the centre
-var<private> POISSON: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
-    vec2<f32>(-0.942016, -0.399062), vec2<f32>(0.945586, -0.768907), vec2<f32>(-0.094184, -0.929389),
-    vec2<f32>(0.344959, 0.293878), vec2<f32>(-0.915886, 0.457714), vec2<f32>(-0.815442, -0.879125),
-    vec2<f32>(-0.382775, 0.276768), vec2<f32>(0.974844, 0.756484), vec2<f32>(0.443233, -0.975116),
-    vec2<f32>(0.537430, -0.473734), vec2<f32>(-0.264969, -0.418930), vec2<f32>(0.791975, 0.190909),
-    vec2<f32>(-0.241888, 0.997065), vec2<f32>(-0.814100, 0.914376), vec2<f32>(0.199841, 0.786414),
-    vec2<f32>(0.143832, -0.141008),
-);
-
-// the CPU's `soft_turn`: the disc turned by a hash of where the point is
-fn soft_turn(world: vec3<f32>) -> f32 {
-    let seed = sin(dot(world, vec3<f32>(12.9898, 78.233, 37.719))) * 43758.547;
-    return fract(seed) * 6.2831853;
+// the CPU's `stored_depth`: a texel of view `view_index`'s map, reads off its left or top edge
+// clamped to it, off its right or bottom edge reading the layer (cleared to the far plane)
+fn stored_depth(view_index: u32, texel: vec2<f32>) -> f32 {
+    let last = scene.params.z - 1.0;
+    let clamped = clamp(texel, vec2<f32>(0.0), vec2<f32>(last));
+    return textureLoad(shadow_maps, vec2<i32>(clamped), i32(view_index), 0);
 }
 
-// the CPU's `sample_shadow_soft`: the map read at the disc's taps `reach` texels wide, turned
-// by `turn`, each a bilinear comparison gathered where its four texels meet
-fn shadow_sample_soft(view_index: u32, point: vec3<f32>, reach: f32, turn: f32) -> f32 {
+// the CPU's `bilinear_tap`: a receiver at `depth` compared with the four texels about `at`
+// (texel centres at whole numbers here), weighted by nearness — one gather where they meet
+fn bilinear_tap(view_index: u32, at: vec2<f32>, depth: f32) -> f32 {
+    let corner = floor(at);
+    let fraction = at - corner;
+    let gathered = textureGatherCompare(shadow_maps, shadow_sampler, (corner + vec2<f32>(1.0)) / scene.params.z, i32(view_index), depth);
+    // a gather's order: (left, bottom), (right, bottom), (right, top), (left, top)
+    return mix(mix(gathered.w, gathered.z, fraction.x), mix(gathered.x, gathered.y, fraction.x), fraction.y);
+}
+
+// the CPU's `pixel_noise`: interleaved gradient noise at a pixel of the picture
+fn pixel_noise(pixel: vec2<f32>) -> f32 {
+    return fract(52.982918 * fract(0.06711056 * pixel.x + 0.00583715 * pixel.y));
+}
+
+// the CPU's `disc_tap`: tap `index` of 32 on a golden-angle spiral over the unit disc, turned
+fn disc_tap(index: u32, turn: f32) -> vec2<f32> {
+    let radius = sqrt((f32(index) + 0.5) / 32.0);
+    let angle = f32(index) * 2.399963 + turn;
+    return radius * vec2<f32>(cos(angle), sin(angle));
+}
+
+// the CPU's `ShadowView::distance`: a clip depth back to a distance along the view's axis
+fn view_distance(view: ShadowView, perspective: bool, depth: f32) -> f32 {
+    let near = view.info.z;
+    let far = view.info.w;
+    if (perspective) {
+        return near * far / max(far - depth * (far - near), 1e-6);
+    }
+    return near + depth * (far - near);
+}
+
+// the CPU's `basis`: a right and an up square to the unit vector `forward`
+fn right_of(forward: vec3<f32>) -> vec3<f32> {
+    let hint = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(forward.y) > 0.99);
+    return safe_normalize(cross(forward, hint));
+}
+
+// the CPU's `receiver_slope`: how the receiver's plane changes depth a texel across the map
+fn receiver_slope(view: ShadowView, point: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>) -> vec2<f32> {
+    let origin = project_raw(view, point);
+    if (!origin.inside) {
+        return vec2<f32>(0.0);
+    }
+    let step = view.info.x * max((view.view_proj * vec4<f32>(point, 1.0)).w, 1e-6);
+    let tangent = right_of(normal);
+    let bitangent = cross(tangent, normal);
+    let first = project_raw(view, point + tangent * step);
+    let second = project_raw(view, point + bitangent * step);
+    let away = project_raw(view, point - to_light * step);
+    if (!(first.inside && second.inside && away.inside)) {
+        return vec2<f32>(0.0);
+    }
+    let first_at = first.at - origin.at;
+    let second_at = second.at - origin.at;
+    let first_depth = first.depth - origin.depth;
+    let second_depth = second.depth - origin.depth;
+    let determinant = first_at.x * second_at.y - first_at.y * second_at.x;
+    if (abs(determinant) < 1e-3) {
+        return vec2<f32>(0.0);
+    }
+    let cap = 4.0 * abs(away.depth - origin.depth);
+    let slope = vec2<f32>(first_depth * second_at.y - second_depth * first_at.y,
+                          second_depth * first_at.x - first_depth * second_at.x) / determinant;
+    return clamp(slope, vec2<f32>(-cap), vec2<f32>(cap));
+}
+
+// the CPU's `soft_shadow`: a disc of 32 bilinear taps, its radius `softness` texels, or with a
+// light `size` the penumbra its blockers cast there (percentage-closer soft shadows), each tap
+// compared against the receiver's plane where it reads
+fn soft_shadow(view_index: u32, perspective: bool, point: vec3<f32>, size: f32, softness_given: f32, turn: f32, slope: vec2<f32>) -> f32 {
     let view = scene.shadows[view_index];
-    let clip = view.view_proj * vec4<f32>(point, 1.0);
-    if (!(clip.w > 1e-6)) {
+    let projected = project_into(view, point);
+    if (!projected.inside) {
         return 1.0;
     }
-    let depth = clip.z / clip.w;
-    let unit = vec2<f32>(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
-    if (!(depth >= 0.0 && depth <= 1.0 && unit.x >= 0.0 && unit.x <= 1.0 && unit.y >= 0.0 && unit.y <= 1.0)) {
-        return 1.0;
+    let depth = projected.depth;
+    let softness = max(softness_given, 1.0);
+    var radius = softness;
+    if (size > 0.0) {
+        var blockers = 0.0;
+        var found = 0u;
+        for (var index = 0u; index < 32u; index = index + 1u) {
+            let offset = disc_tap(index, turn) * softness;
+            let stored = stored_depth(view_index, floor(projected.at + offset));
+            if (stored < depth + dot(slope, offset)) {
+                blockers = blockers + view_distance(view, perspective, stored);
+                found = found + 1u;
+            }
+        }
+        if (found == 0u) {
+            return 1.0;
+        }
+        let blocker = blockers / f32(found);
+        let receiver = view_distance(view, perspective, depth);
+        let gap = max(receiver - blocker, 0.0);
+        var penumbra = size * gap;
+        var texel = view.info.x;
+        if (perspective) {
+            penumbra = penumbra / max(blocker, 1e-4);
+            texel = texel * receiver;
+        }
+        radius = clamp(penumbra * 0.5 / max(texel, 1e-9), 1.0, softness);
     }
-    let centre = unit * view.info.y - vec2<f32>(0.5);
-    let layer_side = scene.params.z;
-    let turning = vec2<f32>(cos(turn), sin(turn));
     var lit = 0.0;
-    for (var tap = 0u; tap < 16u; tap = tap + 1u) {
-        // within the unit circle (the CPU's `POISSON_INTO_UNIT`)
-        let offset = POISSON[tap] * 0.81;
-        let texels = centre + reach * vec2<f32>(offset.x * turning.x - offset.y * turning.y,
-                                                 offset.x * turning.y + offset.y * turning.x);
-        let corner = floor(texels);
-        let fraction = texels - corner;
-        // the four texels from `corner` meet at `corner` + 1
-        let gathered = textureGatherCompare(shadow_maps, shadow_sampler, (corner + vec2<f32>(1.0)) / layer_side, i32(view_index), depth);
-        // a gather's order: (left, bottom), (right, bottom), (right, top), (left, top)
-        lit = lit + gathered.x * (1.0 - fraction.x) * fraction.y + gathered.y * fraction.x * fraction.y
-            + gathered.z * fraction.x * (1.0 - fraction.y) + gathered.w * (1.0 - fraction.x) * (1.0 - fraction.y);
+    for (var index = 0u; index < 32u; index = index + 1u) {
+        let offset = disc_tap(index, turn) * radius;
+        lit = lit + bilinear_tap(view_index, projected.at - vec2<f32>(0.5) + offset, depth + dot(slope, offset));
     }
-    return lit / 16.0;
+    return lit / 32.0;
 }
 
 // the CPU's `shadow_visibility`: the receiver moved toward the light and along its surface's
-// normal by the light's biases, in texels where it stands, then filtered
-fn shadow_visibility(light: Light, world: vec3<f32>, surface_normal: vec3<f32>, to_light: vec3<f32>) -> f32 {
+// normal by the light's biases, in texels where it stands, then filtered 3×3 or soft
+fn shadow_visibility(light: Light, world: vec3<f32>, surface_normal: vec3<f32>, to_light: vec3<f32>, turn: f32) -> f32 {
     var at = light.shadow.y;
     if (light.shadow.z == 6u) {
         at = at + cube_face(world - light.position.xyz);
@@ -926,18 +1026,75 @@ fn shadow_visibility(light: Light, world: vec3<f32>, surface_normal: vec3<f32>, 
     let texel = view.info.x * max((view.view_proj * vec4<f32>(world, 1.0)).w, 0.0);
     let facing = clamp(abs(dot(surface_normal, to_light)), 1e-3, 1.0);
     let slope = min(sqrt(max(1.0 - facing * facing, 0.0)) / facing, 4.0);
-    let softness = light.color.w;
-    let toward = light.cone.z * texel * (1.0 + slope) + softness * min(slope, 2.0);
+    let toward = light.cone.z * texel * (1.0 + slope);
     let along = light.cone.w * texel;
     let biased = world + surface_normal * along + to_light * toward;
-    if (softness > 0.0 && texel > 0.0) {
-        return shadow_sample_soft(at, biased, clamp(softness / texel, 1.0, 24.0), soft_turn(world));
+    // the CPU's `shadow_softness`: the softness in metres as texels where the receiver stands,
+    // held to 1 … 32, or 32 for a light with a size and no softness
+    var softness = 0.0;
+    if (light.color.w > 0.0 && texel > 0.0) {
+        softness = clamp(light.color.w / texel, 1.0, 32.0);
+    } else if (light.direction.w > 0.0) {
+        softness = 32.0;
+    }
+    if (softness > 0.0) {
+        let receiver_plane = receiver_slope(view, biased, surface_normal, to_light);
+        return soft_shadow(at, light.shadow.x != 0u, biased, light.direction.w, softness, turn, receiver_plane);
     }
     return shadow_sample(at, biased);
 }
 
-// `mesh::view_distance`: how far along the view a clip depth lies (its w, for a perspective view)
-fn view_distance(view_proj: mat4x4<f32>, depth: f32) -> f32 {
+// the CPU's `sh_irradiance`: Ramamoorthi and Hanrahan's irradiance from the scene's nine
+// coefficients, held at 0, over π
+fn sh_irradiance(normal: vec3<f32>) -> vec3<f32> {
+    let c1 = 0.429043;
+    let c2 = 0.511664;
+    let c3 = 0.743125;
+    let c4 = 0.886227;
+    let c5 = 0.247708;
+    let x = normal.x;
+    let y = normal.y;
+    let z = normal.z;
+    let sh = scene.ambient_sh;
+    let irradiance = c4 * sh[0].rgb
+        + 2.0 * c2 * (y * sh[1].rgb + z * sh[2].rgb + x * sh[3].rgb)
+        + 2.0 * c1 * (x * y * sh[4].rgb + y * z * sh[5].rgb + x * z * sh[7].rgb)
+        + (c3 * z * z - c5) * sh[6].rgb
+        + c1 * (x * x - y * y) * sh[8].rgb;
+    return max(irradiance, vec3<f32>(0.0)) / 3.14159265;
+}
+
+// the CPU's `ambient`
+fn ambient(normal: vec3<f32>) -> vec3<f32> {
+    if (scene.params.w > 0.5) {
+        return sh_irradiance(normal);
+    }
+    return mix(scene.ground.rgb, scene.sky.rgb, normal.y * 0.5 + 0.5);
+}
+
+// the CPU's `fresnel`: Schlick's, its grazing reflectance min(50 F0, 1)
+fn fresnel(f0: f32, view_dot_half: f32) -> f32 {
+    let grazing = pow(1.0 - clamp(view_dot_half, 0.0, 1.0), 5.0);
+    return f0 + (min(50.0 * f0, 1.0) - f0) * grazing;
+}
+
+// one Blinn-Phong lobe normalised to (n + 8) / 8, the BRDF's 1/π folded into the light
+fn specular_lobe(roughness: f32, normal_dot_half: f32) -> f32 {
+    let exponent = shininess(roughness);
+    return (exponent + 8.0) / 8.0 * pow(max(normal_dot_half, 0.0), exponent);
+}
+
+// the CPU's `specular_lobes`
+fn specular_lobes(normal_dot_half: f32) -> f32 {
+    let first = specular_lobe(draw.material.x * draw.lobes.x, normal_dot_half);
+    if (draw.lobes.z >= 1.0) {
+        return first;
+    }
+    return draw.lobes.z * first + (1.0 - draw.lobes.z) * specular_lobe(draw.material.x * draw.lobes.y, normal_dot_half);
+}
+
+// `mesh::view_distance` (the CPU's name): how far along the camera's view a clip depth lies
+fn camera_distance(view_proj: mat4x4<f32>, depth: f32) -> f32 {
     let depth_row = vec4<f32>(view_proj[0].z, view_proj[1].z, view_proj[2].z, view_proj[3].z);
     let w_row = vec4<f32>(view_proj[0].w, view_proj[1].w, view_proj[2].w, view_proj[3].w);
     let w_length = dot(w_row.xyz, w_row.xyz);
@@ -963,10 +1120,10 @@ fn occlusion_tap(index: u32) -> vec3<f32> {
 }
 
 // `mesh::ambient_occlusion`: how much of the ambient light reaches `world` past what the
-// camera's depth view (scene.params.w, one past its index; 0 without) holds round it
+// camera's depth view (scene.occlusion.z, one past its index; 0 without) holds round it
 fn ambient_occlusion(world: vec3<f32>, normal: vec3<f32>) -> f32 {
-    let radius = scene.sky.w;
-    let at = u32(scene.params.w);
+    let radius = scene.occlusion.x;
+    let at = u32(scene.occlusion.z);
     if (at == 0u || radius <= 0.0) {
         return 1.0;
     }
@@ -975,7 +1132,7 @@ fn ambient_occlusion(world: vec3<f32>, normal: vec3<f32>) -> f32 {
     if (own.w <= 1e-6) {
         return 1.0;
     }
-    let own_distance = view_distance(view.view_proj, own.z / own.w);
+    let own_distance = camera_distance(view.view_proj, own.z / own.w);
     var helper = vec3<f32>(1.0, 0.0, 0.0);
     if (abs(normal.y) < 0.99) {
         helper = vec3<f32>(0.0, 1.0, 0.0);
@@ -998,13 +1155,13 @@ fn ambient_occlusion(world: vec3<f32>, normal: vec3<f32>) -> f32 {
         }
         let column = min(u32(across_unit * f32(side)), side - 1u);
         let row = min(u32(down_unit * f32(side)), side - 1u);
-        let stored = view_distance(view.view_proj, textureLoad(shadow_maps, vec2<i32>(i32(column), i32(row)), i32(at - 1u), 0));
-        let reached = view_distance(view.view_proj, clip.z / clip.w);
+        let stored = camera_distance(view.view_proj, textureLoad(shadow_maps, vec2<i32>(i32(column), i32(row)), i32(at - 1u), 0));
+        let reached = camera_distance(view.view_proj, clip.z / clip.w);
         if (stored < reached - radius * 0.05) {
             occluded = occluded + min(radius / max(abs(own_distance - stored), 1e-6), 1.0);
         }
     }
-    return clamp(1.0 - scene.ground.w * occluded / 16.0, 0.0, 1.0);
+    return clamp(1.0 - scene.occlusion.y * occluded / 16.0, 0.0, 1.0);
 }
 
 // a `:hair` highlight (`mesh::shade`): across the strand shifted along the normal, sharpened
@@ -1013,18 +1170,19 @@ fn hair_highlight(strand: vec3<f32>, normal: vec3<f32>, half_vector: vec3<f32>, 
     return pow(sqrt(max(1.0 - along * along, 0.0)), sharpness);
 }
 
-fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, strand: vec3<f32>) -> vec3<f32> {
-    let up = normal.y * 0.5 + 0.5;
-    var out = base * occlusion * mix(scene.ground.rgb, scene.sky.rgb, up);
+fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>) -> vec3<f32> {
+    var out = base * ambient(normal) * occlusion;
+    let f0 = draw.lobes.w;
+    // a `:hair` surface's highlights: as sharp as its roughness asks
     let exponent = shininess(draw.material.x);
-    let normalisation = (exponent + 8.0) / (8.0 * 3.14159265);
     let count = u32(scene.params.y);
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let light = scene.lights[slot];
         let arrival = light_arrival(light, world);
-        var arriving = arrival.amount;
+        let arriving = arrival.amount;
+        var seen = 1.0;
         if (light.shadow.z > 0u) {
-            arriving = arriving * shadow_visibility(light, world, surface_normal, arrival.to_light);
+            seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn);
         }
         let to_light = arrival.to_light;
         let facing = dot(normal, to_light);
@@ -1036,17 +1194,19 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             let lit_side = clamp(facing + 0.25, 0.0, 1.0);
             let hair_diffuse = clamp(0.25 + 0.75 * facing, 0.0, 1.0);
             let shine = draw.material.y * lit_side * (vec3<f32>(primary) + secondary * base);
-            out = out + light.color.rgb * arriving * (base * hair_diffuse + shine);
+            out = out + light.color.rgb * arriving * seen * (base * hair_diffuse + shine);
             continue;
         }
-        let specular = draw.material.y * normalisation * pow(max(dot(normal, half_vector), 0.0), exponent) * lambert;
-        var diffuse = vec3<f32>(lambert);
+        let specular = fresnel(f0, dot(view, half_vector)) * specular_lobes(dot(normal, half_vector)) * lambert;
+        var diffuse = vec3<f32>(lambert * seen);
         if (draw.flags.x == 0u) {
+            // the CPU's: the shadow fades out of the wrap light toward the terminator
+            let wrap_seen = mix(1.0, seen, smoothstep(0.0, 0.3, facing));
             let wrap = draw.scatter.w;
             let wrapped = clamp((facing + wrap) / (1.0 + wrap), 0.0, 1.0);
-            diffuse = vec3<f32>(lambert) + draw.scatter.rgb * (wrapped - lambert);
+            diffuse = diffuse + draw.scatter.rgb * (wrapped - lambert) * wrap_seen;
         }
-        out = out + light.color.rgb * arriving * (base * diffuse + vec3<f32>(specular));
+        out = out + light.color.rgb * arriving * (base * diffuse + vec3<f32>(specular * seen));
     }
     let rim = draw.material.z * pow(1.0 - max(dot(normal, view), 0.0), 3.0);
     return out + rim * scene.sky.rgb;
@@ -1067,10 +1227,11 @@ struct MeshFragment {
 
 @fragment
 fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragment {
-    // both textures sampled before any branch (uniform control flow); a missing one is a
+    // every texture sampled before any branch (uniform control flow); a missing one is a
     // white or flat-normal pixel bound in its place
     let base_texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
     let normal_texel = straight(textureSample(normal_texture, texture_sampler, fragment.uv), (draw.flags.y & 8u) != 0u);
+    let occlusion_texel = straight(textureSample(occlusion_texture, texture_sampler, fragment.uv), (draw.flags.y & 32u) != 0u);
     let texel = select(vec4<f32>(1.0), base_texel, (draw.flags.y & 1u) != 0u);
     var alpha = texel.a * draw.color.a;
     if (draw.flags.x == 2u) {
@@ -1109,10 +1270,14 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
         normal = safe_normalize(tangent * local.x + sign * bitangent * local.y + normal * local.z);
     }
     let view = safe_normalize(scene.eye.xyz - fragment.world);
-    let occlusion = ambient_occlusion(fragment.world, surface_normal);
+    // the ambient's occlusion: its map's, times the scene's screen-space ambient occlusion
+    let occlusion = select(1.0, occlusion_texel.r, (draw.flags.y & 16u) != 0u)
+        * ambient_occlusion(fragment.world, surface_normal);
+    // a soft shadow's taps turned by the pixel's noise, the CPU painter's at the same pixel
+    let turn = 6.28318531 * pixel_noise(floor(fragment.clip.xy));
     // a hair's strand: the bitangent, as its UV v runs
     let strand = safe_normalize(cross(surface_normal, safe_normalize(fragment.tangent.xyz)) * select(1.0, -1.0, fragment.tangent.w < 0.0));
-    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, strand), scene.params.x);
+    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand), scene.params.x);
     return MeshFragment(vec4<f32>(lit * alpha, alpha), mask);
 }
 

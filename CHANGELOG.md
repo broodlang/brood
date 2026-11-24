@@ -61,6 +61,19 @@ skinned, morphed meshes, filtered 3×3 with a slope-scaled and normal-offset rec
 malformed light (an unknown key, a wrong shape, a `:range` on a directional light) or more than
 8 lights is now an error raised by `gui/draw`, where it used to be ignored.
 
+**Added: soft shadows, a spherical-harmonic ambient, Fresnel and dual-lobe skin in a 3D scene
+(ADR-793).** A light's `:shadow` takes `:softness` (penumbra radius in metres at the receiver, a 32-tap disc
+turned per pixel), and a light's size — `:size` (metres) on a point or spot light, `:angle`
+(radians) on a directional one — makes the penumbra grow with the distance from caster to
+receiver (percentage-closer soft shadows), crisp at contact, up to `:softness` (32 by default). A
+scene's `:ambient-sh`, nine `[r g b]` L2 spherical-harmonic coefficients of the room's light,
+replaces `:sky`/`:ground`. A material's specular gets Schlick's Fresnel with F0 = `:specular` ×
+0.08 (default 0.5, 4 %; skin 0.35, 2.8 %), `:lobes [rough-a rough-b mix]` (a `:skin` surface has
+`[0.75 1.3 0.85]` by default), and an `:occlusion` texture darkening its ambient. **Breaking
+(look):** the specular was π too dim against the diffuse and is no longer; with Fresnel and skin's
+two lobes every scene's highlights change, so re-tune `:specular`. A malformed `:ambient-sh`,
+`:lobes`, `:softness`, `:size` or `:angle` is an error raised by `gui/draw`.
+
 ## v0.59.0 — shadow like other languages, named fn, smooth textures, 3D meshes
 
 **Added: smooth textures (ADR-783).** `(gui/texture id image {:filter :smooth})` — and the same

@@ -11,8 +11,10 @@
 //! written ONCE here for the CPU painter, which rasterises a scene in software
 //! ([`rasterize`]), and mirrored in WGSL for the GPU target (`gpu/shaders.rs`, `MESH_SRC`):
 //! wrapped diffuse with a scatter tint at the terminator for skin, Blinn-Phong specular
-//! normalised by its exponent, a fresnel rim, a hemispherical ambient, a tangent-space
-//! normal map, alpha cut out (lashes, brows) or blended (hair), ACES tone mapping and sRGB.
+//! normalised by its exponent with Schlick's Fresnel (two lobes for skin), a fresnel rim, a
+//! hemispherical or spherical-harmonic ambient times an occlusion map, shadow maps filtered
+//! 3×3 or soft (ADR-793), a tangent-space normal map, alpha cut out (lashes, brows) or
+//! blended (hair), ACES tone mapping and sRGB.
 //! A scene is composited into the frame as a premultiplied picture where its op stands, so
 //! 2D ops before it are behind it and ops after it in front.
 
@@ -40,6 +42,21 @@ pub const DEFAULT_SHADOW_BIAS: f32 = 1.0;
 pub const DEFAULT_SHADOW_NORMAL_BIAS: f32 = 1.5;
 /// A spot or point light's shadow near plane, in metres, by default: nearer casters are clipped.
 pub const DEFAULT_SHADOW_NEAR: f32 = 0.05;
+/// The widest a soft shadow's penumbra grows, in shadow-map texels of radius, for a light with
+/// a `:size` (or `:angle`) and no `:softness` (ADR-793).
+pub const DEFAULT_SOFTNESS: f32 = 32.0;
+/// The narrowest a soft shadow's penumbra is, in texels of radius: at contact its filter is
+/// about the 3×3 one's width, so a touching shadow is crisp but not stair-stepped.
+pub const MIN_SOFTNESS: f32 = 1.0;
+/// How many depth-map reads a soft shadow takes: as many to look for blockers, then as many
+/// filtered comparisons (ADR-793).
+pub const SOFT_TAPS: u32 = 32;
+/// A material's `:specular` times this is its reflectance at normal incidence, F0 (ADR-793):
+/// UE4's mapping, so the default 0.5 is 4 %, a common dielectric's, and skin's 2.8 % is 0.35.
+pub const SPECULAR_TO_F0: f32 = 0.08;
+/// A `:skin` surface's two specular lobes by default: roughness times 0.75 and times 1.3,
+/// weighted 0.85 and 0.15 (UE4's dual-lobe skin, ADR-793).
+pub const SKIN_LOBES: [f32; 3] = [0.75, 1.3, 0.85];
 /// The distance under which a point or spot light's inverse-square falloff stops growing (a
 /// surface touching the bulb is not infinitely bright).
 pub const NEAR_LIGHT: f32 = 0.01;
@@ -505,12 +522,20 @@ pub struct Material {
     /// A tangent-space normal map (a `gui-texture` handle; linear), used when the mesh has
     /// tangents.
     pub normal: Option<u32>,
+    /// An ambient-occlusion map (a `gui-texture` handle; linear, its red channel, glTF's
+    /// convention) multiplying the ambient light only (ADR-793).
+    pub occlusion: Option<u32>,
     /// Linear RGBA factor on the base colour.
     pub color: [f32; 4],
     /// 0 (mirror) … 1 (chalk).
     pub roughness: f32,
-    /// The specular reflection's strength.
+    /// The specular reflection's strength: its reflectance at normal incidence is
+    /// `specular × SPECULAR_TO_F0`, rising toward 1 at grazing angles (Schlick, ADR-793).
     pub specular: f32,
+    /// `[rough-a rough-b mix]`: two specular lobes, the material's roughness times `rough-a`
+    /// weighted `mix` and times `rough-b` weighted `1 − mix`. None: [`SKIN_LOBES`] for skin,
+    /// one lobe for any other surface ([`Material::lobes`]).
+    pub lobes: Option<[f32; 3]>,
     /// How far diffuse light wraps past the terminator, 0 … 1 (skin).
     pub wrap: f32,
     /// The colour the wrapped light takes (skin's red where light goes under it).
@@ -532,9 +557,11 @@ impl Default for Material {
             surface: Surface::Standard,
             base: None,
             normal: None,
+            occlusion: None,
             color: [1.0, 1.0, 1.0, 1.0],
             roughness: 0.6,
-            specular: 0.3,
+            specular: 0.5,
+            lobes: None,
             wrap: 0.0,
             scatter: [0.0, 0.0, 0.0],
             rim: 0.0,
@@ -542,6 +569,23 @@ impl Default for Material {
             double_sided: false,
             cast_shadow: true,
         }
+    }
+}
+
+impl Material {
+    /// Its specular lobes, `[rough-a rough-b mix]`: the ones it names, else skin's two
+    /// ([`SKIN_LOBES`]) for a `:skin` surface and one for any other.
+    pub fn lobes(&self) -> [f32; 3] {
+        self.lobes.unwrap_or(if self.surface == Surface::Skin {
+            SKIN_LOBES
+        } else {
+            [1.0, 1.0, 1.0]
+        })
+    }
+
+    /// Its reflectance at normal incidence.
+    pub fn f0(&self) -> f32 {
+        (self.specular * SPECULAR_TO_F0).clamp(0.0, 1.0)
     }
 }
 
@@ -573,8 +617,9 @@ pub struct Shadow {
     pub center: Option<[f32; 3]>,
     /// A spot or point light's near plane (metres).
     pub near: f32,
-    /// How soft the shadow's edge is: the radius, in metres at the receiver, over which it is
-    /// filtered (a Poisson disc of `SOFT_SHADOW_TAPS` bilinear taps, turned per point). 0 keeps
+    /// How soft the shadow's edge is, in metres at the receiver: the radius its filter reads
+    /// over (ADR-788), or with the light's `size`/`angle` the most its penumbra grows to
+    /// (ADR-793; `DEFAULT_SOFTNESS` texels with a size and no softness). 0 without a size keeps
     /// the tight 3×3 filter: a hard edge as sharp as the map allows.
     pub softness: f32,
 }
@@ -610,6 +655,9 @@ pub struct AmbientOcclusion {
 /// away, falling off with the inverse square of the distance, windowed to nothing at `range`
 /// when it is above 0. A spot's `cone` is its inner and outer half-angle (radians): full
 /// inside the inner, nothing past the outer, a smoothstep between.
+/// `size` is how big the light is, for a soft shadow's penumbra (ADR-793): a point or spot
+/// light's diameter in metres, a directional light's apparent diameter in radians (the sun's
+/// is 0.0093); 0, a point, softens only by its shadow's fixed `softness`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Light {
     pub kind: LightKind,
@@ -618,6 +666,7 @@ pub struct Light {
     pub color: [f32; 3],
     pub range: f32,
     pub cone: [f32; 2],
+    pub size: f32,
     pub shadow: Option<Shadow>,
 }
 
@@ -630,6 +679,7 @@ impl Light {
             color,
             range: 0.0,
             cone: [0.0; 2],
+            size: 0.0,
             shadow: None,
         }
     }
@@ -698,6 +748,10 @@ pub struct Scene {
     /// The ambient light from above and from below (linear).
     pub sky: [f32; 3],
     pub ground: [f32; 3],
+    /// The ambient light as nine L2 spherical-harmonic coefficients of the light arriving from
+    /// every way (linear RGB each), used in place of `sky`/`ground` when given (ADR-793,
+    /// [`sh_irradiance`] for the convention).
+    pub ambient_sh: Option<[[f32; 3]; 9]>,
     /// The ambient occlusion, if any (`:ambient-occlusion`).
     pub ambient_occlusion: Option<AmbientOcclusion>,
     /// Scales the light before tone mapping.
@@ -851,12 +905,106 @@ pub fn light_arrival(light: &Light, world: [f32; 3]) -> ([f32; 3], f32) {
     }
 }
 
+/// The irradiance arriving at a surface whose unit normal is `normal` from an environment
+/// whose radiance has the L2 spherical-harmonic coefficients `coefficients`, divided by π —
+/// what a white diffuse surface reflects (ADR-793). The coefficients are the radiance
+/// projected onto the real SH basis evaluated on world directions as given, in the order
+/// L00, L1−1, L10, L11, L2−2, L2−1, L20, L21, L22, with Y00 = 0.282095, Y1−1 = 0.488603·y,
+/// Y10 = 0.488603·z, Y11 = 0.488603·x, Y2−2 = 1.092548·xy, Y2−1 = 1.092548·yz, Y20 =
+/// 0.315392·(3z² − 1), Y21 = 1.092548·xz, Y22 = 0.546274·(x² − y²) (three.js's
+/// `SphericalHarmonics3` order and normalisation); the irradiance is Ramamoorthi and
+/// Hanrahan's cosine-convolved quadratic form (c1 0.429043, c2 0.511664, c3 0.743125,
+/// c4 0.886227, c5 0.247708), held at 0. A uniform radiance `L` is `L00 = 2√π·L ≈ 3.5449·L`,
+/// every other coefficient 0, and lights as `:sky L :ground L` does. The shader's
+/// `sh_irradiance` is the same.
+pub fn sh_irradiance(coefficients: &[[f32; 3]; 9], normal: [f32; 3]) -> [f32; 3] {
+    const C1: f32 = 0.429_043;
+    const C2: f32 = 0.511_664;
+    const C3: f32 = 0.743_125;
+    const C4: f32 = 0.886_227;
+    const C5: f32 = 0.247_708;
+    let [x, y, z] = normal;
+    let weights = [
+        C4,
+        2.0 * C2 * y,
+        2.0 * C2 * z,
+        2.0 * C2 * x,
+        2.0 * C1 * x * y,
+        2.0 * C1 * y * z,
+        C3 * z * z - C5,
+        2.0 * C1 * x * z,
+        C1 * (x * x - y * y),
+    ];
+    [0, 1, 2].map(|channel| {
+        let irradiance: f32 = weights
+            .iter()
+            .zip(coefficients)
+            .map(|(weight, coefficient)| weight * coefficient[channel])
+            .sum();
+        irradiance.max(0.0) / std::f32::consts::PI
+    })
+}
+
+/// The ambient light a surface facing `normal` gets, before its colour and occlusion: the
+/// scene's `ambient_sh` irradiance when it has one, else `ground` blended to `sky` by how far
+/// the normal points up.
+pub fn ambient(scene: &Scene, normal: [f32; 3]) -> [f32; 3] {
+    match &scene.ambient_sh {
+        Some(coefficients) => sh_irradiance(coefficients, normal),
+        None => {
+            let up = normal[1] * 0.5 + 0.5;
+            [0, 1, 2].map(|channel| {
+                scene.ground[channel] + (scene.sky[channel] - scene.ground[channel]) * up
+            })
+        }
+    }
+}
+
+/// `amount` taken smoothly from 0 at `low` to 1 at `high` (Hermite): WGSL's `smoothstep`.
+pub fn smoothstep(low: f32, high: f32, amount: f32) -> f32 {
+    let along = ((amount - low) / (high - low)).clamp(0.0, 1.0);
+    along * along * (3.0 - 2.0 * along)
+}
+
+/// Schlick's Fresnel: the share of light a surface whose reflectance at normal incidence is
+/// `f0` reflects when the view and the half vector meet at the cosine `view_dot_half`. Its
+/// grazing reflectance is `min(50·f0, 1)` rather than 1 (UE4's): an F0 under 2 % is no real
+/// material's, so `:specular 0` reflects nothing at any angle. The shader's `fresnel` is the
+/// same.
+pub fn fresnel(f0: f32, view_dot_half: f32) -> f32 {
+    let grazing = (1.0 - view_dot_half.clamp(0.0, 1.0)).powi(5);
+    f0 + ((50.0 * f0).min(1.0) - f0) * grazing
+}
+
+/// The specular reflection of `material`'s lobes for a normal and half vector meeting at the
+/// cosine `normal_dot_half`, before Fresnel and the light's angle: each lobe Blinn-Phong
+/// normalised to `(n + 8) / 8` (the `1/π` of the normalised BRDF folded into the light, as
+/// the diffuse term's is: a light's `:color` is π times its radiance), weighted by its mix.
+pub fn specular_lobes(material: &Material, normal_dot_half: f32) -> f32 {
+    let [rough_a, rough_b, mix] = material.lobes();
+    let lobe = |roughness: f32| {
+        let exponent = shininess(roughness);
+        (exponent + 8.0) / 8.0 * normal_dot_half.max(0.0).powf(exponent)
+    };
+    let first = lobe(material.roughness * rough_a);
+    if mix >= 1.0 {
+        first
+    } else {
+        mix * first + (1.0 - mix) * lobe(material.roughness * rough_b)
+    }
+}
+
 /// The light leaving a surface point toward the eye, linear and before exposure: `base` its
 /// linear colour, `normal` its unit normal facing the viewer's side, `view` the unit
-/// direction from it to the eye, `world` where it is, `visibility` how much of each light (by
-/// index) its shadow lets through — 1 for a light it holds no entry for — and `occlusion` how
-/// much of the ambient light reaches it ([`ambient_occlusion`]; 1 for all of it); `strand`, a
-/// `:hair` surface's unit strand direction (unused by the others).
+/// direction from it to the eye, `world` where it is, `occlusion` how much of the ambient
+/// reaches it (its occlusion map's times the scene's [`ambient_occlusion`], 1 for all of it),
+/// `visibility` how much of each light (by index) its shadow lets through — 1 for a light it
+/// holds no entry for — and `strand` a `:hair` surface's unit strand direction (unused by the
+/// others).
+///
+/// A light's `:color` is the irradiance it brings, π times its radiance, so the diffuse term
+/// is the albedo itself (Lambert's `albedo / π` times π) and the specular's normalised
+/// Blinn-Phong is `(n + 8) / 8` (its `(n + 8) / 8π` times π) — the two on one scale (ADR-793).
 #[allow(clippy::too_many_arguments)]
 pub fn shade(
     scene: &Scene,
@@ -865,23 +1013,23 @@ pub fn shade(
     normal: [f32; 3],
     view: [f32; 3],
     world: [f32; 3],
-    visibility: &[f32],
     occlusion: f32,
+    visibility: &[f32],
     strand: [f32; 3],
 ) -> [f32; 3] {
-    let up = normal[1] * 0.5 + 0.5;
-    let mut out = [0.0f32; 3];
-    for channel in 0..3 {
-        out[channel] = base[channel]
-            * occlusion
-            * (scene.ground[channel] + (scene.sky[channel] - scene.ground[channel]) * up);
-    }
+    let ambient = ambient(scene, normal);
+    let mut out = [0, 1, 2].map(|channel| base[channel] * ambient[channel] * occlusion);
+    let f0 = material.f0();
+    // a `:hair` surface's highlights: as sharp as its roughness asks
     let exponent = shininess(material.roughness);
-    let normalisation = (exponent + 8.0) / (8.0 * std::f32::consts::PI);
     for (index, light) in scene.lights.iter().take(MAX_LIGHTS).enumerate() {
         let (to_light, arriving) = light_arrival(light, world);
-        let arriving = arriving * visibility.get(index).copied().unwrap_or(1.0);
+        let seen = visibility.get(index).copied().unwrap_or(1.0);
         let facing = dot(normal, to_light);
+        // the wrap light past the terminator is light under the skin, which the body's own
+        // shadow there would cut off in a hard line: the shadow fades out of it toward the
+        // terminator (ADR-793)
+        let wrap_seen = 1.0 + (seen - 1.0) * smoothstep(0.0, 0.3, facing);
         let lambert = facing.max(0.0);
         let half = normalize([
             to_light[0] + view[0],
@@ -902,20 +1050,22 @@ pub fn shade(
             let diffuse = (0.25 + 0.75 * facing).clamp(0.0, 1.0);
             for channel in 0..3 {
                 let shine = material.specular * lit_side * (primary + secondary * base[channel]);
-                out[channel] += light.color[channel] * arriving * (base[channel] * diffuse + shine);
+                out[channel] +=
+                    light.color[channel] * arriving * seen * (base[channel] * diffuse + shine);
             }
             continue;
         }
         let specular =
-            material.specular * normalisation * dot(normal, half).max(0.0).powf(exponent) * lambert;
+            fresnel(f0, dot(view, half)) * specular_lobes(material, dot(normal, half)) * lambert;
         for channel in 0..3 {
             let diffuse = if material.surface == Surface::Skin {
                 let wrapped = ((facing + material.wrap) / (1.0 + material.wrap)).clamp(0.0, 1.0);
-                lambert + material.scatter[channel] * (wrapped - lambert)
+                lambert * seen + material.scatter[channel] * (wrapped - lambert) * wrap_seen
             } else {
-                lambert
+                lambert * seen
             };
-            out[channel] += light.color[channel] * arriving * (base[channel] * diffuse + specular);
+            out[channel] +=
+                light.color[channel] * arriving * (base[channel] * diffuse + specular * seen);
         }
     }
     let rim = material.rim * (1.0 - dot(normal, view).max(0.0)).powi(3);
@@ -949,6 +1099,25 @@ pub struct ShadowView {
     /// face's), anywhere in an orthographic one (a directional light's). Times a receiver's
     /// clip w (1 when orthographic) it is the texel's size there.
     pub texel: f32,
+    /// The distances along its axis its depth 0 and 1 stand at (metres; a directional view's
+    /// from an origin of its own, so only their difference means anything), and whether it is
+    /// a perspective view, whose depth is not linear in distance: what turns a stored depth back
+    /// into a distance ([`ShadowView::distance`]) for a soft shadow's penumbra (ADR-793).
+    pub depth_range: [f32; 2],
+    pub perspective: bool,
+}
+
+impl ShadowView {
+    /// The distance along its axis a clip depth (0 … 1) stands at: linear in depth for an
+    /// orthographic view, `near·far / (far − depth·(far − near))` for a perspective one.
+    pub fn distance(&self, depth: f32) -> f32 {
+        let [near, far] = self.depth_range;
+        if self.perspective {
+            near * far / (far - depth * (far - near)).max(1e-6)
+        } else {
+            near + depth * (far - near)
+        }
+    }
 }
 
 /// The shadow maps a scene renders this frame, and which belong to which light.
@@ -1191,6 +1360,8 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
                 view_proj,
                 resolution: side,
                 texel,
+                depth_range: [near, far],
+                perspective: false,
             }]
         }
         LightKind::Spot => {
@@ -1208,6 +1379,8 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
                 ),
                 resolution: side,
                 texel: 2.0 * tan_half / side as f32,
+                depth_range: [near, far],
+                perspective: true,
             }]
         }
         LightKind::Point => {
@@ -1223,6 +1396,8 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
                     view_proj: perspective_view(light.position, *forward, tan_half, near, far),
                     resolution: side,
                     texel: 2.0 * tan_half / side as f32,
+                    depth_range: [near, far],
+                    perspective: true,
                 })
                 .collect()
         }
@@ -1275,40 +1450,99 @@ pub fn shadow_plan(scene: &Scene, world: Option<Bounds>) -> ShadowPlan {
                 view_proj: scene.view_proj,
                 resolution: side,
                 texel: 0.0,
+                // no penumbra is read from it: the occlusion turns its depths into distances
+                // from the camera's own matrix (`view_distance`)
+                depth_range: [0.0, 1.0],
+                perspective: false,
             });
         }
     }
     plan
 }
 
+/// Where `point` falls in the depth map of `view`: its column and row in texels (0 … the
+/// view's resolution at the map's edges, continuous: a texel's centre is at its index + 0.5)
+/// and its clip depth, wherever it is — none only behind the view.
+fn project_raw(view: &ShadowView, point: [f32; 3]) -> Option<([f32; 2], f32)> {
+    let clip = transform(&view.view_proj, point, 1.0);
+    if clip[3] <= 1e-6 || !clip[3].is_finite() {
+        return None;
+    }
+    let side = view.resolution as f32;
+    Some((
+        [
+            (clip[0] / clip[3] * 0.5 + 0.5) * side,
+            (0.5 - clip[1] / clip[3] * 0.5) * side,
+        ],
+        clip[2] / clip[3],
+    ))
+}
+
+/// [`project_raw`], or none when the point is outside the map or past its depth.
+fn project_into(view: &ShadowView, point: [f32; 3]) -> Option<([f32; 2], f32)> {
+    let (at, depth) = project_raw(view, point)?;
+    let side = view.resolution as f32;
+    let (span, unit) = (0.0..=side, 0.0..=1.0);
+    (unit.contains(&depth) && span.contains(&at[0]) && span.contains(&at[1])).then_some((at, depth))
+}
+
+/// The depth stored at texel `(column, row)` of `view`'s map: a read off the map's left or top
+/// edge reads the edge; off its right or bottom edge it reads the GPU target's layer of
+/// `layer_side` texels, cleared to the far plane (1) where the view did not reach — as the
+/// GPU's clamped reads of that layer do.
+fn stored_depth(
+    view: &ShadowView,
+    layer_side: u32,
+    depth_map: &[f32],
+    column: i64,
+    row: i64,
+) -> f32 {
+    let side = view.resolution as i64;
+    let last = i64::from(layer_side.max(1)) - 1;
+    let (column, row) = (column.clamp(0, last), row.clamp(0, last));
+    if column >= side || row >= side {
+        1.0
+    } else {
+        depth_map[(row * side + column) as usize]
+    }
+}
+
+/// A bilinear percentage-closer tap: how lit a receiver at `depth` is at the continuous texel
+/// position `(across, down)` (texel centres at whole numbers here), its four neighbours'
+/// comparisons weighted by nearness. The shader's `bilinear_tap` is one comparison gather.
+fn bilinear_tap(
+    view: &ShadowView,
+    layer_side: u32,
+    depth_map: &[f32],
+    [across, down]: [f32; 2],
+    depth: f32,
+) -> f32 {
+    let (column, row) = (across.floor(), down.floor());
+    let (fraction_x, fraction_y) = (across - column, down - row);
+    let (column, row) = (column as i64, row as i64);
+    let lit = |step_x: i64, step_y: i64| {
+        let stored = stored_depth(view, layer_side, depth_map, column + step_x, row + step_y);
+        if depth <= stored { 1.0 } else { 0.0 }
+    };
+    (lit(0, 0) * (1.0 - fraction_x) + lit(1, 0) * fraction_x) * (1.0 - fraction_y)
+        + (lit(0, 1) * (1.0 - fraction_x) + lit(1, 1) * fraction_x) * fraction_y
+}
+
 /// How much of a light a receiver at `point` gets past the depth map of `view` (`depth_map`,
 /// its `resolution`² texels, row 0 the top): a 3×3 percentage-closer filter of bilinear taps,
 /// read as the weights of a 4×4 block of plain comparisons — 1 lit … 0 in shadow. A point
-/// outside the map, or past its depth, is lit. Texel reads off the map's left or top edge read
-/// the edge; off its right or bottom edge they read the GPU target's layer of `layer_side`
-/// texels, cleared to the far plane where the view did not reach. The shader's
-/// `shadow_sample` is the same, a comparison gather per 2×2 of the block.
+/// outside the map, or past its depth, is lit. Texel reads go through [`stored_depth`]. The
+/// shader's `shadow_sample` is the same, a comparison gather per 2×2 of the block.
 pub fn sample_shadow(
     view: &ShadowView,
     layer_side: u32,
     depth_map: &[f32],
     point: [f32; 3],
 ) -> f32 {
-    let clip = transform(&view.view_proj, point, 1.0);
-    if clip[3] <= 1e-6 || !clip[3].is_finite() {
+    let Some(([across, down], depth)) = project_into(view, point) else {
         return 1.0;
-    }
-    let depth = clip[2] / clip[3];
-    let across_unit = clip[0] / clip[3] * 0.5 + 0.5;
-    let down_unit = 0.5 - clip[1] / clip[3] * 0.5;
-    let unit = 0.0..=1.0;
-    if !unit.contains(&depth) || !unit.contains(&across_unit) || !unit.contains(&down_unit) {
-        return 1.0;
-    }
-    let side = view.resolution as i64;
-    let last = i64::from(layer_side.max(1)) - 1;
-    let across = across_unit * view.resolution as f32 - 0.5;
-    let down = down_unit * view.resolution as f32 - 0.5;
+    };
+    let (across, down) = (across - 0.5, down - 0.5);
     let (column, row) = (across.floor(), down.floor());
     let (fraction_x, fraction_y) = (across - column, down - row);
     let weights_x = [1.0 - fraction_x, 1.0, 1.0, fraction_x];
@@ -1316,14 +1550,14 @@ pub fn sample_shadow(
     let (column, row) = (column as i64 - 1, row as i64 - 1);
     let mut lit = 0.0;
     for (step_y, weight_y) in weights_y.iter().enumerate() {
-        let read_row = (row + step_y as i64).clamp(0, last);
         for (step_x, weight_x) in weights_x.iter().enumerate() {
-            let read_column = (column + step_x as i64).clamp(0, last);
-            let stored = if read_column >= side || read_row >= side {
-                1.0
-            } else {
-                depth_map[(read_row * side + read_column) as usize]
-            };
+            let stored = stored_depth(
+                view,
+                layer_side,
+                depth_map,
+                column + step_x as i64,
+                row + step_y as i64,
+            );
             if depth <= stored {
                 lit += weight_x * weight_y;
             }
@@ -1332,12 +1566,153 @@ pub fn sample_shadow(
     lit / 9.0
 }
 
+/// Interleaved gradient noise (Jimenez 2014) at pixel `(column, row)` of the picture: 0 … 1,
+/// a different value at each of neighbouring pixels, which turns a soft shadow's taps a
+/// different way at each so their pattern becomes fine grain rather than banding. The
+/// shader's `pixel_noise` is the same, at the same pixel.
+pub fn pixel_noise(column: f32, row: f32) -> f32 {
+    let inner = (0.067_110_56 * column + 0.005_837_15 * row).fract();
+    (52.982_918 * inner).fract()
+}
+
+/// Tap `index` of [`SOFT_TAPS`] on a unit disc turned by `turn` radians: a Vogel (golden
+/// angle) spiral, as even over the disc as a Poisson disc and needing no table to keep the
+/// two painters in step. The shader's `disc_tap` is the same.
+pub fn disc_tap(index: u32, turn: f32) -> [f32; 2] {
+    const GOLDEN_ANGLE: f32 = 2.399_963;
+    let radius = ((index as f32 + 0.5) / SOFT_TAPS as f32).sqrt();
+    let angle = index as f32 * GOLDEN_ANGLE + turn;
+    [radius * angle.cos(), radius * angle.sin()]
+}
+
+/// How a soft shadow is filtered at one receiver ([`soft_shadow`]).
+pub struct SoftFilter {
+    /// The light's size: a point or spot light's diameter in metres, a directional light's
+    /// angle in radians; 0 filters over a fixed radius.
+    pub size: f32,
+    /// The filter's radius in texels — fixed, or with a size the most it grows to and how far
+    /// the blocker search reaches.
+    pub softness: f32,
+    /// How far the taps are turned (radians): the pixel's noise.
+    pub turn: f32,
+    /// How the receiver's own surface changes depth a texel across the map, each way
+    /// ([`receiver_slope`]): each tap compares against the receiver's plane where it reads.
+    pub slope: [f32; 2],
+}
+
+/// How the depth of the surface through `point` whose unit normal is `normal` changes a texel
+/// across the map of `view` (column, row): a receiver-plane depth bias, so a wide filter on a
+/// lit surface sloping away from the light does not read its own nearer texels as a shadow.
+/// Found from where two steps along the surface, and one away from the light, land in the map
+/// (no screen derivatives, so the two painters agree); held to the depth change of a surface
+/// four times as steep as the light's own direction (the slope bias's cap), and 0 for a surface
+/// edge-on to the light. The shader's `receiver_slope` is the same.
+pub fn receiver_slope(
+    view: &ShadowView,
+    point: [f32; 3],
+    normal: [f32; 3],
+    to_light: [f32; 3],
+) -> [f32; 2] {
+    let Some((origin, depth)) = project_raw(view, point) else {
+        return [0.0; 2];
+    };
+    let step = view.texel * transform(&view.view_proj, point, 1.0)[3].max(1e-6);
+    let along = |direction: [f32; 3]| {
+        let moved = [0, 1, 2].map(|axis| point[axis] + direction[axis] * step);
+        project_raw(view, moved)
+            .map(|(at, moved_depth)| [at[0] - origin[0], at[1] - origin[1], moved_depth - depth])
+    };
+    let (tangent, bitangent) = basis(normal);
+    let (Some(first), Some(second), Some(away)) = (
+        along(tangent),
+        along(bitangent),
+        along([-to_light[0], -to_light[1], -to_light[2]]),
+    ) else {
+        return [0.0; 2];
+    };
+    let determinant = first[0] * second[1] - first[1] * second[0];
+    if determinant.abs() < 1e-3 {
+        return [0.0; 2];
+    }
+    let cap = 4.0 * away[2].abs();
+    [
+        ((first[2] * second[1] - second[2] * first[1]) / determinant).clamp(-cap, cap),
+        ((second[2] * first[0] - first[2] * second[0]) / determinant).clamp(-cap, cap),
+    ]
+}
+
+/// A soft shadow (ADR-793): how much of a light a receiver at `point` gets past the depth map
+/// of `view`, filtered over a disc of [`SOFT_TAPS`] bilinear taps as `filter` says, each
+/// compared against the receiver's plane where it reads.
+///
+/// With no size the disc's radius is `softness` texels. With a size it is the penumbra the
+/// light casts there (percentage-closer soft shadows): the taps first look for blockers within
+/// `softness` texels, and the penumbra's half-width is the size times the gap from the
+/// blockers' mean distance to the receiver's, over the blockers' distance for a light at a
+/// point — so a contact shadow stays crisp and a far one softens — measured in texels where
+/// the receiver stands, held to [`MIN_SOFTNESS`] … `softness`. A receiver no blocker covers is
+/// lit. The shader's `soft_shadow` is the same.
+pub fn soft_shadow(
+    view: &ShadowView,
+    layer_side: u32,
+    depth_map: &[f32],
+    point: [f32; 3],
+    filter: &SoftFilter,
+) -> f32 {
+    let Some((at, depth)) = project_into(view, point) else {
+        return 1.0;
+    };
+    let softness = filter.softness.max(MIN_SOFTNESS);
+    // the receiver's depth `offset` texels across the map, on its own plane
+    let plane =
+        |offset: [f32; 2]| depth + filter.slope[0] * offset[0] + filter.slope[1] * offset[1];
+    let mut radius = softness;
+    if filter.size > 0.0 {
+        let (mut blockers, mut found) = (0.0f32, 0u32);
+        for index in 0..SOFT_TAPS {
+            let offset = disc_tap(index, filter.turn).map(|axis| axis * softness);
+            let stored = stored_depth(
+                view,
+                layer_side,
+                depth_map,
+                (at[0] + offset[0]).floor() as i64,
+                (at[1] + offset[1]).floor() as i64,
+            );
+            if stored < plane(offset) {
+                blockers += view.distance(stored);
+                found += 1;
+            }
+        }
+        if found == 0 {
+            return 1.0;
+        }
+        let blocker = blockers / found as f32;
+        let receiver = view.distance(depth);
+        let gap = (receiver - blocker).max(0.0);
+        let (penumbra, texel) = if view.perspective {
+            (filter.size * gap / blocker.max(1e-4), view.texel * receiver)
+        } else {
+            (filter.size * gap, view.texel)
+        };
+        radius = (penumbra * 0.5 / texel.max(1e-9)).clamp(MIN_SOFTNESS, softness);
+    }
+    let mut lit = 0.0;
+    for index in 0..SOFT_TAPS {
+        let offset = disc_tap(index, filter.turn).map(|axis| axis * radius);
+        let tap = [at[0] - 0.5 + offset[0], at[1] - 0.5 + offset[1]];
+        lit += bilinear_tap(view, layer_side, depth_map, tap, plane(offset));
+    }
+    lit / SOFT_TAPS as f32
+}
+
 /// How much of light `index` reaches `world`, whose surface's unit normal is `normal`, past
 /// its shadow — 1 for a light without one. The receiver is moved toward the light by the
 /// shadow's `bias` texels (times one plus the tangent of the light's angle to the surface,
 /// held at 4) and along its normal by `normal_bias` texels, both measured where it stands, so
 /// a lit surface does not shadow itself (acne) at any angle and a shadow starts where its
-/// caster touches the ground. The shader's `shadow_visibility` is the same.
+/// caster touches the ground. Then it is filtered 3×3 ([`sample_shadow`]), or soft
+/// ([`soft_shadow`], turned by `turn` radians) when the light has a `size` or its shadow a
+/// `softness`. The shader's `shadow_visibility` is the same.
 pub fn shadow_visibility(
     scene: &Scene,
     plan: &ShadowPlan,
@@ -1345,6 +1720,7 @@ pub fn shadow_visibility(
     index: usize,
     world: [f32; 3],
     normal: [f32; 3],
+    turn: f32,
 ) -> f32 {
     let (first, count) = plan.lights.get(index).copied().unwrap_or((0, 0));
     let (Some(light), true) = (scene.lights.get(index), count > 0) else {
@@ -1366,23 +1742,39 @@ pub fn shadow_visibility(
     let (to_light, _) = light_arrival(light, world);
     let facing = dot(normal, to_light).abs().clamp(1e-3, 1.0);
     let slope = ((1.0 - facing * facing).max(0.0).sqrt() / facing).min(4.0);
-    // a soft edge reads the map further from the receiver, where a sloped surface lies deeper:
-    // moved toward the light by the filter's reach down that slope too
-    let toward = shadow.bias * texel * (1.0 + slope) + shadow.softness * slope.min(2.0);
+    let toward = shadow.bias * texel * (1.0 + slope);
     let along = shadow.normal_bias * texel;
     let biased = [0, 1, 2].map(|axis| world[axis] + normal[axis] * along + to_light[axis] * toward);
-    if shadow.softness > 0.0 && texel > 0.0 {
-        let reach = (shadow.softness / texel).clamp(1.0, MAX_SOFT_SHADOW_TEXELS);
-        sample_shadow_soft(
+    match shadow_softness(light, texel) {
+        Some(softness) => soft_shadow(
             view,
             plan.layer_side,
             depth_map,
             biased,
-            reach,
-            soft_turn(world),
-        )
+            &SoftFilter {
+                size: light.size,
+                softness,
+                turn,
+                slope: receiver_slope(view, biased, normal, to_light),
+            },
+        ),
+        None => sample_shadow(view, plan.layer_side, depth_map, biased),
+    }
+}
+
+/// The radius a shadowed light's soft filter reaches, in texels where the receiver stands
+/// (`texel` metres a texel there): its shadow's `softness` (metres) over that, held to 1 …
+/// [`MAX_SOFT_SHADOW_TEXELS`], or [`DEFAULT_SOFTNESS`] texels for a light with a size and no
+/// softness — none (the 3×3 filter) for a light with neither, or no shadow. The shader's
+/// `shadow_softness` is the same.
+pub fn shadow_softness(light: &Light, texel: f32) -> Option<f32> {
+    let shadow = light.shadow.as_ref()?;
+    if shadow.softness > 0.0 && texel > 0.0 {
+        Some((shadow.softness / texel).clamp(1.0, MAX_SOFT_SHADOW_TEXELS))
+    } else if light.size > 0.0 {
+        Some(DEFAULT_SOFTNESS)
     } else {
-        sample_shadow(view, plan.layer_side, depth_map, biased)
+        None
     }
 }
 
@@ -1495,104 +1887,10 @@ pub fn ambient_occlusion(
     (1.0 - settings.strength * occluded / OCCLUSION_TAPS as f32).clamp(0.0, 1.0)
 }
 
-/// The taps a soft shadow reads, each a bilinear comparison.
-pub const SOFT_SHADOW_TAPS: usize = 16;
-/// The widest a soft shadow's filter reaches, in texels: past this its taps fall so far apart
-/// that the edge breaks into rings, so a softness wider than the map can hold is clamped.
-pub const MAX_SOFT_SHADOW_TEXELS: f32 = 24.0;
-
-/// A Poisson disc: `SOFT_SHADOW_TAPS` points none nearer another than about 0.3, spread evenly
-/// out to 1.234 from the centre (the shader's `POISSON` is the same); read scaled by
-/// `POISSON_INTO_UNIT` so every tap lies within the filter's reach, which the slope bias covers.
-/// Brings the disc's farthest point (1.234 out) inside the unit circle.
-const POISSON_INTO_UNIT: f32 = 0.81;
-
-const POISSON: [[f32; 2]; SOFT_SHADOW_TAPS] = [
-    [-0.942_016, -0.399_062],
-    [0.945_586, -0.768_907],
-    [-0.094_184, -0.929_389],
-    [0.344_959, 0.293_878],
-    [-0.915_886, 0.457_714],
-    [-0.815_442, -0.879_125],
-    [-0.382_775, 0.276_768],
-    [0.974_844, 0.756_484],
-    [0.443_233, -0.975_116],
-    [0.537_430, -0.473_734],
-    [-0.264_969, -0.418_930],
-    [0.791_975, 0.190_909],
-    [-0.241_888, 0.997_065],
-    [-0.814_100, 0.914_376],
-    [0.199_841, 0.786_414],
-    [0.143_832, -0.141_008],
-];
-
-/// How far the disc is turned at `world`, in radians: a hash of where the point is, so the
-/// taps' pattern differs from point to point and a soft edge reads as fine grain, not as rings
-/// or bands. The shader's `soft_turn` is the same.
-fn soft_turn(world: [f32; 3]) -> f32 {
-    let seed = (world[0] * 12.9898 + world[1] * 78.233 + world[2] * 37.719).sin() * 43_758.547;
-    (seed - seed.floor()) * std::f32::consts::TAU
-}
-
-/// `sample_shadow` with a soft edge: the map read at `SOFT_SHADOW_TAPS` points of a Poisson disc
-/// `reach` texels wide about the receiver, turned by `turn`, each a bilinear comparison — 1 lit
-/// … 0 in shadow. The shader's `shadow_sample_soft` is the same, a comparison gather a tap.
-pub fn sample_shadow_soft(
-    view: &ShadowView,
-    layer_side: u32,
-    depth_map: &[f32],
-    point: [f32; 3],
-    reach: f32,
-    turn: f32,
-) -> f32 {
-    let clip = transform(&view.view_proj, point, 1.0);
-    if clip[3] <= 1e-6 || !clip[3].is_finite() {
-        return 1.0;
-    }
-    let depth = clip[2] / clip[3];
-    let across_unit = clip[0] / clip[3] * 0.5 + 0.5;
-    let down_unit = 0.5 - clip[1] / clip[3] * 0.5;
-    let unit = 0.0..=1.0;
-    if !unit.contains(&depth) || !unit.contains(&across_unit) || !unit.contains(&down_unit) {
-        return 1.0;
-    }
-    let side = view.resolution as i64;
-    let last = i64::from(layer_side.max(1)) - 1;
-    let stored = |column: i64, row: i64| {
-        let (column, row) = (column.clamp(0, last), row.clamp(0, last));
-        if column >= side || row >= side {
-            1.0
-        } else {
-            depth_map[(row * side + column) as usize]
-        }
-    };
-    let lit_at = |column: i64, row: i64| {
-        if depth <= stored(column, row) {
-            1.0
-        } else {
-            0.0
-        }
-    };
-    let (cosine, sine) = (turn.cos(), turn.sin());
-    let centre = (
-        across_unit * view.resolution as f32 - 0.5,
-        down_unit * view.resolution as f32 - 0.5,
-    );
-    let mut lit = 0.0;
-    for [x, y] in POISSON {
-        let (x, y) = (x * POISSON_INTO_UNIT, y * POISSON_INTO_UNIT);
-        let across = centre.0 + reach * (x * cosine - y * sine);
-        let down = centre.1 + reach * (x * sine + y * cosine);
-        let (column, row) = (across.floor(), down.floor());
-        let (fraction_x, fraction_y) = (across - column, down - row);
-        let (column, row) = (column as i64, row as i64);
-        lit += (1.0 - fraction_x) * (1.0 - fraction_y) * lit_at(column, row)
-            + fraction_x * (1.0 - fraction_y) * lit_at(column + 1, row)
-            + (1.0 - fraction_x) * fraction_y * lit_at(column, row + 1)
-            + fraction_x * fraction_y * lit_at(column + 1, row + 1);
-    }
-    lit / SOFT_SHADOW_TAPS as f32
-}
+/// The widest a soft shadow's filter reaches for a `softness` in metres, in texels where the
+/// receiver stands: as wide as a sized light's default reach ([`DEFAULT_SOFTNESS`]), so a
+/// softness wider than the map can hold is clamped rather than breaking its taps apart.
+pub const MAX_SOFT_SHADOW_TEXELS: f32 = DEFAULT_SOFTNESS;
 
 // --- the CPU painter's rasteriser ---------------------------------------------------------------
 
@@ -1604,6 +1902,10 @@ pub struct TextureRef<'a> {
     /// Its mip chain ([`mip_chain`]): empty for a texture sampled at its own size only.
     pub levels: &'a [MipLevel],
 }
+
+/// The alpha a `:coverage` texture's mip levels keep the share of texels above: the middle of a
+/// `:hair` surface's coverage at its usual cutoff of a half.
+pub const COVERAGE_CUTOFF: f32 = 0.5;
 
 /// One level of a texture's mip chain below its own size: half the size of the level above
 /// (rounded down, at least 1), straight-alpha RGBA bytes.
@@ -1619,17 +1921,34 @@ pub struct MipLevel {
 /// premultiplied, so a transparent texel's colour does not bleed into a strand's edge — so a
 /// texture seen small (fine hair, far away) reads as its average, not as the few texels that
 /// happen to land on a pixel (aliasing: crimp and glitter). Alpha averages too: what a
-/// `:hair` surface's coverage reads. Both painters sample these levels (the GPU target
-/// uploads them; ADR-786).
-pub fn mip_chain(rgba: &[u8], w: u32, h: u32) -> Vec<MipLevel> {
+/// `:hair` surface's coverage reads. With a `coverage` cutoff (a `:coverage` texture, at
+/// [`COVERAGE_CUTOFF`]) each level's alpha is scaled so as many of its texels reach the cutoff,
+/// as a share, as at the texture's own size (Castaño's coverage-preserving mips): fine strands
+/// keep their density with distance instead of averaging into a faint, uniform sheet. Both
+/// painters sample these levels (the GPU target uploads them; ADR-786).
+pub fn mip_chain(rgba: &[u8], w: u32, h: u32, coverage: Option<f32>) -> Vec<MipLevel> {
     let mut levels: Vec<MipLevel> = Vec::new();
     let (mut width, mut height) = (w as usize, h as usize);
     if rgba.len() < width * height * 4 {
         return levels;
     }
+    // the share of texels at or above the cutoff at the texture's own size, which every level
+    // keeps (a coverage texture's)
+    let covered_share = |bytes: &[u8], cutoff: f32, scale: f32| {
+        let texels = bytes.len() / 4;
+        let covered = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|texel| (f32::from(texel[3]) / 255.0 * scale).min(1.0) >= cutoff)
+            .count();
+        covered as f32 / texels.max(1) as f32
+    };
+    let target = coverage.map(|cutoff| covered_share(rgba, cutoff, 1.0));
+    // each level averages the one above as it was averaged, not as it was rescaled
+    let mut above: Vec<u8> = rgba.to_vec();
     while width > 1 || height > 1 {
         let (next_width, next_height) = ((width / 2).max(1), (height / 2).max(1));
-        let above = levels.last().map_or(rgba, |level| level.rgba.as_slice());
         let mut out = vec![0u8; next_width * next_height * 4];
         for row in 0..next_height {
             for column in 0..next_width {
@@ -1654,11 +1973,31 @@ pub fn mip_chain(rgba: &[u8], w: u32, h: u32) -> Vec<MipLevel> {
                 out[start + 3] = (sum[3] / 4.0 * 255.0).round().clamp(0.0, 255.0) as u8;
             }
         }
+        let mut kept = out.clone();
+        if let (Some(cutoff), Some(target)) = (coverage, target) {
+            // the alpha scale that keeps the covered share (Castaño): found by halving, the
+            // share growing with the scale
+            let (mut low, mut high) = (0.0f32, 8.0f32);
+            for _ in 0..16 {
+                let middle = 0.5 * (low + high);
+                if covered_share(&out, cutoff, middle) < target {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            // the bracket's upper end: never less covered than the texture itself
+            let scale = high;
+            for texel in kept.as_chunks_mut::<4>().0 {
+                texel[3] = (f32::from(texel[3]) * scale).round().clamp(0.0, 255.0) as u8;
+            }
+        }
         levels.push(MipLevel {
             w: next_width as u32,
             h: next_height as u32,
-            rgba: out,
+            rgba: kept,
         });
+        above = out;
         (width, height) = (next_width, next_height);
     }
     levels
@@ -1924,10 +2263,12 @@ struct DrawContext<'a> {
     material: &'a Material,
     base_texture: Option<TextureRef<'a>>,
     normal_texture: Option<TextureRef<'a>>,
+    occlusion_texture: Option<TextureRef<'a>>,
+    /// How many canvas pixels a side make one of the picture's: a soft shadow's noise is the
+    /// picture pixel's, as the GPU's is.
+    supersample: usize,
     shadows: &'a ShadowPlan,
     shadow_maps: &'a [Vec<f32>],
-    /// Canvas pixels a side to one of the picture's (the texture level a triangle reads).
-    supersample: f32,
 }
 
 /// The pixels of a `width`×`height` picture whose centres `corners` (already clipped in front
@@ -2067,10 +2408,10 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
     let (width, height) = (canvas.width, canvas.height);
     // the mip level each texture is read at, for the whole triangle
     let base_lod = context.base_texture.as_ref().map_or(0.0, |texture| {
-        triangle_lod(corners, texture, width, height, context.supersample)
+        triangle_lod(corners, texture, width, height, context.supersample as f32)
     });
     let normal_lod = context.normal_texture.as_ref().map_or(0.0, |texture| {
-        triangle_lod(corners, texture, width, height, context.supersample)
+        triangle_lod(corners, texture, width, height, context.supersample as f32)
     });
     scan_triangle(
         width,
@@ -2150,6 +2491,15 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     tangent[2] * local[0] + sign * bitangent[2] * local[1] + normal[2] * local[2],
                 ]);
             }
+            let occlusion = context
+                .occlusion_texture
+                .as_ref()
+                .map_or(1.0, |texture| sample(texture, uv[0], uv[1])[0]);
+            let turn = std::f32::consts::TAU
+                * pixel_noise(
+                    (column / context.supersample) as f32,
+                    (row / context.supersample) as f32,
+                );
             let mut visibility = [1.0f32; MAX_LIGHTS];
             for (index, seen) in visibility.iter_mut().enumerate().take(lights) {
                 if context.shadows.lights[index].1 > 0 {
@@ -2160,6 +2510,7 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                         index,
                         world,
                         surface_normal,
+                        turn,
                     );
                 }
             }
@@ -2177,13 +2528,15 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
             } else {
                 [0.0; 3]
             };
-            let occlusion = ambient_occlusion(
-                scene,
-                context.shadows,
-                context.shadow_maps,
-                world,
-                surface_normal,
-            );
+            // the ambient's occlusion: its map's, times the scene's screen-space ambient occlusion
+            let occlusion = occlusion
+                * ambient_occlusion(
+                    scene,
+                    context.shadows,
+                    context.shadow_maps,
+                    world,
+                    surface_normal,
+                );
             let eye = scene.eye;
             let view = normalize([eye[0] - world[0], eye[1] - world[1], eye[2] - world[2]]);
             let lit = tone(
@@ -2194,8 +2547,8 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     normal,
                     view,
                     world,
-                    &visibility,
                     occlusion,
+                    &visibility,
                     strand,
                 ),
                 scene.exposure,
@@ -2408,9 +2761,10 @@ pub fn rasterize<'t>(
             } else {
                 None
             },
+            occlusion_texture: material.occlusion.and_then(textures),
+            supersample,
             shadows: &shadows,
             shadow_maps: &shadow_maps,
-            supersample: supersample as f32,
         };
         each_clipped_triangle(&item.mesh, &item.vertices, |corners| {
             fill_triangle(&mut canvas, &context, corners)
@@ -2507,6 +2861,7 @@ mod tests {
             lights: vec![Light::directional([0.0, 0.0, -1.0], [1.0, 1.0, 1.0])],
             sky: [0.1, 0.1, 0.1],
             ground: [0.1, 0.1, 0.1],
+            ambient_sh: None,
             exposure: 1.0,
             ambient_occlusion: None,
             background: [0.0, 0.0, 0.0, 0.0],
@@ -2685,8 +3040,8 @@ mod tests {
             normal,
             [0.0, 0.0, -1.0],
             [0.0; 3],
-            &[],
             1.0,
+            &[],
             [0.0; 3],
         );
         let wrapped = shade(
@@ -2696,8 +3051,8 @@ mod tests {
             normal,
             [0.0, 0.0, -1.0],
             [0.0; 3],
-            &[],
             1.0,
+            &[],
             [0.0; 3],
         );
         assert!(wrapped[0] > plain[0] + 0.2, "red wraps round");
@@ -2714,13 +3069,56 @@ mod tests {
             255, 0, 0, 255, 0, 255, 0, 0, //
             0, 0, 255, 255, 255, 255, 255, 127,
         ];
-        let levels = mip_chain(&rgba, 2, 2);
+        let levels = mip_chain(&rgba, 2, 2, None);
         assert_eq!(levels.len(), 1, "2×2 down to 1×1");
         let texel = &levels[0].rgba;
         // the colour weighed by alpha (1, 0, 1, about 0.5 of 2.5): red and blue 1.5 / 2.5, green
         // 0.5 / 2.5 (none from the transparent texel); alpha the plain average
         assert_eq!(texel.as_slice(), &[153, 51, 153, 159]);
-        assert_eq!(mip_chain(&[0; 4 * 5 * 3], 5, 3).len(), 2, "5×3 → 2×1 → 1×1");
+        assert_eq!(
+            mip_chain(&[0; 4 * 5 * 3], 5, 3, None).len(),
+            2,
+            "5×3 → 2×1 → 1×1"
+        );
+    }
+
+    #[test]
+    fn coverage_mips_keep_fine_strands_as_covered_as_up_close() {
+        // a 16×16 texture of 1-texel strands, every fourth column opaque: a quarter of it
+        // covered. Two levels down each texel averages four columns, a quarter alpha: under a
+        // half everywhere, so plain mips lose every strand; coverage mips scale it back up.
+        let rgba: Vec<u8> = (0..16 * 16)
+            .flat_map(|index| {
+                let alpha = if index % 16 % 4 == 0 { 255 } else { 0 };
+                [200, 180, 120, alpha]
+            })
+            .collect();
+        let plain = mip_chain(&rgba, 16, 16, None);
+        let kept = mip_chain(&rgba, 16, 16, Some(COVERAGE_CUTOFF));
+        let alpha = |levels: &[MipLevel]| levels[1].rgba[3];
+        assert_eq!(alpha(&plain), 64, "plain mips: a quarter alpha");
+        assert!(
+            alpha(&kept) >= 120,
+            "coverage mips bring it back to about the cutoff: {}",
+            alpha(&kept)
+        );
+        assert_eq!(
+            plain[1]
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|texel| texel[0])
+                .collect::<Vec<_>>(),
+            kept[1]
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|texel| texel[0])
+                .collect::<Vec<_>>(),
+            "colour untouched"
+        );
     }
 
     #[test]
@@ -2739,7 +3137,7 @@ mod tests {
                 [value, value, value, 255]
             })
             .collect();
-        let levels = mip_chain(&rgba, side as u32, side as u32);
+        let levels = mip_chain(&rgba, side as u32, side as u32, None);
         let mut parts = MeshParts {
             positions: bytes_of(&[
                 -1.0, -1.0, 0.5, 1.0, -1.0, 0.5, 1.0, 1.0, 0.5, -1.0, 1.0, 0.5,
@@ -2806,8 +3204,8 @@ mod tests {
                 normal,
                 normal,
                 [0.0; 3],
-                &[],
                 1.0,
+                &[],
                 strand,
             )[0]
         };
@@ -2858,8 +3256,8 @@ mod tests {
             [0.0, 0.0, 1.0],
             [0.0, 0.0, 1.0],
             [0.0; 3],
-            &[],
             1.0,
+            &[],
             [0.0; 3],
         );
         assert!(lit.iter().all(|channel| channel.is_finite()));
@@ -2885,8 +3283,8 @@ mod tests {
             normal,
             normal,
             world,
-            &[],
             1.0,
+            &[],
             [0.0; 3],
         )[0]
     }
@@ -3398,6 +3796,382 @@ mod tests {
             "every target moved it: {:?}",
             vertices[2].world
         );
+    }
+
+    // --- soft shadows, SH ambient, Fresnel and lobes, occlusion (ADR-793) -----------------------
+
+    /// How many pixels of `rgba` along the floor line at `world_x`, z `from` … `to`, are
+    /// between the shadow's dark and the lit floor's bright (8 levels in from each): the
+    /// penumbra's width there, in pixels (16 a metre).
+    fn penumbra_across_z(rgba: &[u8], world_x: f32, from: f32, to: f32) -> usize {
+        let (dark, bright) = (red_at(rgba, world_x, 0.0), red_at(rgba, world_x, 2.0));
+        assert!(
+            u16::from(dark) + 60 < u16::from(bright),
+            "x {world_x}: a shadow ({dark}) to measure against the lit floor ({bright})"
+        );
+        let rows = ((to - from) * 16.0) as usize;
+        (0..rows)
+            .filter(|step| {
+                let red = red_at(rgba, world_x, from + *step as f32 / 16.0);
+                red > dark.saturating_add(8) && red < bright.saturating_sub(8)
+            })
+            .count()
+    }
+
+    /// The same along the floor line at `world_z`, x `from` … `to`.
+    fn penumbra_across_x(rgba: &[u8], world_z: f32, from: f32, to: f32) -> usize {
+        let (dark, bright) = (red_at(rgba, -1.0, world_z), red_at(rgba, -2.5, world_z));
+        assert!(u16::from(dark) + 60 < u16::from(bright));
+        let columns = ((to - from) * 16.0) as usize;
+        (0..columns)
+            .filter(|step| {
+                let red = red_at(rgba, from + *step as f32 / 16.0, world_z);
+                red > dark.saturating_add(8) && red < bright.saturating_sub(8)
+            })
+            .count()
+    }
+
+    #[test]
+    fn a_shadows_softness_widens_its_edge() {
+        // the card's shadow ends at x −1.5; the 3×3 filter's edge is a pixel or two, a softness
+        // of 21 cm (16 texels here) several
+        let (mut lit, meshes) = floor_and_card(shadowed(slanted()));
+        let hard = penumbra_across_x(&paint(&lit, &meshes), 0.0, -2.0, -1.0);
+        lit.lights[0].shadow.as_mut().unwrap().softness = 0.21; // 16 texels here
+        let soft = penumbra_across_x(&paint(&lit, &meshes), 0.0, -2.0, -1.0);
+        assert!(hard <= 2, "the 3×3 edge: {hard} px");
+        assert!(soft >= hard + 3, "a soft edge: {soft} px against {hard}");
+    }
+
+    #[test]
+    fn a_soft_shadow_leaves_a_lit_floor_lit_at_any_angle_of_light() {
+        // a 16-texel filter reaches far past what the receiver bias clears; each tap compares
+        // against the floor's own plane where it reads (`receiver_slope`), so the lit floor
+        // reads no shadow of itself — with a fixed radius and with a sized light alike
+        for size in [0.0, 0.2] {
+            for degrees in [0.0f32, 30.0, 60.0] {
+                let angle = degrees.to_radians();
+                let mut light = shadowed(Light::directional(
+                    [-angle.sin(), -angle.cos(), 0.0],
+                    [1.0; 3],
+                ));
+                light.size = size;
+                light.shadow.as_mut().unwrap().softness = 0.21; // 16 texels here
+                let (mut lit, meshes) = floor_and_card(light);
+                let with_shadow = paint(&lit, &meshes);
+                lit.lights[0].shadow = None;
+                let without = paint(&lit, &meshes);
+                let reach = angle.tan();
+                no_acne(&with_shadow, &without, -0.5 - reach..0.5 - reach, 0.6);
+            }
+        }
+    }
+
+    #[test]
+    fn a_sized_light_keeps_a_contact_shadow_crisp_and_softens_a_far_one() {
+        // a 2 m wall standing on the floor along z (x = 0, z −1 … 1), the light from +x at 45°
+        // with an apparent diameter of 0.4 rad, searching 24 texels (about 31 cm): the shadow's
+        // side edge at z = 1 is cast by the wall's foot at x = −0.1 (about 0.4 × 0.14 m = 6 cm
+        // wide, the blocker search averaging in some of the wall above: crisp) and by its upper
+        // part at x = −1.3 (about 0.4 × 1.84 m = 74 cm, held to the 24 texels' radius: some 10 px)
+        // — and the shadow's far end, cast by the top at x = −2, is away from both
+        let mut light = shadowed(slanted());
+        light.size = 0.4;
+        light.shadow.as_mut().unwrap().softness = 0.315; // 24 texels here
+        let (lit, mut meshes) = floor_and_card(light);
+        meshes.insert(
+            2,
+            Arc::new(quad([
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, -1.0],
+                [0.0, 2.0, -1.0],
+                [0.0, 2.0, 1.0],
+            ])),
+        );
+        let rgba = paint(&lit, &meshes);
+        let near = penumbra_across_z(&rgba, -0.1, 0.4, 1.6);
+        let far = penumbra_across_z(&rgba, -1.3, 0.4, 1.6);
+        assert!(near <= 3, "by the wall's foot the edge is crisp: {near} px");
+        assert!(
+            far >= near + 4,
+            "far from it, soft: {far} px against {near}"
+        );
+        // and the floor no blocker covers is lit exactly as without a shadow
+        let mut unshadowed = lit.clone();
+        unshadowed.lights[0].shadow = None;
+        let without = paint(&unshadowed, &meshes);
+        assert_eq!(red_at(&rgba, 2.0, 2.0), red_at(&without, 2.0, 2.0));
+    }
+
+    #[test]
+    fn a_uniform_sh_ambient_lights_as_the_same_sky_and_ground() {
+        let radiance = [0.2f32, 0.3, 0.4];
+        let mut coefficients = [[0.0f32; 3]; 9];
+        coefficients[0] = radiance.map(|channel| channel * 2.0 * std::f32::consts::PI.sqrt());
+        let mut sky = scene(draw());
+        sky.lights.clear();
+        sky.sky = radiance;
+        sky.ground = radiance;
+        let mut sh = sky.clone();
+        sh.sky = [9.0; 3];
+        sh.ground = [9.0; 3];
+        sh.ambient_sh = Some(coefficients);
+        let material = Material::default();
+        for normal in [[0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.6, 0.0, 0.8]] {
+            let by_sky = shade(
+                &sky,
+                &material,
+                [1.0; 3],
+                normal,
+                normal,
+                [0.0; 3],
+                1.0,
+                &[],
+                [0.0; 3],
+            );
+            let by_sh = shade(
+                &sh,
+                &material,
+                [1.0; 3],
+                normal,
+                normal,
+                [0.0; 3],
+                1.0,
+                &[],
+                [0.0; 3],
+            );
+            for channel in 0..3 {
+                assert!(
+                    (by_sky[channel] - by_sh[channel]).abs() < 1e-4,
+                    "{normal:?}: {by_sh:?} against {by_sky:?}"
+                );
+            }
+        }
+        // light from above (L1−1, the y term) brightens what faces up and not what faces down,
+        // and an irradiance below 0 is held at 0
+        let mut above = [[0.0f32; 3]; 9];
+        above[0] = [1.0; 3];
+        above[1] = [1.0; 3];
+        let (up, down) = (
+            sh_irradiance(&above, [0.0, 1.0, 0.0]),
+            sh_irradiance(&above, [0.0, -1.0, 0.0]),
+        );
+        assert!(up[0] > 0.5 && down[0] == 0.0, "up {up:?}, down {down:?}");
+    }
+
+    /// A white light straight on a black surface seen along its normal, nothing else: its
+    /// specular alone.
+    fn specular_head_on(material: &Material) -> f32 {
+        let mut lit = scene(draw());
+        lit.sky = [0.0; 3];
+        lit.ground = [0.0; 3];
+        lit.lights = vec![Light::directional([0.0, 0.0, -1.0], [1.0; 3])];
+        let normal = [0.0, 0.0, 1.0];
+        shade(
+            &lit,
+            material,
+            [0.0; 3],
+            normal,
+            normal,
+            [0.0; 3],
+            1.0,
+            &[],
+            [0.0; 3],
+        )[0]
+    }
+
+    #[test]
+    fn specular_is_f0_at_normal_incidence_on_the_diffuse_scale_and_grows_at_grazing() {
+        // head on, Schlick's Fresnel is F0 (:specular × 0.08) and the normalised Blinn-Phong
+        // (n + 8)/8: the 1/π of both BRDFs folded into the light alike
+        let plain = Material {
+            roughness: 0.5,
+            ..Material::default()
+        };
+        let expected = 0.5 * SPECULAR_TO_F0 * (shininess(0.5) + 8.0) / 8.0;
+        let measured = specular_head_on(&plain);
+        assert!(
+            (measured - expected).abs() < 1e-3 * expected,
+            "{measured} against {expected}"
+        );
+        // at a grazing view the reflectance climbs toward 1; with :specular 0 it is nothing
+        assert!(fresnel(0.04, 0.05) > 0.5 && fresnel(0.04, 1.0) == 0.04);
+        assert_eq!(fresnel(0.0, 0.0), 0.0);
+        let none = Material {
+            specular: 0.0,
+            ..plain.clone()
+        };
+        assert_eq!(specular_head_on(&none), 0.0);
+        // skin's two lobes by default, UE4's: 0.85 of a sharper one, 0.15 of a broader one
+        let skin = Material {
+            surface: Surface::Skin,
+            roughness: 0.5,
+            specular: 0.35,
+            ..Material::default()
+        };
+        assert_eq!(skin.lobes(), SKIN_LOBES);
+        let lobe = |roughness: f32| (shininess(roughness) + 8.0) / 8.0;
+        let two = 0.35 * SPECULAR_TO_F0 * (0.85 * lobe(0.375) + 0.15 * lobe(0.65));
+        assert!((specular_head_on(&skin) - two).abs() < 1e-3 * two);
+        let one = Material {
+            lobes: Some([1.0, 1.0, 1.0]),
+            ..skin
+        };
+        let single = 0.35 * SPECULAR_TO_F0 * lobe(0.5);
+        assert!((specular_head_on(&one) - single).abs() < 1e-3 * single);
+    }
+
+    #[test]
+    fn an_occlusion_map_darkens_the_ambient_and_not_the_lights() {
+        // no light: the triangle is its ambient, which a black occlusion map takes away; lit
+        // head on, the light stays
+        let mesh = Arc::new(triangle());
+        let black = [0u8, 0, 0, 255];
+        let textures = |handle: u32| {
+            (handle == 9).then_some(TextureRef {
+                w: 1,
+                h: 1,
+                rgba: &black,
+                levels: &[],
+            })
+        };
+        let red_middle = |scene: &Scene| {
+            rasterize(scene, &|_| Some(mesh.clone()), &textures).2[(9 * 16 + 8) * 4]
+        };
+        let occluded = Draw {
+            material: Material {
+                occlusion: Some(9),
+                double_sided: true,
+                ..Material::default()
+            },
+            ..draw()
+        };
+        let mut dark = scene(occluded.clone());
+        dark.lights.clear();
+        let mut open = dark.clone();
+        open.draws[0].material.occlusion = None;
+        assert!(red_middle(&open) > 40, "the ambient alone lights it");
+        assert_eq!(red_middle(&dark), 0, "occluded, it is black");
+        // `scene`'s own light, travelling −z onto the triangle's face
+        let lit = scene(occluded);
+        assert!(red_middle(&lit) > 100, "a light still lights it");
+    }
+
+    /// A unit sphere about the origin, `rings` × `segments`, its normals its positions, each
+    /// triangle wound counter-clockwise seen from outside in the painters' convention (the
+    /// one `triangle` faces the camera with).
+    fn sphere(rings: usize, segments: usize) -> Mesh {
+        let point = |ring: usize, segment: usize| {
+            let polar = std::f32::consts::PI * ring as f32 / rings as f32;
+            let around = std::f32::consts::TAU * segment as f32 / segments as f32;
+            [
+                polar.sin() * around.cos(),
+                polar.cos(),
+                polar.sin() * around.sin(),
+            ]
+        };
+        let mut positions: Vec<[f32; 3]> = Vec::new();
+        let mut indices: Vec<u16> = Vec::new();
+        for ring in 0..=rings {
+            for segment in 0..=segments {
+                positions.push(point(ring, segment));
+            }
+        }
+        let at = |ring: usize, segment: usize| (ring * (segments + 1) + segment) as u16;
+        for ring in 0..rings {
+            for segment in 0..segments {
+                let corners = [
+                    at(ring, segment),
+                    at(ring + 1, segment),
+                    at(ring + 1, segment + 1),
+                    at(ring, segment + 1),
+                ];
+                for triangle in [
+                    [corners[0], corners[1], corners[2]],
+                    [corners[0], corners[2], corners[3]],
+                ] {
+                    let [first, second, third] = triangle.map(|index| positions[index as usize]);
+                    let turn = cross(subtract(second, first), subtract(third, first));
+                    let middle = [0, 1, 2].map(|axis| first[axis] + second[axis] + third[axis]);
+                    // facing the camera means counter-clockwise on screen, a turn against the
+                    // outward normal here (`triangle`'s normal is +z, seen from −z)
+                    if dot(turn, middle) > 0.0 {
+                        indices.extend([triangle[0], triangle[2], triangle[1]]);
+                    } else {
+                        indices.extend(triangle);
+                    }
+                }
+            }
+        }
+        let flat: Vec<f32> = positions.iter().flatten().copied().collect();
+        Mesh::from_parts(MeshParts {
+            positions: bytes_of(&flat),
+            normals: bytes_of(&flat),
+            indices: indices
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect(),
+            ..MeshParts::default()
+        })
+        .expect("a sphere")
+    }
+
+    #[test]
+    fn a_shadow_does_not_cut_the_skins_wrap_light_past_the_terminator() {
+        // a skin sphere lit from −x by a shadowed light, seen from −z: past the terminator
+        // (x > 0 on its face) the wrap light is light under the skin, and the sphere's own
+        // shadow there must not cut it off in a hard line — every pixel there paints as it does
+        // with the shadow off; on the lit side the shadow still applies (nothing casts on it)
+        let mut light = shadowed(Light::directional([1.0, 0.0, 0.0], [2.0; 3]));
+        light.shadow.as_mut().unwrap().resolution = 512;
+        let skin = Material {
+            surface: Surface::Skin,
+            wrap: 0.5,
+            scatter: [1.0, 0.3, 0.2],
+            specular: 0.0,
+            ..Material::default()
+        };
+        let mut lit = scene(Draw {
+            material: skin,
+            ..draw()
+        });
+        lit.w = 128.0;
+        lit.h = 128.0;
+        // x, y → clip / 1.5; depth (z + 2) / 4, the camera on −z looking along +z
+        lit.view_proj = from_rows([
+            [1.0 / 1.5, 0.0, 0.0, 0.0],
+            [0.0, 1.0 / 1.5, 0.0, 0.0],
+            [0.0, 0.0, 0.25, 0.5],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        lit.eye = [0.0, 0.0, -10.0];
+        lit.sky = [0.0; 3];
+        lit.ground = [0.0; 3];
+        lit.lights = vec![light];
+        let meshes = HashMap::from([(1, Arc::new(sphere(48, 96)))]);
+        let with_shadow = paint(&lit, &meshes);
+        let mut unshadowed = lit.clone();
+        unshadowed.lights[0].shadow = None;
+        let without = paint(&unshadowed, &meshes);
+        // the picture's column for world x (64 px a 1.5 m, centre 64)
+        let column = |world_x: f32| (64.0 + world_x / 1.5 * 64.0) as usize;
+        let mut band = 0;
+        for row in 40..88usize {
+            let world_y = (64.0 - row as f32 - 0.5) / 64.0 * 1.5;
+            for world_x in (1..20).map(|step| 0.04 * step as f32) {
+                // inside the disc, a little past the terminator and clear of the rim
+                if world_x * world_x + world_y * world_y > 0.8 {
+                    continue;
+                }
+                let at = (row * 128 + column(world_x)) * 4;
+                assert_eq!(
+                    with_shadow[at], without[at],
+                    "past the terminator at x {world_x}, y {world_y}: the shadow cut the wrap"
+                );
+                band += usize::from(without[at] > 10);
+            }
+        }
+        assert!(band > 50, "the wrap band is lit to compare: {band} pixels");
     }
 
     /// What morphing costs at a real figure's size (womanblend's body: 70,737 vertices, 37 face

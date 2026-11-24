@@ -2735,6 +2735,43 @@ element storage. Run here: `cargo check`/clippy/fmt and short single timing runs
 `jit_float_run_cache_test`, the extended `message_roundtrip_test` and
 `process::message::float_vector_tests` are CI's (desktop rule).
 
+2026-11-24. **Soft shadows, an SH ambient, Fresnel and dual-lobe skin (ADR-793).** For the
+game's woman under a lamp: ADR-788's shadows all had the same texel-wide edge, the ambient was a
+two-colour hemisphere and the specular had no Fresnel. A shadow's `:softness` (texels) filters
+it over a 16-tap golden-angle disc turned per pixel by interleaved gradient noise; a light's
+`:size` (point/spot, metres) or `:angle` (directional, radians) makes it PCSS — a blocker search
+over the same taps, the penumbra from the blockers' mean distance, crisp at contact and wide far
+off, held to `:softness` (32 by default). A scene's `:ambient-sh` (nine `[r g b]` radiance
+coefficients, three.js's basis, Ramamoorthi–Hanrahan irradiance) replaces `:sky`/`:ground`.
+Specular: the normalised Blinn-Phong had kept its `1/π` while the diffuse had folded it into the
+light, so it sat π too dim — fixed; Schlick's Fresnel with F0 = `:specular` × 0.08 (default 0.5
+= 4 %, skin 0.35 = 2.8 %); `:lobes [rough-a rough-b mix]`, skin `[0.75 1.3 0.85]` by default.
+A material's `:occlusion` texture multiplies the ambient. Malformed `:ambient-sh`/`:lobes`/
+`:softness`/`:size`/`:angle` are refused. Both painters, mirrored function for function; the
+scene uniform grows to 3072 bytes. Built (default and `gui-gpu`), clippy clean; tests written
+(`host::gui::mesh`, `gui_scene_light_tests`) and left to CI (desktop rule) — none run here.
+Merged onto main after the profiler (ADR-791) and float work (ADR-792), so renumbered 793; on
+the way it met ADR-788's later follow-ups and keeps them: `:softness` stays in metres at the
+receiver (what main's soft shadows and the womanblend viewer give it), turned into texels where
+the receiver stands (`shadow_softness`) and held to `DEFAULT_SOFTNESS`; with a `:size`/`:angle`
+it is the most the penumbra grows to. This branch's receiver-plane bias and golden-angle filter
+replace main's Poisson disc and its softness slope bias. The ambient occlusion multiplies the
+ambient with the `:occlusion` map's, `:hair` keeps its own highlights (shadowed by the light's
+visibility), and the ambient occlusion's settings move from the ambient's spare fourths (now
+the SH flag's) to an `occlusion` vec4 at the scene uniform's end.
+
+2026-11-24 (ADR-793 follow-up). **Soft shadows read 32 taps.** The 16-tap disc's per-pixel
+rotation showed as a fine grain over every soft shadow on womanblend's skin (a GPU frame of her
+neck); 32 taps halve the variance and the shading reads smooth. Run here: fmt, clippy, a GPU
+frame from the real window, before and after; the tests are CI's (desktop rule).
+
+2026-11-24 (ADR-793 follow-up). **`{:filter :coverage}` textures: mips that keep their coverage.**
+womanblend's strand cards averaged into faint sheets at distance (thin strands on clear cards).
+A `:coverage` texture is smooth, and each mip level's alpha is scaled so as many texels reach half
+alpha, as a share, as at full size (Castaño); colour untouched, both painters (`mip_chain`).
+Guard: a texture of 1-texel strands keeps its strands two levels down. Run here: fmt, clippy; the
+tests are CI's (desktop rule).
+
 2026-11-24. **A number read on the float path branches again (ADR-792 follow-up).** With
 ADR-790 and ADR-792 both on main, a point transform measured 112 → 132 ns and a projection
 200 → 216 ns against the commit before ADR-792. `number_of` computed both the float's bits and
