@@ -123,11 +123,11 @@
                                    :stacks [{:stack ["leaf" "mid" "main"] :count 4}
                                              {:stack ["mid" "mid" "main"] :count 2}
                                              {:stack ["main"] :count 1}]}))
-      (assert= ["main" "mid" "leaf"] (map rows :name))
-      (assert= [7 6 4] (map rows :total-ticks))
-      (assert= [1 2 4] (map rows :self-ticks))
+      (assert= ["main" "mid" "leaf"] (into [] (map rows :name)))
+      (assert= [7 6 4] (into [] (map rows :total-ticks)))
+      (assert= [1 2 4] (into [] (map rows :self-ticks)))
       ;; 500 Hz: a tick is 2 ms
-      (assert= [14.0 12.0 8.0] (map rows :total-ms))))
+      (assert= [14.0 12.0 8.0] (into [] (map rows :total-ms)))))
   (test "report ranks by self time and by total time"
     (let (text (profile/report {:hz 1000
                                 :wall-ms 10.0
