@@ -1091,22 +1091,25 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let light = scene.lights[slot];
         let arrival = light_arrival(light, world);
-        var arriving = arrival.amount;
+        let arriving = arrival.amount;
+        var seen = 1.0;
         if (light.shadow.z > 0u) {
-            arriving = arriving * shadow_visibility(light, world, surface_normal, arrival.to_light, turn);
+            seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn);
         }
         let to_light = arrival.to_light;
         let facing = dot(normal, to_light);
         let lambert = max(facing, 0.0);
         let half_vector = safe_normalize(to_light + view);
         let specular = fresnel(f0, dot(view, half_vector)) * specular_lobes(dot(normal, half_vector)) * lambert;
-        var diffuse = vec3<f32>(lambert);
+        var diffuse = vec3<f32>(lambert * seen);
         if (draw.flags.x == 0u) {
+            // the CPU's: the shadow fades out of the wrap light toward the terminator
+            let wrap_seen = mix(1.0, seen, smoothstep(0.0, 0.3, facing));
             let wrap = draw.scatter.w;
             let wrapped = clamp((facing + wrap) / (1.0 + wrap), 0.0, 1.0);
-            diffuse = vec3<f32>(lambert) + draw.scatter.rgb * (wrapped - lambert);
+            diffuse = diffuse + draw.scatter.rgb * (wrapped - lambert) * wrap_seen;
         }
-        out = out + light.color.rgb * arriving * (base * diffuse + vec3<f32>(specular));
+        out = out + light.color.rgb * arriving * (base * diffuse + vec3<f32>(specular * seen));
     }
     let rim = draw.material.z * pow(1.0 - max(dot(normal, view), 0.0), 3.0);
     return out + rim * scene.sky.rgb;

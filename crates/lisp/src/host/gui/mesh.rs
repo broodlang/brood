@@ -914,6 +914,12 @@ pub fn ambient(scene: &Scene, normal: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// `amount` taken smoothly from 0 at `low` to 1 at `high` (Hermite): WGSL's `smoothstep`.
+pub fn smoothstep(low: f32, high: f32, amount: f32) -> f32 {
+    let along = ((amount - low) / (high - low)).clamp(0.0, 1.0);
+    along * along * (3.0 - 2.0 * along)
+}
+
 /// Schlick's Fresnel: the share of light a surface whose reflectance at normal incidence is
 /// `f0` reflects when the view and the half vector meet at the cosine `view_dot_half`. Its
 /// grazing reflectance is `min(50·f0, 1)` rather than 1 (UE4's): an F0 under 2 % is no real
@@ -967,8 +973,12 @@ pub fn shade(
     let f0 = material.f0();
     for (index, light) in scene.lights.iter().take(MAX_LIGHTS).enumerate() {
         let (to_light, arriving) = light_arrival(light, world);
-        let arriving = arriving * visibility.get(index).copied().unwrap_or(1.0);
+        let seen = visibility.get(index).copied().unwrap_or(1.0);
         let facing = dot(normal, to_light);
+        // the wrap light past the terminator is light under the skin, which the body's own
+        // shadow there would cut off in a hard line: the shadow fades out of it toward the
+        // terminator (ADR-791)
+        let wrap_seen = 1.0 + (seen - 1.0) * smoothstep(0.0, 0.3, facing);
         let lambert = facing.max(0.0);
         let half = normalize([
             to_light[0] + view[0],
@@ -980,11 +990,12 @@ pub fn shade(
         for channel in 0..3 {
             let diffuse = if material.surface == Surface::Skin {
                 let wrapped = ((facing + material.wrap) / (1.0 + material.wrap)).clamp(0.0, 1.0);
-                lambert + material.scatter[channel] * (wrapped - lambert)
+                lambert * seen + material.scatter[channel] * (wrapped - lambert) * wrap_seen
             } else {
-                lambert
+                lambert * seen
             };
-            out[channel] += light.color[channel] * arriving * (base[channel] * diffuse + specular);
+            out[channel] +=
+                light.color[channel] * arriving * (base[channel] * diffuse + specular * seen);
         }
     }
     let rim = material.rim * (1.0 - dot(normal, view).max(0.0)).powi(3);
@@ -3300,6 +3311,123 @@ mod tests {
         // `scene`'s own light, travelling −z onto the triangle's face
         let lit = scene(occluded);
         assert!(red_middle(&lit) > 100, "a light still lights it");
+    }
+
+    /// A unit sphere about the origin, `rings` × `segments`, its normals its positions, each
+    /// triangle wound counter-clockwise seen from outside in the painters' convention (the
+    /// one `triangle` faces the camera with).
+    fn sphere(rings: usize, segments: usize) -> Mesh {
+        let point = |ring: usize, segment: usize| {
+            let polar = std::f32::consts::PI * ring as f32 / rings as f32;
+            let around = std::f32::consts::TAU * segment as f32 / segments as f32;
+            [
+                polar.sin() * around.cos(),
+                polar.cos(),
+                polar.sin() * around.sin(),
+            ]
+        };
+        let mut positions: Vec<[f32; 3]> = Vec::new();
+        let mut indices: Vec<u16> = Vec::new();
+        for ring in 0..=rings {
+            for segment in 0..=segments {
+                positions.push(point(ring, segment));
+            }
+        }
+        let at = |ring: usize, segment: usize| (ring * (segments + 1) + segment) as u16;
+        for ring in 0..rings {
+            for segment in 0..segments {
+                let corners = [
+                    at(ring, segment),
+                    at(ring + 1, segment),
+                    at(ring + 1, segment + 1),
+                    at(ring, segment + 1),
+                ];
+                for triangle in [
+                    [corners[0], corners[1], corners[2]],
+                    [corners[0], corners[2], corners[3]],
+                ] {
+                    let [first, second, third] = triangle.map(|index| positions[index as usize]);
+                    let turn = cross(subtract(second, first), subtract(third, first));
+                    let middle = [0, 1, 2].map(|axis| first[axis] + second[axis] + third[axis]);
+                    // facing the camera means counter-clockwise on screen, a turn against the
+                    // outward normal here (`triangle`'s normal is +z, seen from −z)
+                    if dot(turn, middle) > 0.0 {
+                        indices.extend([triangle[0], triangle[2], triangle[1]]);
+                    } else {
+                        indices.extend(triangle);
+                    }
+                }
+            }
+        }
+        let flat: Vec<f32> = positions.iter().flatten().copied().collect();
+        Mesh::from_parts(MeshParts {
+            positions: bytes_of(&flat),
+            normals: bytes_of(&flat),
+            indices: indices
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect(),
+            ..MeshParts::default()
+        })
+        .expect("a sphere")
+    }
+
+    #[test]
+    fn a_shadow_does_not_cut_the_skins_wrap_light_past_the_terminator() {
+        // a skin sphere lit from −x by a shadowed light, seen from −z: past the terminator
+        // (x > 0 on its face) the wrap light is light under the skin, and the sphere's own
+        // shadow there must not cut it off in a hard line — every pixel there paints as it does
+        // with the shadow off; on the lit side the shadow still applies (nothing casts on it)
+        let mut light = shadowed(Light::directional([1.0, 0.0, 0.0], [2.0; 3]));
+        light.shadow.as_mut().unwrap().resolution = 512;
+        let skin = Material {
+            surface: Surface::Skin,
+            wrap: 0.5,
+            scatter: [1.0, 0.3, 0.2],
+            specular: 0.0,
+            ..Material::default()
+        };
+        let mut lit = scene(Draw {
+            material: skin,
+            ..draw()
+        });
+        lit.w = 128.0;
+        lit.h = 128.0;
+        // x, y → clip / 1.5; depth (z + 2) / 4, the camera on −z looking along +z
+        lit.view_proj = from_rows([
+            [1.0 / 1.5, 0.0, 0.0, 0.0],
+            [0.0, 1.0 / 1.5, 0.0, 0.0],
+            [0.0, 0.0, 0.25, 0.5],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        lit.eye = [0.0, 0.0, -10.0];
+        lit.sky = [0.0; 3];
+        lit.ground = [0.0; 3];
+        lit.lights = vec![light];
+        let meshes = HashMap::from([(1, Arc::new(sphere(48, 96)))]);
+        let with_shadow = paint(&lit, &meshes);
+        let mut unshadowed = lit.clone();
+        unshadowed.lights[0].shadow = None;
+        let without = paint(&unshadowed, &meshes);
+        // the picture's column for world x (64 px a 1.5 m, centre 64)
+        let column = |world_x: f32| (64.0 + world_x / 1.5 * 64.0) as usize;
+        let mut band = 0;
+        for row in 40..88usize {
+            let world_y = (64.0 - row as f32 - 0.5) / 64.0 * 1.5;
+            for world_x in (1..20).map(|step| 0.04 * step as f32) {
+                // inside the disc, a little past the terminator and clear of the rim
+                if world_x * world_x + world_y * world_y > 0.8 {
+                    continue;
+                }
+                let at = (row * 128 + column(world_x)) * 4;
+                assert_eq!(
+                    with_shadow[at], without[at],
+                    "past the terminator at x {world_x}, y {world_y}: the shadow cut the wrap"
+                );
+                band += usize::from(without[at] > 10);
+            }
+        }
+        assert!(band > 50, "the wrap band is lit to compare: {band} pixels");
     }
 
     /// What morphing costs at a real figure's size (womanblend's body: 70,737 vertices, 37 face
