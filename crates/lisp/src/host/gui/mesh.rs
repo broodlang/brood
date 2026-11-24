@@ -544,6 +544,10 @@ pub struct Shadow {
     pub center: Option<[f32; 3]>,
     /// A spot or point light's near plane (metres).
     pub near: f32,
+    /// How soft the shadow's edge is: the radius, in metres at the receiver, over which it is
+    /// filtered (a Poisson disc of `SOFT_SHADOW_TAPS` bilinear taps, turned per point). 0 keeps
+    /// the tight 3×3 filter: a hard edge as sharp as the map allows.
+    pub softness: f32,
 }
 
 impl Default for Shadow {
@@ -555,6 +559,7 @@ impl Default for Shadow {
             extent: None,
             center: None,
             near: DEFAULT_SHADOW_NEAR,
+            softness: 0.0,
         }
     }
 }
@@ -1274,10 +1279,123 @@ pub fn shadow_visibility(
     let (to_light, _) = light_arrival(light, world);
     let facing = dot(normal, to_light).abs().clamp(1e-3, 1.0);
     let slope = ((1.0 - facing * facing).max(0.0).sqrt() / facing).min(4.0);
-    let toward = shadow.bias * texel * (1.0 + slope);
+    // a soft edge reads the map further from the receiver, where a sloped surface lies deeper:
+    // moved toward the light by the filter's reach down that slope too
+    let toward = shadow.bias * texel * (1.0 + slope) + shadow.softness * slope.min(2.0);
     let along = shadow.normal_bias * texel;
     let biased = [0, 1, 2].map(|axis| world[axis] + normal[axis] * along + to_light[axis] * toward);
-    sample_shadow(view, plan.layer_side, depth_map, biased)
+    if shadow.softness > 0.0 && texel > 0.0 {
+        let reach = (shadow.softness / texel).clamp(1.0, MAX_SOFT_SHADOW_TEXELS);
+        sample_shadow_soft(
+            view,
+            plan.layer_side,
+            depth_map,
+            biased,
+            reach,
+            soft_turn(world),
+        )
+    } else {
+        sample_shadow(view, plan.layer_side, depth_map, biased)
+    }
+}
+
+/// The taps a soft shadow reads, each a bilinear comparison.
+pub const SOFT_SHADOW_TAPS: usize = 16;
+/// The widest a soft shadow's filter reaches, in texels: past this its taps fall so far apart
+/// that the edge breaks into rings, so a softness wider than the map can hold is clamped.
+pub const MAX_SOFT_SHADOW_TEXELS: f32 = 24.0;
+
+/// A Poisson disc: `SOFT_SHADOW_TAPS` points none nearer another than about 0.3, spread evenly
+/// out to 1.234 from the centre (the shader's `POISSON` is the same); read scaled by
+/// `POISSON_INTO_UNIT` so every tap lies within the filter's reach, which the slope bias covers.
+/// Brings the disc's farthest point (1.234 out) inside the unit circle.
+const POISSON_INTO_UNIT: f32 = 0.81;
+
+const POISSON: [[f32; 2]; SOFT_SHADOW_TAPS] = [
+    [-0.942_016, -0.399_062],
+    [0.945_586, -0.768_907],
+    [-0.094_184, -0.929_389],
+    [0.344_959, 0.293_878],
+    [-0.915_886, 0.457_714],
+    [-0.815_442, -0.879_125],
+    [-0.382_775, 0.276_768],
+    [0.974_844, 0.756_484],
+    [0.443_233, -0.975_116],
+    [0.537_430, -0.473_734],
+    [-0.264_969, -0.418_930],
+    [0.791_975, 0.190_909],
+    [-0.241_888, 0.997_065],
+    [-0.814_100, 0.914_376],
+    [0.199_841, 0.786_414],
+    [0.143_832, -0.141_008],
+];
+
+/// How far the disc is turned at `world`, in radians: a hash of where the point is, so the
+/// taps' pattern differs from point to point and a soft edge reads as fine grain, not as rings
+/// or bands. The shader's `soft_turn` is the same.
+fn soft_turn(world: [f32; 3]) -> f32 {
+    let seed = (world[0] * 12.9898 + world[1] * 78.233 + world[2] * 37.719).sin() * 43_758.547;
+    (seed - seed.floor()) * std::f32::consts::TAU
+}
+
+/// `sample_shadow` with a soft edge: the map read at `SOFT_SHADOW_TAPS` points of a Poisson disc
+/// `reach` texels wide about the receiver, turned by `turn`, each a bilinear comparison — 1 lit
+/// … 0 in shadow. The shader's `shadow_sample_soft` is the same, a comparison gather a tap.
+pub fn sample_shadow_soft(
+    view: &ShadowView,
+    layer_side: u32,
+    depth_map: &[f32],
+    point: [f32; 3],
+    reach: f32,
+    turn: f32,
+) -> f32 {
+    let clip = transform(&view.view_proj, point, 1.0);
+    if clip[3] <= 1e-6 || !clip[3].is_finite() {
+        return 1.0;
+    }
+    let depth = clip[2] / clip[3];
+    let across_unit = clip[0] / clip[3] * 0.5 + 0.5;
+    let down_unit = 0.5 - clip[1] / clip[3] * 0.5;
+    let unit = 0.0..=1.0;
+    if !unit.contains(&depth) || !unit.contains(&across_unit) || !unit.contains(&down_unit) {
+        return 1.0;
+    }
+    let side = view.resolution as i64;
+    let last = i64::from(layer_side.max(1)) - 1;
+    let stored = |column: i64, row: i64| {
+        let (column, row) = (column.clamp(0, last), row.clamp(0, last));
+        if column >= side || row >= side {
+            1.0
+        } else {
+            depth_map[(row * side + column) as usize]
+        }
+    };
+    let lit_at = |column: i64, row: i64| {
+        if depth <= stored(column, row) {
+            1.0
+        } else {
+            0.0
+        }
+    };
+    let (cosine, sine) = (turn.cos(), turn.sin());
+    let centre = (
+        across_unit * view.resolution as f32 - 0.5,
+        down_unit * view.resolution as f32 - 0.5,
+    );
+    let mut lit = 0.0;
+    for [x, y] in POISSON {
+        let (x, y) = (x * POISSON_INTO_UNIT, y * POISSON_INTO_UNIT);
+        let across = centre.0 + reach * (x * cosine - y * sine);
+        let down = centre.1 + reach * (x * sine + y * cosine);
+        let (column, row) = (across.floor(), down.floor());
+        let (fraction_x, fraction_y) = (across - column, down - row);
+        let (column, row) = (column as i64, row as i64);
+        lit += (1.0 - fraction_x) * (1.0 - fraction_y) * lit_at(column, row)
+            + fraction_x * (1.0 - fraction_y) * lit_at(column + 1, row)
+            + (1.0 - fraction_x) * fraction_y * lit_at(column, row + 1)
+            + fraction_x * fraction_y * lit_at(column + 1, row + 1);
+    }
+    lit / SOFT_SHADOW_TAPS as f32
 }
 
 // --- the CPU painter's rasteriser ---------------------------------------------------------------
@@ -2383,6 +2501,39 @@ mod tests {
             red_at(&without, 2.0, 2.0),
             "the floor away from it is lit"
         );
+    }
+
+    #[test]
+    fn a_soft_shadow_grades_its_edge_and_keeps_its_middle_dark_without_acne() {
+        // the card's shadow on x −1.5 … −0.5, its edges filtered over 0.3 m
+        let (mut scene, meshes) = floor_and_card(shadowed(slanted()));
+        let hard = paint(&scene, &meshes);
+        scene.lights[0].shadow.as_mut().expect("shadowed").softness = 0.3;
+        let soft = paint(&scene, &meshes);
+        scene.lights[0].shadow = None;
+        let without = paint(&scene, &meshes);
+        let red = |picture: &[u8], x: f32| i32::from(red_at(picture, x, 0.0));
+        // just inside its edge a soft shadow is lighter, just outside it darker, than a hard one
+        assert!(
+            red(&soft, -1.35) > red(&hard, -1.35) + 10,
+            "inside the edge: soft {} against hard {}",
+            red(&soft, -1.35),
+            red(&hard, -1.35)
+        );
+        assert!(
+            red(&soft, -1.65) + 5 < red(&hard, -1.65),
+            "outside the edge: soft {} against hard {}",
+            red(&soft, -1.65),
+            red(&hard, -1.65)
+        );
+        // still a shadow in its middle, and the floor well away from it lit as without one
+        assert!(
+            red(&soft, -1.0) + 40 < red(&without, -1.0),
+            "its middle stays dark"
+        );
+        // the edge filtered over 0.3 m as the light sees it lies across 0.3 × √2 of floor at 45°,
+        // and the slope bias (0.3 m toward the light) carries it ~0.2 m further
+        no_acne(&soft, &without, -1.5..-0.5, 0.75);
     }
 
     /// Every floor pixel of `with_shadow` and `without` outside the card and its shadow (and a

@@ -642,7 +642,7 @@ pub(super) const MESH_SRC: &str = r#"
 struct Light {
     position: vec4<f32>,        // xyz, range (0: no window)
     direction: vec4<f32>,       // xyz: the way the light travels
-    color: vec4<f32>,           // rgb
+    color: vec4<f32>,           // rgb, shadow softness (metres)
     cone: vec4<f32>,            // cos inner, cos outer, shadow bias, shadow normal bias
     shadow: vec4<u32>,          // kind (0 directional, 1 point, 2 spot), first view, view count
 };
@@ -866,6 +866,55 @@ fn shadow_sample(view_index: u32, point: vec3<f32>) -> f32 {
     return lit / 9.0;
 }
 
+// the CPU's `POISSON`: a soft shadow's taps, out to 1.234 from the centre
+var<private> POISSON: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
+    vec2<f32>(-0.942016, -0.399062), vec2<f32>(0.945586, -0.768907), vec2<f32>(-0.094184, -0.929389),
+    vec2<f32>(0.344959, 0.293878), vec2<f32>(-0.915886, 0.457714), vec2<f32>(-0.815442, -0.879125),
+    vec2<f32>(-0.382775, 0.276768), vec2<f32>(0.974844, 0.756484), vec2<f32>(0.443233, -0.975116),
+    vec2<f32>(0.537430, -0.473734), vec2<f32>(-0.264969, -0.418930), vec2<f32>(0.791975, 0.190909),
+    vec2<f32>(-0.241888, 0.997065), vec2<f32>(-0.814100, 0.914376), vec2<f32>(0.199841, 0.786414),
+    vec2<f32>(0.143832, -0.141008),
+);
+
+// the CPU's `soft_turn`: the disc turned by a hash of where the point is
+fn soft_turn(world: vec3<f32>) -> f32 {
+    let seed = sin(dot(world, vec3<f32>(12.9898, 78.233, 37.719))) * 43758.547;
+    return fract(seed) * 6.2831853;
+}
+
+// the CPU's `sample_shadow_soft`: the map read at the disc's taps `reach` texels wide, turned
+// by `turn`, each a bilinear comparison gathered where its four texels meet
+fn shadow_sample_soft(view_index: u32, point: vec3<f32>, reach: f32, turn: f32) -> f32 {
+    let view = scene.shadows[view_index];
+    let clip = view.view_proj * vec4<f32>(point, 1.0);
+    if (!(clip.w > 1e-6)) {
+        return 1.0;
+    }
+    let depth = clip.z / clip.w;
+    let unit = vec2<f32>(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+    if (!(depth >= 0.0 && depth <= 1.0 && unit.x >= 0.0 && unit.x <= 1.0 && unit.y >= 0.0 && unit.y <= 1.0)) {
+        return 1.0;
+    }
+    let centre = unit * view.info.y - vec2<f32>(0.5);
+    let layer_side = scene.params.z;
+    let turning = vec2<f32>(cos(turn), sin(turn));
+    var lit = 0.0;
+    for (var tap = 0u; tap < 16u; tap = tap + 1u) {
+        // within the unit circle (the CPU's `POISSON_INTO_UNIT`)
+        let offset = POISSON[tap] * 0.81;
+        let texels = centre + reach * vec2<f32>(offset.x * turning.x - offset.y * turning.y,
+                                                 offset.x * turning.y + offset.y * turning.x);
+        let corner = floor(texels);
+        let fraction = texels - corner;
+        // the four texels from `corner` meet at `corner` + 1
+        let gathered = textureGatherCompare(shadow_maps, shadow_sampler, (corner + vec2<f32>(1.0)) / layer_side, i32(view_index), depth);
+        // a gather's order: (left, bottom), (right, bottom), (right, top), (left, top)
+        lit = lit + gathered.x * (1.0 - fraction.x) * fraction.y + gathered.y * fraction.x * fraction.y
+            + gathered.z * fraction.x * (1.0 - fraction.y) + gathered.w * (1.0 - fraction.x) * (1.0 - fraction.y);
+    }
+    return lit / 16.0;
+}
+
 // the CPU's `shadow_visibility`: the receiver moved toward the light and along its surface's
 // normal by the light's biases, in texels where it stands, then filtered
 fn shadow_visibility(light: Light, world: vec3<f32>, surface_normal: vec3<f32>, to_light: vec3<f32>) -> f32 {
@@ -877,9 +926,14 @@ fn shadow_visibility(light: Light, world: vec3<f32>, surface_normal: vec3<f32>, 
     let texel = view.info.x * max((view.view_proj * vec4<f32>(world, 1.0)).w, 0.0);
     let facing = clamp(abs(dot(surface_normal, to_light)), 1e-3, 1.0);
     let slope = min(sqrt(max(1.0 - facing * facing, 0.0)) / facing, 4.0);
-    let toward = light.cone.z * texel * (1.0 + slope);
+    let softness = light.color.w;
+    let toward = light.cone.z * texel * (1.0 + slope) + softness * min(slope, 2.0);
     let along = light.cone.w * texel;
-    return shadow_sample(at, world + surface_normal * along + to_light * toward);
+    let biased = world + surface_normal * along + to_light * toward;
+    if (softness > 0.0 && texel > 0.0) {
+        return shadow_sample_soft(at, biased, clamp(softness / texel, 1.0, 24.0), soft_turn(world));
+    }
+    return shadow_sample(at, biased);
 }
 
 fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>) -> vec3<f32> {
