@@ -818,7 +818,7 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; shadowed lights a scene. A `:cutout`, `:blend` or `:hair` surface casts where its alpha
 ;; reaches `:cutoff`.
 ;; SOFT SHADOWS (ADR-788, ADR-793): a shadow's `:softness` (metres at the receiver, 0 or more)
-;; filters it over a disc of 16 taps that radius wide, turned per pixel. A light's size — a
+;; filters it over a disc of 32 taps that radius wide, turned per pixel. A light's size — a
 ;; point or spot light's `:size` (its diameter, metres), a directional light's `:angle` (its
 ;; apparent diameter, radians: the sun's 0.0093) — makes the penumbra grow with the distance
 ;; from caster to receiver, as a real lamp's does (percentage-closer soft shadows): crisp where

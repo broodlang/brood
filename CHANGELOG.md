@@ -62,7 +62,7 @@ malformed light (an unknown key, a wrong shape, a `:range` on a directional ligh
 8 lights is now an error raised by `gui/draw`, where it used to be ignored.
 
 **Added: soft shadows, a spherical-harmonic ambient, Fresnel and dual-lobe skin in a 3D scene
-(ADR-793).** A light's `:shadow` takes `:softness` (penumbra radius in metres at the receiver, a 16-tap disc
+(ADR-793).** A light's `:shadow` takes `:softness` (penumbra radius in metres at the receiver, a 32-tap disc
 turned per pixel), and a light's size — `:size` (metres) on a point or spot light, `:angle`
 (radians) on a directional one — makes the penumbra grow with the distance from caster to
 receiver (percentage-closer soft shadows), crisp at contact, up to `:softness` (32 by default). A

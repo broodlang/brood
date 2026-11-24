@@ -2759,3 +2759,8 @@ replace main's Poisson disc and its softness slope bias. The ambient occlusion m
 ambient with the `:occlusion` map's, `:hair` keeps its own highlights (shadowed by the light's
 visibility), and the ambient occlusion's settings move from the ambient's spare fourths (now
 the SH flag's) to an `occlusion` vec4 at the scene uniform's end.
+
+2026-11-24 (ADR-793 follow-up). **Soft shadows read 32 taps.** The 16-tap disc's per-pixel
+rotation showed as a fine grain over every soft shadow on womanblend's skin (a GPU frame of her
+neck); 32 taps halve the variance and the shading reads smooth. Run here: fmt, clippy, a GPU
+frame from the real window, before and after; the tests are CI's (desktop rule).

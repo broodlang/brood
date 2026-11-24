@@ -918,9 +918,9 @@ fn pixel_noise(pixel: vec2<f32>) -> f32 {
     return fract(52.982918 * fract(0.06711056 * pixel.x + 0.00583715 * pixel.y));
 }
 
-// the CPU's `disc_tap`: tap `index` of 16 on a golden-angle spiral over the unit disc, turned
+// the CPU's `disc_tap`: tap `index` of 32 on a golden-angle spiral over the unit disc, turned
 fn disc_tap(index: u32, turn: f32) -> vec2<f32> {
-    let radius = sqrt((f32(index) + 0.5) / 16.0);
+    let radius = sqrt((f32(index) + 0.5) / 32.0);
     let angle = f32(index) * 2.399963 + turn;
     return radius * vec2<f32>(cos(angle), sin(angle));
 }
@@ -970,7 +970,7 @@ fn receiver_slope(view: ShadowView, point: vec3<f32>, normal: vec3<f32>, to_ligh
     return clamp(slope, vec2<f32>(-cap), vec2<f32>(cap));
 }
 
-// the CPU's `soft_shadow`: a disc of 16 bilinear taps, its radius `softness` texels, or with a
+// the CPU's `soft_shadow`: a disc of 32 bilinear taps, its radius `softness` texels, or with a
 // light `size` the penumbra its blockers cast there (percentage-closer soft shadows), each tap
 // compared against the receiver's plane where it reads
 fn soft_shadow(view_index: u32, perspective: bool, point: vec3<f32>, size: f32, softness_given: f32, turn: f32, slope: vec2<f32>) -> f32 {
@@ -985,7 +985,7 @@ fn soft_shadow(view_index: u32, perspective: bool, point: vec3<f32>, size: f32, 
     if (size > 0.0) {
         var blockers = 0.0;
         var found = 0u;
-        for (var index = 0u; index < 16u; index = index + 1u) {
+        for (var index = 0u; index < 32u; index = index + 1u) {
             let offset = disc_tap(index, turn) * softness;
             let stored = stored_depth(view_index, floor(projected.at + offset));
             if (stored < depth + dot(slope, offset)) {
@@ -1008,11 +1008,11 @@ fn soft_shadow(view_index: u32, perspective: bool, point: vec3<f32>, size: f32, 
         radius = clamp(penumbra * 0.5 / max(texel, 1e-9), 1.0, softness);
     }
     var lit = 0.0;
-    for (var index = 0u; index < 16u; index = index + 1u) {
+    for (var index = 0u; index < 32u; index = index + 1u) {
         let offset = disc_tap(index, turn) * radius;
         lit = lit + bilinear_tap(view_index, projected.at - vec2<f32>(0.5) + offset, depth + dot(slope, offset));
     }
-    return lit / 16.0;
+    return lit / 32.0;
 }
 
 // the CPU's `shadow_visibility`: the receiver moved toward the light and along its surface's

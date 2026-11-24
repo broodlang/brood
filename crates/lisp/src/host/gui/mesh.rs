@@ -50,7 +50,7 @@ pub const DEFAULT_SOFTNESS: f32 = 32.0;
 pub const MIN_SOFTNESS: f32 = 1.0;
 /// How many depth-map reads a soft shadow takes: as many to look for blockers, then as many
 /// filtered comparisons (ADR-793).
-pub const SOFT_TAPS: u32 = 16;
+pub const SOFT_TAPS: u32 = 32;
 /// A material's `:specular` times this is its reflectance at normal incidence, F0 (ADR-793):
 /// UE4's mapping, so the default 0.5 is 4 %, a common dielectric's, and skin's 2.8 % is 0.35.
 pub const SPECULAR_TO_F0: f32 = 0.08;
