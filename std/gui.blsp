@@ -820,7 +820,7 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 (defn free-mesh (id handle)
   "Forget mesh handle of window id; a later draw naming it in a [:scene …] draws nothing. Idempotent. Returns nil.
 
-    (try (gui/free-mesh 0 1) (catch e :no-window))   ;=> :no-window"
+    (try (gui/free-mesh 0 1) (catch e nil))   ;=> nil   ; no window 0: nil, or refused where there is no GUI"
   (%gui-mesh-free id handle))
 (defn line (x0 y0 x1 y1 color &optional width)
   "The op that draws a line segment from (x0 y0) to (x1 y1) in physical pixels, `width` pixels thick (1 by default), in color — a keyword (:red), an [r g b] triple, an [r g b a] quad for a translucent line, or a \"#rrggbb\" string. A line IS a thin quad at an angle, so this is a [:quad …] whose centre is the segment's midpoint, turned to the segment's angle: put it in a frame like any other op.
