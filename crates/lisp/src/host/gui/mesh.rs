@@ -1903,6 +1903,10 @@ pub struct TextureRef<'a> {
     pub levels: &'a [MipLevel],
 }
 
+/// The alpha a `:coverage` texture's mip levels keep the share of texels above: the middle of a
+/// `:hair` surface's coverage at its usual cutoff of a half.
+pub const COVERAGE_CUTOFF: f32 = 0.5;
+
 /// One level of a texture's mip chain below its own size: half the size of the level above
 /// (rounded down, at least 1), straight-alpha RGBA bytes.
 #[derive(Clone, Debug, PartialEq)]
@@ -1917,17 +1921,34 @@ pub struct MipLevel {
 /// premultiplied, so a transparent texel's colour does not bleed into a strand's edge — so a
 /// texture seen small (fine hair, far away) reads as its average, not as the few texels that
 /// happen to land on a pixel (aliasing: crimp and glitter). Alpha averages too: what a
-/// `:hair` surface's coverage reads. Both painters sample these levels (the GPU target
-/// uploads them; ADR-786).
-pub fn mip_chain(rgba: &[u8], w: u32, h: u32) -> Vec<MipLevel> {
+/// `:hair` surface's coverage reads. With a `coverage` cutoff (a `:coverage` texture, at
+/// [`COVERAGE_CUTOFF`]) each level's alpha is scaled so as many of its texels reach the cutoff,
+/// as a share, as at the texture's own size (Castaño's coverage-preserving mips): fine strands
+/// keep their density with distance instead of averaging into a faint, uniform sheet. Both
+/// painters sample these levels (the GPU target uploads them; ADR-786).
+pub fn mip_chain(rgba: &[u8], w: u32, h: u32, coverage: Option<f32>) -> Vec<MipLevel> {
     let mut levels: Vec<MipLevel> = Vec::new();
     let (mut width, mut height) = (w as usize, h as usize);
     if rgba.len() < width * height * 4 {
         return levels;
     }
+    // the share of texels at or above the cutoff at the texture's own size, which every level
+    // keeps (a coverage texture's)
+    let covered_share = |bytes: &[u8], cutoff: f32, scale: f32| {
+        let texels = bytes.len() / 4;
+        let covered = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|texel| (f32::from(texel[3]) / 255.0 * scale).min(1.0) >= cutoff)
+            .count();
+        covered as f32 / texels.max(1) as f32
+    };
+    let target = coverage.map(|cutoff| covered_share(rgba, cutoff, 1.0));
+    // each level averages the one above as it was averaged, not as it was rescaled
+    let mut above: Vec<u8> = rgba.to_vec();
     while width > 1 || height > 1 {
         let (next_width, next_height) = ((width / 2).max(1), (height / 2).max(1));
-        let above = levels.last().map_or(rgba, |level| level.rgba.as_slice());
         let mut out = vec![0u8; next_width * next_height * 4];
         for row in 0..next_height {
             for column in 0..next_width {
@@ -1952,11 +1973,31 @@ pub fn mip_chain(rgba: &[u8], w: u32, h: u32) -> Vec<MipLevel> {
                 out[start + 3] = (sum[3] / 4.0 * 255.0).round().clamp(0.0, 255.0) as u8;
             }
         }
+        let mut kept = out.clone();
+        if let (Some(cutoff), Some(target)) = (coverage, target) {
+            // the alpha scale that keeps the covered share (Castaño): found by halving, the
+            // share growing with the scale
+            let (mut low, mut high) = (0.0f32, 8.0f32);
+            for _ in 0..16 {
+                let middle = 0.5 * (low + high);
+                if covered_share(&out, cutoff, middle) < target {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            // the bracket's upper end: never less covered than the texture itself
+            let scale = high;
+            for texel in kept.as_chunks_mut::<4>().0 {
+                texel[3] = (f32::from(texel[3]) * scale).round().clamp(0.0, 255.0) as u8;
+            }
+        }
         levels.push(MipLevel {
             w: next_width as u32,
             h: next_height as u32,
-            rgba: out,
+            rgba: kept,
         });
+        above = out;
         (width, height) = (next_width, next_height);
     }
     levels
@@ -3028,13 +3069,56 @@ mod tests {
             255, 0, 0, 255, 0, 255, 0, 0, //
             0, 0, 255, 255, 255, 255, 255, 127,
         ];
-        let levels = mip_chain(&rgba, 2, 2);
+        let levels = mip_chain(&rgba, 2, 2, None);
         assert_eq!(levels.len(), 1, "2×2 down to 1×1");
         let texel = &levels[0].rgba;
         // the colour weighed by alpha (1, 0, 1, about 0.5 of 2.5): red and blue 1.5 / 2.5, green
         // 0.5 / 2.5 (none from the transparent texel); alpha the plain average
         assert_eq!(texel.as_slice(), &[153, 51, 153, 159]);
-        assert_eq!(mip_chain(&[0; 4 * 5 * 3], 5, 3).len(), 2, "5×3 → 2×1 → 1×1");
+        assert_eq!(
+            mip_chain(&[0; 4 * 5 * 3], 5, 3, None).len(),
+            2,
+            "5×3 → 2×1 → 1×1"
+        );
+    }
+
+    #[test]
+    fn coverage_mips_keep_fine_strands_as_covered_as_up_close() {
+        // a 16×16 texture of 1-texel strands, every fourth column opaque: a quarter of it
+        // covered. Two levels down each texel averages four columns, a quarter alpha: under a
+        // half everywhere, so plain mips lose every strand; coverage mips scale it back up.
+        let rgba: Vec<u8> = (0..16 * 16)
+            .flat_map(|index| {
+                let alpha = if index % 16 % 4 == 0 { 255 } else { 0 };
+                [200, 180, 120, alpha]
+            })
+            .collect();
+        let plain = mip_chain(&rgba, 16, 16, None);
+        let kept = mip_chain(&rgba, 16, 16, Some(COVERAGE_CUTOFF));
+        let alpha = |levels: &[MipLevel]| levels[1].rgba[3];
+        assert_eq!(alpha(&plain), 64, "plain mips: a quarter alpha");
+        assert!(
+            alpha(&kept) >= 120,
+            "coverage mips bring it back to about the cutoff: {}",
+            alpha(&kept)
+        );
+        assert_eq!(
+            plain[1]
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|texel| texel[0])
+                .collect::<Vec<_>>(),
+            kept[1]
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|texel| texel[0])
+                .collect::<Vec<_>>(),
+            "colour untouched"
+        );
     }
 
     #[test]
@@ -3053,7 +3137,7 @@ mod tests {
                 [value, value, value, 255]
             })
             .collect();
-        let levels = mip_chain(&rgba, side as u32, side as u32);
+        let levels = mip_chain(&rgba, side as u32, side as u32, None);
         let mut parts = MeshParts {
             positions: bytes_of(&[
                 -1.0, -1.0, 0.5, 1.0, -1.0, 0.5, 1.0, 1.0, 0.5, -1.0, 1.0, 0.5,

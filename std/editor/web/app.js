@@ -683,7 +683,7 @@ events.addEventListener("texture", async (e) => {
   const t = JSON.parse(e.data);
   const data = new ImageData(decodeBase64(t.rgba), t.w, t.h);
   const bitmap = await createImageBitmap(data);
-  textures.set(t.tex, { bitmap, w: t.w, h: t.h, smooth: t.filter === "smooth" });
+  textures.set(t.tex, { bitmap, w: t.w, h: t.h, smooth: t.filter === "smooth" || t.filter === "coverage" });
   paintFrame(lastFrame);
 });
 events.addEventListener("texture-free", (e) => {

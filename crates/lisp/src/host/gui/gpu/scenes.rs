@@ -704,7 +704,7 @@ impl MeshGpu {
                     Surface::Hair => 4,
                 };
                 let premultiplied = |texture: Option<&GpuTexture>| {
-                    texture.is_some_and(|texture| texture.filter == TextureFilter::Smooth)
+                    texture.is_some_and(|texture| texture.filter != TextureFilter::Nearest)
                 };
                 let bits = u32::from(base.is_some())
                     | (u32::from(premultiplied(base)) << 1)

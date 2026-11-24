@@ -135,7 +135,7 @@ struct GpuTexture {
 fn sprite_mode(filter: TextureFilter) -> u32 {
     match filter {
         TextureFilter::Nearest => 0,
-        TextureFilter::Smooth => 5,
+        TextureFilter::Smooth | TextureFilter::Coverage => 5,
     }
 }
 
@@ -405,7 +405,7 @@ impl GpuWindow {
     ) -> (wgpu::Texture, wgpu::BindGroup) {
         let sampler = match filter {
             TextureFilter::Nearest => &self.sampler,
-            TextureFilter::Smooth => &self.smooth_sampler,
+            TextureFilter::Smooth | TextureFilter::Coverage => &self.smooth_sampler,
         };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -491,8 +491,10 @@ impl GpuWindow {
             }
             // with its mip chain, which a scene's meshes sample (`mesh::mip_chain`, as the CPU
             // painter keeps it)
-            TextureFilter::Smooth => {
-                let levels = crate::host::gui::mesh::mip_chain(rgba, w, h);
+            TextureFilter::Smooth | TextureFilter::Coverage => {
+                let coverage = (filter == TextureFilter::Coverage)
+                    .then_some(crate::host::gui::mesh::COVERAGE_CUTOFF);
+                let levels = crate::host::gui::mesh::mip_chain(rgba, w, h, coverage);
                 let (texture, bind_group) =
                     self.create_texture(w, h, filter, levels.len() as u32 + 1);
                 self.write_rgba(&texture, 0, 0, &premultiplied(rgba), w, h);

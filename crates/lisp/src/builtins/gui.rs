@@ -192,7 +192,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
             nil_ty,
         ),
         &["id", "tex", "rgba", "w", "h", "filter"],
-        "Upload rgba — w*h*4 bytes (a bytes value or a vector of 0-255 ints), row-major, straight alpha — as texture tex of window id, for its [:sprite …] ops, sampled per filter: :nearest (each pixel one texel; pixel art stays crisp) or :smooth (bilinear; a painted sprite drawn scaled or turned keeps clean edges, ADR-783). The handle tex is the caller's (gui/texture allocates it), so a sheet's size can be kept beside it; re-uploading under a live handle replaces the texture and its filter. Errors when the byte count is not w*h*4, tex is negative or filter is neither keyword. Returns nil.",
+        "Upload rgba — w*h*4 bytes (a bytes value or a vector of 0-255 ints), row-major, straight alpha — as texture tex of window id, for its [:sprite …] ops, sampled per filter: :nearest (each pixel one texel; pixel art stays crisp) , :smooth (bilinear; a painted sprite drawn scaled or turned keeps clean edges, ADR-783) or :coverage (smooth, its mip levels keeping as many texels above half alpha as at full size: hair strands seen small). The handle tex is the caller's (gui/texture allocates it), so a sheet's size can be kept beside it; re-uploading under a live handle replaces the texture and its filter. Errors when the byte count is not w*h*4, tex is negative or filter is none of them. Returns nil.",
         gui_texture);
     primitives.def(
         "%gui-texture-free",

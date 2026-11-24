@@ -682,15 +682,16 @@ afterwards wins. Needs --features gui. Returns nil.
       tex)))
 
 (defn texture-filter (opts)
-  "The sampling filter a texture options map asks for — `:smooth` or `:nearest`, the default when `:filter` is absent — checked: anything else is an error naming both, never a silent nearest. What gui/texture and `editor/frontend/display-texture` hand on with the upload (ADR-783).
+  "The sampling filter a texture options map asks for — `:smooth`, `:coverage` (smooth, its mip levels keeping as many texels above half alpha as at full size, for hair strands and other alpha-tested textures seen small) or `:nearest`, the default when `:filter` is absent — checked: anything else is an error naming them, never a silent nearest. What gui/texture and `editor/frontend/display-texture` hand on with the upload (ADR-783).
 
     (gui/texture-filter {})                   ;=> :nearest
     (gui/texture-filter {:filter :smooth})    ;=> :smooth
+    (gui/texture-filter {:filter :coverage})  ;=> :coverage
     (try (gui/texture-filter {:filter :linear}) (catch e :refused))   ;=> :refused"
   (let (filter (get opts :filter :nearest))
-    (if (contains? #{:nearest :smooth} filter)
+    (if (contains? #{:nearest :smooth :coverage} filter)
       filter
-      (error "gui/texture: :filter must be :nearest or :smooth, got " filter))))
+      (error "gui/texture: :filter must be :nearest, :smooth or :coverage, got " filter))))
 
 (defn alloc-texture (w h)
   "Allocate a texture handle for a `w`×`h` upload and remember the size under it — the Brood half of gui/texture, on its own for an app that uploads through a DISPLAY map's `:texture` (a window it did not open, or a thin client's over the wire — `editor/frontend/display-texture`) rather than a window id. The handle is process-wide and never reused, so it can name a texture in any window.

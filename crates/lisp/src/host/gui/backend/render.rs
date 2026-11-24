@@ -329,7 +329,13 @@ impl CpuTexture {
     /// it is smooth.
     pub(super) fn new(w: u32, h: u32, rgba: Vec<u8>, filter: TextureFilter) -> CpuTexture {
         let mips = match filter {
-            TextureFilter::Smooth => crate::host::gui::mesh::mip_chain(&rgba, w, h),
+            TextureFilter::Smooth => crate::host::gui::mesh::mip_chain(&rgba, w, h, None),
+            TextureFilter::Coverage => crate::host::gui::mesh::mip_chain(
+                &rgba,
+                w,
+                h,
+                Some(crate::host::gui::mesh::COVERAGE_CUTOFF),
+            ),
             TextureFilter::Nearest => Vec::new(),
         };
         CpuTexture {

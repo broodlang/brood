@@ -1271,7 +1271,7 @@ fn paint_sprite(
     let fb_w = canvas.w;
     let sample = match t.filter {
         TextureFilter::Nearest => sample_nearest,
-        TextureFilter::Smooth => sample_bilinear,
+        TextureFilter::Smooth | TextureFilter::Coverage => sample_bilinear,
     };
     let mut hits: Vec<(usize, u32)> = Vec::new();
     each_quad_pixel(canvas, x, y, w, h, rot, |px, py, u, v| {

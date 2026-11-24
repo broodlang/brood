@@ -362,8 +362,9 @@ pub(in crate::builtins) fn gui_texture(args: &[Value], _: EnvId, heap: &mut Heap
     Ok(Value::nil())
 }
 
-/// A texture's sampling filter from its keyword: `:nearest` or `:smooth` (ADR-783). Anything
-/// else is a clean error naming both, never a silent nearest.
+/// A texture's sampling filter from its keyword: `:nearest`, `:smooth` (ADR-783) or `:coverage`
+/// (smooth, its mips keeping their coverage). Anything else is a clean error naming them, never
+/// a silent nearest.
 fn texture_filter(heap: &Heap, given: Value) -> Result<crate::host::gui::TextureFilter, LispError> {
     use crate::host::gui::TextureFilter;
     match given {
@@ -373,10 +374,13 @@ fn texture_filter(heap: &Heap, given: Value) -> Result<crate::host::gui::Texture
         Value::Keyword(name) if value::symbol_name_ref(name) == "smooth" => {
             Ok(TextureFilter::Smooth)
         }
+        Value::Keyword(name) if value::symbol_name_ref(name) == "coverage" => {
+            Ok(TextureFilter::Coverage)
+        }
         other => Err(LispError::wrong_type(
             heap,
             "%gui-texture",
-            "a filter, :nearest or :smooth",
+            "a filter, :nearest, :smooth or :coverage",
             other,
         )),
     }

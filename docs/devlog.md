@@ -2764,3 +2764,10 @@ the SH flag's) to an `occlusion` vec4 at the scene uniform's end.
 rotation showed as a fine grain over every soft shadow on womanblend's skin (a GPU frame of her
 neck); 32 taps halve the variance and the shading reads smooth. Run here: fmt, clippy, a GPU
 frame from the real window, before and after; the tests are CI's (desktop rule).
+
+2026-11-24 (ADR-793 follow-up). **`{:filter :coverage}` textures: mips that keep their coverage.**
+womanblend's strand cards averaged into faint sheets at distance (thin strands on clear cards).
+A `:coverage` texture is smooth, and each mip level's alpha is scaled so as many texels reach half
+alpha, as a share, as at full size (Castaño); colour untouched, both painters (`mip_chain`).
+Guard: a texture of 1-texel strands keeps its strands two levels down. Run here: fmt, clippy; the
+tests are CI's (desktop rule).

@@ -1530,12 +1530,15 @@ pub struct Mouse {
 /// sample point (bilinear), so a painted or photographic sprite drawn scaled or turned has
 /// clean edges instead of stair steps. Both painters honour it: the GPU binds a linear
 /// sampler to the texture and keeps its texels premultiplied, the CPU painter interpolates
-/// by coverage the same way (`paint::paint_sprite`).
+/// by coverage the same way (`paint::paint_sprite`). `Coverage` is `Smooth` whose mip levels
+/// keep the share of texels above half alpha (`mesh::mip_chain`), for alpha-tested or
+/// coverage textures seen small: hair strands that would otherwise thin into sheets.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum TextureFilter {
     #[default]
     Nearest,
     Smooth,
+    Coverage,
 }
 
 #[cfg(not(feature = "gui"))]
