@@ -1614,6 +1614,7 @@ fn scene_spec(
                 "cutout" => Surface::Cutout,
                 "blend" => Surface::Blend,
                 "hair" => Surface::Hair,
+                "strands" => Surface::Strands,
                 _ => Surface::Standard,
             };
         }
@@ -1640,6 +1641,12 @@ fn scene_spec(
         }
         if let Some(cutoff) = number("cutoff") {
             material.cutoff = cutoff.clamp(0.0, 1.0);
+        }
+        // a `:strands` surface's width, metres: one number, or [root tip]
+        if let Some(width) = number("width") {
+            material.strand_width = [width.max(0.0); 2];
+        } else if let Some(widths) = numbers(get(material_map, "width"), 2) {
+            material.strand_width = [widths[0].max(0.0), widths[1].max(0.0)];
         }
         material.lobes = match get(material_map, "lobes") {
             None | Some(Value::Nil) => None,

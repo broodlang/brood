@@ -702,6 +702,7 @@ impl MeshGpu {
                     Surface::Cutout => 2,
                     Surface::Blend => 3,
                     Surface::Hair => 4,
+                    Surface::Strands => 5,
                 };
                 let premultiplied = |texture: Option<&GpuTexture>| {
                     texture.is_some_and(|texture| texture.filter != TextureFilter::Nearest)
@@ -750,6 +751,13 @@ impl MeshGpu {
                     mesh.vertex_count,
                     palette_joints,
                     morph_start,
+                ]));
+                // a `:strands` surface's width at the root and the tip (`DrawU::strand`)
+                bytes.extend(floats_bytes(&[
+                    material.strand_width[0],
+                    material.strand_width[1],
+                    0.0,
+                    0.0,
                 ]));
                 bytes.resize(DRAW_BYTES as usize, 0);
                 let at = draw_bytes.len() / DRAW_BYTES as usize;
@@ -1171,5 +1179,8 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan) -> Vec<u32> {
             0.0,
         ],
     );
+    // the picture's size in pixels, for a strand's pixel width (`mesh::strand_vertex`)
+    let (width, height) = scene.pixel_size();
+    floats(&mut words, &[width as f32, height as f32, 0.0, 0.0]);
     words
 }

@@ -778,8 +778,9 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; `:exposure`, a `:background` ([r g b a], transparent by default), the skeletons' joint
 ;; `:palettes` (16 numbers a joint, or f32 bytes), and the `:draws` — each `{:mesh handle
 ;; :model [16] :palette i :morphs [[target weight] …] :material {…}}`. A material is the fixed
-;; shading model's parameters: `:surface` (:skin, :standard, :cutout, :blend or :hair — strands
-;; lit along the bitangent, their alpha coverage), `:base`, `:normal` and `:occlusion` (texture
+;; shading model's parameters: `:surface` (:skin, :standard, :cutout, :blend, :hair — strands
+;; lit along the bitangent, their alpha coverage — or :strands, ribbons turned to the camera, a
+;; pixel wide at least, `:width [root tip]` metres), `:base`, `:normal` and `:occlusion` (texture
 ;; handles), `:color`, `:roughness`, `:specular`, `:lobes`, `:wrap` and `:scatter` (light under
 ;; the skin), `:rim`, `:cutoff`, `:double-sided`, `:cast-shadow` (true by default). A glTF
 ;; loader, a skeleton's maths, a camera — policy above this, in the engine. Both window painters

@@ -662,6 +662,7 @@ struct SceneU {
     ambient_sh: array<vec4<f32>, 9>,    // L00, L1-1, L10, L11, L2-2, L2-1, L20, L21, L22 (rgb)
     shadows: array<ShadowView, 24>,
     occlusion: vec4<f32>,       // ambient occlusion radius (metres; 0: none), strength, view + 1 (0: none)
+    picture: vec4<f32>,         // the picture's width and height in pixels
 };
 struct DrawU {
     model: mat4x4<f32>,
@@ -671,6 +672,7 @@ struct DrawU {
     lobes: vec4<f32>,           // roughness times a, times b, mix of a, F0
     flags: vec4<u32>,           // surface, texture bits, palette offset, skinned
     morph_info: vec4<u32>,      // morphed (0 or 1), vertex count, palette joint count, first offset
+    strand: vec4<f32>,          // a `:strands` surface's width at the root and the tip (metres)
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
@@ -751,6 +753,52 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
     out.normal = (posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz;
     out.uv = input.uv;
     out.tangent = vec4<f32>((posed.matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz, input.tangent.w);
+    if (draw.flags.x == 5u) {
+        // a ribbon turned to face the camera: its tangent the strand's direction (the mesh's
+        // normal), its fourth the coverage
+        let direction = safe_normalize(out.normal);
+        let ribbon = strand_vertex(world.xyz, direction, input.uv, draw.strand.xy);
+        out.clip = scene.view_proj * vec4<f32>(ribbon.world, 1.0);
+        out.world = ribbon.world;
+        out.normal = ribbon.normal;
+        out.tangent = vec4<f32>(direction, ribbon.coverage);
+    }
+    return out;
+}
+
+struct StrandVertex {
+    world: vec3<f32>,
+    normal: vec3<f32>,
+    coverage: f32,
+};
+
+// `mesh::strand_vertex`: a strand's point on its ribbon's side `uv.x`, the ribbon `widths`
+// (root, tip; `uv.y` 1 at the root) wide but never under a pixel, turned to face the camera
+fn strand_vertex(centre: vec3<f32>, direction: vec3<f32>, uv: vec2<f32>, widths: vec2<f32>) -> StrandVertex {
+    let width = widths.y + (widths.x - widths.y) * clamp(uv.y, 0.0, 1.0);
+    let view = safe_normalize(scene.eye.xyz - centre);
+    let across = safe_normalize(cross(direction, view));
+    let facing = safe_normalize(cross(across, direction));
+    let near = scene.view_proj * vec4<f32>(centre, 1.0);
+    let far = scene.view_proj * vec4<f32>(centre + across * 0.01, 1.0);
+    var pixel = width;
+    if (near.w > 1e-6 && far.w > 1e-6) {
+        let moved = (far.xy / far.w - near.xy / near.w) * scene.picture.xy * 0.5;
+        let pixels = length(moved);
+        if (pixels > 1e-6) {
+            pixel = 0.01 / pixels;
+        }
+    }
+    let drawn = max(width, pixel);
+    var coverage = 0.0;
+    if (drawn > 0.0) {
+        coverage = clamp(width / drawn, 0.0, 1.0);
+    }
+    let side = select(-1.0, 1.0, uv.x >= 0.0);
+    var out: StrandVertex;
+    out.world = centre + across * (drawn * 0.5 * side);
+    out.normal = safe_normalize(across * side + facing);
+    out.coverage = coverage;
     return out;
 }
 
@@ -1188,7 +1236,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         let facing = dot(normal, to_light);
         let lambert = max(facing, 0.0);
         let half_vector = safe_normalize(to_light + view);
-        if (draw.flags.x == 4u) {
+        if (draw.flags.x == 4u || draw.flags.x == 5u) {
             let primary = hair_highlight(strand, normal, half_vector, -0.08, exponent);
             let secondary = hair_highlight(strand, normal, half_vector, 0.12, exponent * 0.25);
             let lit_side = clamp(facing + 0.25, 0.0, 1.0);
@@ -1247,8 +1295,12 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
         alpha = 1.0;
     }
     var mask = 0xFFFFFFFFu;
-    if (draw.flags.x == 4u) {
-        let coverage = clamp((texel.a * draw.color.a - 0.5 * draw.material.w) / max(draw.material.w, 1e-6), 0.0, 1.0);
+    if (draw.flags.x == 4u || draw.flags.x == 5u) {
+        var coverage = clamp((texel.a * draw.color.a - 0.5 * draw.material.w) / max(draw.material.w, 1e-6), 0.0, 1.0);
+        // a strand thinner than a pixel covers only its share of one
+        if (draw.flags.x == 5u) {
+            coverage = coverage * fragment.tangent.w;
+        }
         mask = select(0u, 1u, coverage > 0.125) | select(0u, 2u, coverage > 0.625)
             | select(0u, 4u, coverage > 0.875) | select(0u, 8u, coverage > 0.375);
         if (mask == 0u) {
@@ -1276,7 +1328,11 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     // a soft shadow's taps turned by the pixel's noise, the CPU painter's at the same pixel
     let turn = 6.28318531 * pixel_noise(floor(fragment.clip.xy));
     // a hair's strand: the bitangent, as its UV v runs
-    let strand = safe_normalize(cross(surface_normal, safe_normalize(fragment.tangent.xyz)) * select(1.0, -1.0, fragment.tangent.w < 0.0));
+    var strand = safe_normalize(cross(surface_normal, safe_normalize(fragment.tangent.xyz)) * select(1.0, -1.0, fragment.tangent.w < 0.0));
+    // a strand's own direction
+    if (draw.flags.x == 5u) {
+        strand = safe_normalize(fragment.tangent.xyz);
+    }
     let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand), scene.params.x);
     return MeshFragment(vec4<f32>(lit * alpha, alpha), mask);
 }
@@ -1290,7 +1346,13 @@ struct ShadowOut {
 fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> ShadowOut {
     let posed = pose(input);
     var out: ShadowOut;
-    out.clip = scene.shadows[view_index].view_proj * (posed.matrix * vec4<f32>(posed.position, 1.0));
+    var world = (posed.matrix * vec4<f32>(posed.position, 1.0)).xyz;
+    if (draw.flags.x == 5u) {
+        // the ribbon as the camera sees it, as the CPU painter's posed vertices are
+        let direction = safe_normalize((posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz);
+        world = strand_vertex(world, direction, input.uv, draw.strand.xy).world;
+    }
+    out.clip = scene.shadows[view_index].view_proj * vec4<f32>(world, 1.0);
     out.uv = input.uv;
     return out;
 }
@@ -1301,7 +1363,7 @@ fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> Shado
 fn fs_shadow(fragment: ShadowOut) {
     let base_texel = straight(textureSampleLevel(base_texture, texture_sampler, fragment.uv, 0.0), (draw.flags.y & 2u) != 0u);
     let alpha = select(1.0, base_texel.a, (draw.flags.y & 1u) != 0u) * draw.color.a;
-    if ((draw.flags.x == 2u || draw.flags.x == 3u || draw.flags.x == 4u) && alpha < draw.material.w) {
+    if ((draw.flags.x == 2u || draw.flags.x == 3u || draw.flags.x == 4u || draw.flags.x == 5u) && alpha < draw.material.w) {
         discard;
     }
 }

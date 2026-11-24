@@ -79,6 +79,9 @@ pub const HAIR_SHIFT_SECONDARY: f32 = 0.12;
 pub const HAIR_SECONDARY_SHARPNESS: f32 = 0.25;
 /// The coverage each of a 2×2 block of CPU samples needs to be drawn by a `:hair` surface (an
 /// ordered dither, row by row; the GPU target's samples 0 … 3 in the same places).
+/// A `:strands` surface's width at the root and the tip by default, metres: a strand stands for
+/// a few hairs (a clump), so that at a few metres it covers part of a pixel rather than none.
+pub const DEFAULT_STRAND_WIDTH: [f32; 2] = [0.0005, 0.0002];
 pub const HAIR_COVERAGE_STEPS: [[f32; 2]; 2] = [[0.125, 0.625], [0.875, 0.375]];
 
 /// The reach of the ambient occlusion, in metres, when `:ambient-occlusion` names none: the
@@ -511,6 +514,13 @@ pub enum Surface {
     /// `HAIR_COVERAGE_STEPS` — so fine strands thin out instead of stair-stepping; it is opaque
     /// where it covers, writing depth, drawn with the solid surfaces.
     Hair,
+    /// Hair as strands: a mesh of ribbons, two vertices a point along each strand (`uv`: side
+    /// −1 or 1, then 1 at the root … 0 at the tip), its normal the strand's direction. After
+    /// skinning each ribbon turns to face the camera, as wide as `strand_width` (root to tip)
+    /// but never under a pixel: a strand thinner than that is drawn a pixel wide covering that
+    /// share of it, times its texture's coverage as `:hair`'s. Shaded as `:hair`, along its own
+    /// direction, across a cylinder's normal ([`strand_vertex`]).
+    Strands,
 }
 
 /// A draw's material: the fixed shading model's parameters.
@@ -549,6 +559,8 @@ pub struct Material {
     /// Whether it casts a shadow from the scene's shadowed lights (ADR-788). A `:cutout` or
     /// `:blend` surface casts only where its alpha reaches `cutoff`.
     pub cast_shadow: bool,
+    /// A `:strands` surface's width at the root and at the tip, metres ([`DEFAULT_STRAND_WIDTH`]).
+    pub strand_width: [f32; 2],
 }
 
 impl Default for Material {
@@ -568,6 +580,7 @@ impl Default for Material {
             cutoff: 0.5,
             double_sided: false,
             cast_shadow: true,
+            strand_width: DEFAULT_STRAND_WIDTH,
         }
     }
 }
@@ -1036,7 +1049,7 @@ pub fn shade(
             to_light[1] + view[1],
             to_light[2] + view[2],
         ]);
-        if material.surface == Surface::Hair {
+        if matches!(material.surface, Surface::Hair | Surface::Strands) {
             // across the strand, shifted along the normal: sin of its angle to the half vector,
             // sharpened; on the lit side only, the diffuse wrapped (light passes through hair)
             let highlight = |shift: f32, sharpness: f32| {
@@ -2451,9 +2464,16 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                 }
                 // coverage, past half the cutoff: drawn at this sample when it reaches its step of
                 // the 2×2 dither, then opaque (the GPU target's alpha-to-coverage)
-                Surface::Hair => {
-                    let coverage = ((alpha - 0.5 * material.cutoff) / material.cutoff.max(1e-6))
-                        .clamp(0.0, 1.0);
+                Surface::Hair | Surface::Strands => {
+                    let mut coverage = ((alpha - 0.5 * material.cutoff)
+                        / material.cutoff.max(1e-6))
+                    .clamp(0.0, 1.0);
+                    // a strand thinner than a pixel covers only its share of one
+                    if material.surface == Surface::Strands {
+                        coverage *= corners[0].tangent[3] * weights[0]
+                            + corners[1].tangent[3] * weights[1]
+                            + corners[2].tangent[3] * weights[2];
+                    }
                     if coverage <= HAIR_COVERAGE_STEPS[row % 2][column % 2] {
                         return;
                     }
@@ -2514,8 +2534,12 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     );
                 }
             }
-            // a hair's strand: the bitangent, as its UV v runs
-            let strand = if material.surface == Surface::Hair {
+            // a hair's strand: the bitangent, as its UV v runs, or a strand's own direction
+            let strand = if material.surface == Surface::Strands {
+                normalize(blend3(|vertex| {
+                    [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]]
+                }))
+            } else if material.surface == Surface::Hair {
                 let tangent = normalize(blend3(|vertex| {
                     [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]]
                 }));
@@ -2567,6 +2591,50 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
     );
 }
 
+/// A `:strands` ribbon's vertex: the strand's point `centre` (world) on the side `side` (−1 or 1)
+/// of a ribbon `width` metres wide turned to face the camera about the strand's unit
+/// `direction`. Never under one of the picture's pixels wide where the point stands: a thinner
+/// strand is drawn a pixel wide, its coverage the share it fills. Answers the vertex, its normal
+/// (a cylinder's, turned to that side) and the coverage. The shader's `strand_vertex` is the
+/// same.
+pub fn strand_vertex(
+    scene: &Scene,
+    centre: [f32; 3],
+    direction: [f32; 3],
+    side: f32,
+    width: f32,
+) -> ([f32; 3], [f32; 3], f32) {
+    let view = normalize(subtract(scene.eye, centre));
+    let across = normalize(cross(direction, view));
+    let facing = normalize(cross(across, direction));
+    // the metres a picture pixel spans across the strand here: where a centimetre lands
+    let (pixel_width, pixel_height) = scene.pixel_size();
+    let near = transform(&scene.view_proj, centre, 1.0);
+    let far = transform(
+        &scene.view_proj,
+        [0, 1, 2].map(|axis| centre[axis] + across[axis] * 0.01),
+        1.0,
+    );
+    let pixel = if near[3] > 1e-6 && far[3] > 1e-6 {
+        let x = (far[0] / far[3] - near[0] / near[3]) * pixel_width as f32 * 0.5;
+        let y = (far[1] / far[3] - near[1] / near[3]) * pixel_height as f32 * 0.5;
+        let pixels = (x * x + y * y).sqrt();
+        if pixels > 1e-6 { 0.01 / pixels } else { width }
+    } else {
+        width
+    };
+    let drawn = width.max(pixel);
+    let coverage = if drawn > 0.0 {
+        (width / drawn).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let half = drawn * 0.5 * side;
+    let vertex = [0, 1, 2].map(|axis| centre[axis] + across[axis] * half);
+    let normal = normalize([0, 1, 2].map(|axis| across[axis] * side + facing[axis]));
+    (vertex, normal, coverage)
+}
+
 /// The vertices of `mesh` drawn by `draw`: morphed, skinned, moved by the model matrix and seen
 /// through the scene's camera.
 fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
@@ -2591,6 +2659,24 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
             let world = transform(&matrix, position, 1.0);
             let turned_normal = transform(&matrix, normal, 0.0);
             let turned_tangent = transform(&matrix, [tangent[0], tangent[1], tangent[2]], 0.0);
+            if draw.material.surface == Surface::Strands {
+                // a ribbon turned to face the camera: its tangent the strand's direction (the
+                // mesh's normal), its fourth the coverage
+                let direction = normalize([turned_normal[0], turned_normal[1], turned_normal[2]]);
+                let [root, tip] = draw.material.strand_width;
+                let uv = mesh.uvs[index];
+                let width = tip + (root - tip) * uv[1].clamp(0.0, 1.0);
+                let centre = [world[0], world[1], world[2]];
+                let (vertex, ribbon_normal, coverage) =
+                    strand_vertex(scene, centre, direction, uv[0].signum(), width);
+                return ClipVertex {
+                    clip: transform(&scene.view_proj, vertex, 1.0),
+                    world: vertex,
+                    normal: ribbon_normal,
+                    tangent: [direction[0], direction[1], direction[2], coverage],
+                    uv,
+                };
+            }
             ClipVertex {
                 clip: transform(&scene.view_proj, [world[0], world[1], world[2]], 1.0),
                 world: [world[0], world[1], world[2]],
@@ -2650,7 +2736,7 @@ fn render_shadow_map<'t>(
         }
         let alpha_tested = matches!(
             material.surface,
-            Surface::Cutout | Surface::Blend | Surface::Hair
+            Surface::Cutout | Surface::Blend | Surface::Hair | Surface::Strands
         );
         let base_texture = if alpha_tested {
             material.base.and_then(textures)
@@ -3181,6 +3267,33 @@ mod tests {
         assert!(
             row.iter().all(|red| (60..200).contains(red)),
             "grey, neither the checker's black nor its white: {row:?}"
+        );
+    }
+
+    #[test]
+    fn a_strand_faces_the_camera_and_is_never_under_a_pixel_wide() {
+        // seen from z = −10 through the identity camera onto 16 pixels: a pixel is 2/16 = 0.125 wide
+        let seen = scene(draw());
+        let up = [0.0, 1.0, 0.0];
+        let wide = strand_vertex(&seen, [0.0, 0.0, 0.5], up, 1.0, 0.5);
+        assert!(
+            (wide.0[0] + 0.25).abs() < 1e-5,
+            "half its width to the side: {:?}",
+            wide.0
+        );
+        assert_eq!(wide.2, 1.0, "wider than a pixel: fully covered");
+        // turned to face the camera: its normal across the ribbon, toward the eye
+        assert!(wide.1[2] < 0.0 && wide.1[0] < 0.0, "{:?}", wide.1);
+        let thin = strand_vertex(&seen, [0.0, 0.0, 0.5], up, -1.0, 0.025);
+        assert!(
+            (thin.0[0] - 0.0625).abs() < 1e-5,
+            "drawn a pixel wide: {:?}",
+            thin.0
+        );
+        assert!(
+            (thin.2 - 0.2).abs() < 1e-4,
+            "covering its share of it: {}",
+            thin.2
         );
     }
 

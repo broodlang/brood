@@ -2771,3 +2771,12 @@ A `:coverage` texture is smooth, and each mip level's alpha is scaled so as many
 alpha, as a share, as at full size (Castaño); colour untouched, both painters (`mip_chain`).
 Guard: a texture of 1-texel strands keeps its strands two levels down. Run here: fmt, clippy; the
 tests are CI's (desktop rule).
+
+2026-11-24 (ADR-793 follow-up). **`:surface :strands`: hair as real strands.** womanblend's cards
+read as crimped ribbons and flat sheets; a `:strands` mesh is its groom's strands as ribbons
+(two vertices a point, the normal the strand's direction, UV side and length) that the vertex
+stage turns to face the camera, at least a pixel wide, thinner strands covering their share of
+the pixel (`strand_vertex`, both painters), shaded as `:hair`. Material `:width [root tip]`.
+Checked on her: 12 000 strands of 16 points read as hair up close and at mid distance (CPU
+painter headless; the GPU window was not presented while the screen was locked). Run here: fmt,
+clippy; the tests are CI's (desktop rule).
