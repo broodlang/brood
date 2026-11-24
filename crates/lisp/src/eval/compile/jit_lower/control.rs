@@ -229,6 +229,12 @@ pub(super) fn resolve_edges(
         if let Some(x) = frame.slot_i64_cache.borrow_mut().get_mut(s) {
             *x = None;
         }
+        if let Some(x) = frame.slot_num_cache.borrow_mut().get_mut(s) {
+            *x = None;
+        }
+        if let Some(x) = frame.slot_vec_cache.borrow_mut().get_mut(s) {
+            *x = None;
+        }
     }
     Some(unified)
 }

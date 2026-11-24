@@ -11,8 +11,8 @@ use super::emit::{
     DeoptReason, Frame, Funcs, NumberKind, as_f64_guarded, as_f64_pair, as_int, call_handle,
     cmp_dispatch, deopt_code, dispatch_instead_of_guess, emit_arith, emit_dispatched,
     emit_float_arith, eq_dispatch, handle_from_out_slot, inline_vec_ref, load_slot_int,
-    number_kind, op_is_float, op_maybe_float, read_out_slot, read_words, slot_untyped, table_prim,
-    vector_ref,
+    number_kind, op_is_float, op_maybe_float, read_out_slot, read_words, slot_untyped,
+    storage_element, table_prim, vector_ref, vector_storage,
 };
 use crate::core::value::jit_layout::{
     PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_KEYWORD, TAG_PAIR, TAG_RANGE, TAG_SEQVIEW,
@@ -1252,6 +1252,7 @@ pub(super) fn emit_prim2_slot_int(
     map: [u8; 2],
     slot_a: usize,
     int_b: i64,
+    cached_vector_read: bool,
     frame: Frame,
     funcs: Funcs,
 ) -> Option<()> {
@@ -1261,8 +1262,29 @@ pub(super) fn emit_prim2_slot_int(
         // always the vector (source 0 after map normalisation). Inline the read for a
         // LOCAL small vector (deopting otherwise), the analog of the pair car/cdr inline
         // — this is `bintree`'s `(nth node 0/1)` hot path.
-        let vec = read_words(b, Op::Slot(slot_a), frame);
-        let h = inline_vec_ref(b, vec, int_b, frame, funcs);
+        //
+        // A run that reads the slot's vector again (a destructuring `let`, `vector_reads_reused`)
+        // decodes its storage once and reads every element through it (`slot_vec_cache`).
+        let cached = frame.slot_vec_cache.borrow().get(slot_a).copied().flatten();
+        let storage = match cached {
+            Some(storage) => Some(storage),
+            None if cached_vector_read => {
+                let vec = read_words(b, Op::Slot(slot_a), frame);
+                let storage = vector_storage(b, vec, frame, funcs);
+                if let Some(entry) = frame.slot_vec_cache.borrow_mut().get_mut(slot_a) {
+                    *entry = Some(storage);
+                }
+                Some(storage)
+            }
+            None => None,
+        };
+        let h = match storage {
+            Some(storage) => storage_element(b, storage, int_b, frame),
+            None => {
+                let vec = read_words(b, Op::Slot(slot_a), frame);
+                inline_vec_ref(b, vec, int_b, frame, funcs)
+            }
+        };
         stack.push(h);
     } else if matches!(op, PrimOp::TableHas | PrimOp::TableGet) {
         // `(table-has?/table-get slot <int-const>)` — a constant int fused into the

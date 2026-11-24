@@ -362,7 +362,8 @@ pub(crate) fn jit_any_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
             Some(
                 DeoptReason::SlotFloatGuard
                 | DeoptReason::HandleFloatGuard
-                | DeoptReason::FloatPairSecondBesideInt,
+                | DeoptReason::SlotNumberNotFloat
+                | DeoptReason::FloatPairBothInt,
             ),
             _,
         ) => {
@@ -432,7 +433,7 @@ fn float_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
 const ARITH_DISPATCH_RELOWER: u32 = 4;
 
 /// A guess about an arithmetic operand's type failed the other way from the one the float
-/// context fixes: the float path met an `Int` it could not promote (reasons 24/25/46 — an
+/// context fixes: the float path met an `Int` it could not promote (reasons 24/25/46/56 — an
 /// int where the profile or the float context guessed a float), or the integer path met a
 /// `Float` in an arm the float context has already re-tiered. Either way the operand is
 /// sometimes an int and sometimes a float, so no static guess holds: after
