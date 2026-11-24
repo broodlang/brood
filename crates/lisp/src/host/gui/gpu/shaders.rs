@@ -1137,10 +1137,10 @@ fn hair_shadow(light: Light, world: vec3<f32>, turn: f32) -> f32 {
 }
 
 // `mesh::hair_light`: that light channel by channel, taking the hair's colour as it passes
-// (HAIR_TINT 0.7)
+// (HAIR_TINT 0.45)
 fn hair_light(seen: f32, base: vec3<f32>) -> vec3<f32> {
     let most = max(max(base.r, base.g), max(base.b, 1e-3));
-    return pow(vec3<f32>(max(seen, 0.0)), vec3<f32>(1.0) - 0.7 * base / most);
+    return pow(vec3<f32>(max(seen, 0.0)), vec3<f32>(1.0) - 0.45 * base / most);
 }
 
 // the CPU's `sh_irradiance`: Ramamoorthi and Hanrahan's irradiance from the scene's nine

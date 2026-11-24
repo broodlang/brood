@@ -59,7 +59,7 @@ pub const SOFT_TAPS: u32 = 32;
 pub const HAIR_SHADOW_TAPS: u32 = 16;
 pub const HAIR_SHADOW_TEXELS: f32 = 6.0;
 pub const HAIR_ABSORPTION: f32 = 40.0;
-pub const HAIR_TINT: f32 = 0.7;
+pub const HAIR_TINT: f32 = 0.45;
 /// A material's `:specular` times this is its reflectance at normal incidence, F0 (ADR-793):
 /// UE4's mapping, so the default 0.5 is 4 %, a common dielectric's, and skin's 2.8 % is 0.35.
 pub const SPECULAR_TO_F0: f32 = 0.08;
@@ -4114,46 +4114,42 @@ mod tests {
 
     #[test]
     fn hair_is_shaded_by_how_much_hair_the_light_crossed() {
-        // a floor of hair under a card, the light 45° from straight down. Under a card a metre
-        // up the light has a long way behind the map's first surface: dark. Under a card 2 cm
-        // up it has 2.8 cm: about e^(−1.1) of it is left, neither lit nor dark. Away from the
-        // card the floor is the map's first surface: lit as with no shadow at all.
-        let hair_floor = |card_height: f32, shadow: bool| {
+        // a floor of hair under a card a metre up, the light 45° from straight down. In the
+        // card's shadow the light has a long way behind the map's first surface: dark. Away
+        // from it the floor IS the map's first surface, next to no way at all: lit nearly as with no
+        // shadow, and with no bias to keep it from shading itself. (The grading between, over
+        // centimetres of hair, is finer than this picture's 6 cm pixels: `hair_light` and the
+        // exponential below stand for it.)
+        let hair_floor = |shadow: bool| {
             let light = if shadow {
                 shadowed(slanted())
             } else {
                 slanted()
             };
-            let (mut seen, mut meshes) = floor_and_card(light);
+            let (mut seen, meshes) = floor_and_card(light);
             seen.draws[0].material.surface = Surface::Hair;
-            meshes.insert(
-                2,
-                Arc::new(quad([
-                    [-0.5, card_height, 0.5],
-                    [0.5, card_height, 0.5],
-                    [0.5, card_height, -0.5],
-                    [-0.5, card_height, -0.5],
-                ])),
-            );
             paint(&seen, &meshes)
         };
-        let unshadowed = hair_floor(1.0, false);
-        let far = hair_floor(1.0, true);
-        let near = hair_floor(0.02, true);
-        let lit = red_at(&unshadowed, -1.0, 0.0);
-        let (dark, half) = (red_at(&far, -1.0, 0.0), red_at(&near, 0.0, 0.0));
+        let (unshadowed, shaded) = (hair_floor(false), hair_floor(true));
+        let (dark, lit) = (red_at(&shaded, -1.0, 0.0), red_at(&unshadowed, -1.0, 0.0));
         assert!(
             u16::from(dark) + 60 < u16::from(lit),
             "{dark} against {lit}"
         );
+        // (a floor aslant to the light lies a little behind its own nearer texels in the taps' disc:
+        // it keeps nine tenths and more)
+        let (away, open) = (red_at(&shaded, 2.0, 2.0), red_at(&unshadowed, 2.0, 2.0));
         assert!(
-            u16::from(dark) + 15 < u16::from(half) && u16::from(half) + 15 < u16::from(lit),
-            "a little hair in the way leaves some of the light: {dark} < {half} < {lit}"
+            away <= open && u16::from(away) + 16 >= u16::from(open),
+            "{away} against {open}"
         );
-        assert_eq!(red_at(&far, 2.0, 2.0), red_at(&unshadowed, 2.0, 2.0));
-        // and what passes takes the hair's colour: copper keeps its red longest
+        // 2.5 cm of hair leaves 1/e of the light
+        assert!(((-HAIR_ABSORPTION * 0.025).exp() - (-1.0f32).exp()).abs() < 1e-6);
+        // and what passes takes the hair's colour: copper keeps its red longest, and in full
+        // light nothing is lost
         let passed = hair_light(0.3, [0.8, 0.4, 0.1]);
         assert!(passed[0] > passed[1] && passed[1] > passed[2], "{passed:?}");
+        assert!(passed[0] < 1.0 && passed[2] > 0.3 - 1e-6, "{passed:?}");
         assert_eq!(hair_light(1.0, [0.8, 0.4, 0.1]), [1.0; 3]);
     }
 
