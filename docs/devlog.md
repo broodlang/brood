@@ -2716,3 +2716,21 @@ total), `report` (two ranked tables), `folded`; `nest profile` prints the report
 `dev/profile->folded` moved to `profile/folded` (ledgered). Run here: the release build, one
 seconds-long smoke run on old and new binaries, and the static gates; the suites, `make ab` and
 `make ab-vm` (owed for the native call store) are CI's and the test machine's (desktop rule).
+
+2026-11-24. **Float-heavy code: a JIT run keeps what it has read; long float vectors cross
+processes packed (ADR-792).** b3d's `mat4-multiply` (two destructured 16-vectors, 112 ops, a
+fresh vector) cost ~680 ns native. Profiled, it was not boxing: ~185 ns was the destructure —
+each of sixteen `(nth a k)` re-checked tag, region and storage and called for the slab base —
+and ~270 ns re-reading and re-tag-testing each destructured element at each of its four uses.
+Two caches beside the existing f64/i64 slot caches, scoped to a straight-line run: a slot read
+as a number keeps its `f64` and whether it really was a float (so two ints still deopt, KI-114),
+and a vector slot read element by element decodes its storage once (`brood_rt_vector_base`),
+dropped before anything that could allocate or call. The product now runs in ~317 ns (2.1×), a
+16-element destructure 190 → 93 ns; b3d's 296-joint FK 630 → 520 µs, palette 400 → 280 µs
+(FK is now calls, map reads and allocation). Messages: a vector of 16+ floats crosses as
+`Message::FloatVector(Vec<f64>)` (the wire still spells it as a vector of floats), and a mixed
+vector's numbers are copied without a recursive call each — a 6000-float round trip 280 → 20 µs.
+Still open: the fresh vector's `malloc`/`free` (~85 ns for 16 elements), which wants nursery
+element storage. Run here: `cargo check`/clippy/fmt and short single timing runs only; the new
+`jit_float_run_cache_test`, the extended `message_roundtrip_test` and
+`process::message::float_vector_tests` are CI's (desktop rule).
