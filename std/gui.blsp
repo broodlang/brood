@@ -781,8 +781,8 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; shading model's parameters: `:surface` (:skin, :standard, :cutout, :blend, :hair — strands
 ;; lit along the bitangent, their alpha coverage — or :strands, ribbons turned to the camera, a
 ;; pixel wide at least, `:width [root tip]` metres), `:base`, `:normal` and `:occlusion` (texture
-;; handles), `:color`, `:roughness`, `:specular`, `:lobes`, `:wrap` and `:scatter` (light under
-;; the skin), `:rim`, `:cutoff`, `:double-sided`, `:cast-shadow` (true by default). A glTF
+;; handles), `:color`, `:roughness`, `:specular`, `:lobes`, `:scatter` (light under the skin,
+;; below), `:rim`, `:cutoff`, `:double-sided`, `:cast-shadow` (true by default). A glTF
 ;; loader, a skeleton's maths, a camera — policy above this, in the engine. Both window painters
 ;; draw a scene: the GPU target with a depth buffer and 4× multisampling, the CPU painter in
 ;; software.
@@ -796,6 +796,18 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; weighted mix, times rough-b weighted 1 − mix (multipliers above 0, mix 0 … 1); a :skin
 ;; surface has [0.75 1.3 0.85] by default (UE4's dual-lobe skin), any other one lobe. The
 ;; `:occlusion` texture's red channel (linear, glTF's convention) multiplies the ambient only.
+;;
+;; SKIN (ADR-794). A :skin surface's diffuse light is scattered under it: read from a table of
+;; Lambert's light blurred round a ring by skin's diffusion profile (Penner's pre-integrated
+;; skin shading over d'Eon's six Gaussians), by the angle to the light and the surface's
+;; CURVATURE, which the mesh finds for itself when it is uploaded (how fast its normals turn
+;; along its edges; no texture to author). So the terminator is a soft band, red reaching
+;; furthest, as wide as the surface is sharply curved: a few millimetres on a nostril or a
+;; finger, nothing on a thigh. Light is moved, never added; the band's colour is skin's own.
+;; `:scatter` (0 … 1e6, default 1) scales how far the light travels: 1 is human skin on a mesh
+;; measured in metres, 0 is plain Lambert, 2 twice as far (waxier), and a mesh in centimetres
+;; takes 0.01. The curvature is the mesh's at rest. A :skin material with the old
+;; `:scatter [r g b]` or `:wrap` is refused, saying so.
 ;; `:ambient-sh` is nine [r g b] L2 spherical-harmonic coefficients of the light arriving
 ;; from every way (linear radiance projected onto the real SH basis on world directions, in
 ;; the order L00 L1-1 L10 L11 L2-2 L2-1 L20 L21 L22, three.js's `SphericalHarmonics3`

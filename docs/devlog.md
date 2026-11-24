@@ -2802,3 +2802,21 @@ A `:strands` fragment now picks its samples by a hash of where it is (`strand_sa
 stochastic coverage, both painters), so overlapping strands fill different samples and the
 hair reads as a volume. Guard: `strand_samples_are_spread_evenly_and_differ_from_point_to_point`.
 Run here: fmt, clippy, a headless shot before and after; the tests are CI's (desktop rule).
+
+2026-11-24. **Skin scatters light by a pre-integrated table at the mesh's curvature (ADR-794).**
+womanblend's skin went red-brown wherever it was lit at a grazing angle (knees, shins, the
+shadow side of the face): the `:skin` surface's wrapped diffuse tinted its whole wrap with one
+`:scatter` colour. It is now Penner's pre-integrated skin shading: the diffuse light read from a
+65 × 32 table (the cosine to the light, the curvature) of Lambert blurred round a ring by
+d'Eon's six-Gaussian skin profile, built in Rust at first use and shared by both painters (the
+GPU's as an `Rgba32Float` texture read with `textureLoad`). The curvature is the mesh's own, a
+float a vertex found at upload from how its normals turn along its edges (`vertex_curvature`),
+so no asset changes. **Breaking:** `:scatter` is a number now (how far light travels, 1 = human
+skin on a mesh in metres; a `[r g b]` is refused with why) and `:wrap` is gone (ignored);
+womanblend's `*skin*` and its second skin material need `:scatter 1.0` (or none) in place of
+their colours. Checked: the table's numbers by a standalone calculation (flat row equal to
+Lambert bit for bit; the light round the ring 1.0001 of Lambert's in every channel at every
+curvature; red past the terminator at a finger's 8 mm radius 0.0195 against blue's 0.0001; no
+band on a thigh), the curvature of a sphere (1/r exactly) and of a seamed strip, and her legs and
+face on the GPU before and after. Run here: build, fmt, clippy, check-desktop; the tests are
+written and compile but were NOT run (desktop rule) — CI's.

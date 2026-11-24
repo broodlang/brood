@@ -3119,6 +3119,10 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
     2026-11-24) — `:softness` / `:size` / `:angle` (PCSS over a 16-tap disc), `:ambient-sh`
     (nine L2 coefficients), Schlick Fresnel with F0 from `:specular`, `:lobes` (skin two by
     default), `:occlusion` on the ambient. ⬜ Energy conservation between diffuse and specular.
+  - ✅ **Subsurface scattering for skin** (ADR-794, 2026-11-24) — a `:skin` surface's diffuse
+    read from a pre-integrated table (Penner) by the light's angle and the mesh's own
+    per-vertex curvature, found at upload; `:scatter` scales its reach. ⬜ Blurred normals for
+    a normal map; ⬜ curvature of the posed mesh.
 - ✅ **Telemetry** (ADR-106) — core landed; the kernel event *sources* shipped
   2026-07-19 (ADR-137: `system-monitor` → `telemetry/watch-runtime`, GC/spawn/exit/
   deopt as `[:runtime kind]` events). ✅ **Metric aggregators + sampling** shipped

@@ -6,16 +6,18 @@
 
 use super::*;
 use crate::host::gui::mesh::{
-    LightKind, MAX_LIGHTS, MAX_SHADOW_VIEWS, Mesh, MeshBounds, Morph, Scene, ShadowPlan, Surface,
-    add_morphs_packed, draw_bounds, shadow_plan, union,
+    LightKind, MAX_LIGHTS, MAX_SHADOW_VIEWS, Mesh, MeshBounds, Morph, SKIN_TABLE_HEIGHT,
+    SKIN_TABLE_WIDTH, Scene, ShadowPlan, Surface, add_morphs_packed, draw_bounds, shadow_plan,
+    skin_table, union,
 };
 
-/// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4.
-const VERTEX_FLOATS: usize = 20;
+/// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4,
+/// curvature 1.
+pub(super) const VERTEX_FLOATS: usize = 21;
 /// The `SceneU` uniform (2832 bytes), padded to the dynamic-offset alignment.
 const SCENE_BYTES: u64 = 3072;
 /// The `DrawU` uniform, padded to the dynamic-offset alignment.
-const DRAW_BYTES: u64 = 256;
+pub(super) const DRAW_BYTES: u64 = 256;
 const SAMPLES: u32 = 4;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -84,6 +86,9 @@ pub(super) struct MeshGpu {
     shadow_sampler: wgpu::Sampler,
     /// One cleared layer, bound for a scene without shadows.
     no_shadows: wgpu::TextureView,
+    /// `mesh::skin_table` as the colour passes read it (ADR-794): `Rgba32Float`, the CPU
+    /// painter's own numbers.
+    skin_table: wgpu::TextureView,
     draw_layout: wgpu::BindGroupLayout,
     morph_layout: wgpu::BindGroupLayout,
     material_layout: wgpu::BindGroupLayout,
@@ -125,6 +130,51 @@ fn buffer(
         usage: usage | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
+}
+
+/// `mesh::skin_table` on the device: one `Rgba32Float` texel a table entry, row by row, so the
+/// shader's `skin_diffuse` reads the numbers the CPU painter's does.
+fn skin_table_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
+    let size = wgpu::Extent3d {
+        width: SKIN_TABLE_WIDTH as u32,
+        height: SKIN_TABLE_HEIGHT as u32,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mesh skin table"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &skin_table_bytes(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(SKIN_TABLE_WIDTH as u32 * 16),
+            rows_per_image: Some(SKIN_TABLE_HEIGHT as u32),
+        },
+        size,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// The skin table as the bytes of its texture: red, green, blue and 1, four floats a texel.
+pub(super) fn skin_table_bytes() -> Vec<u8> {
+    skin_table()
+        .iter()
+        .flat_map(|texel| [texel[0], texel[1], texel[2], 1.0])
+        .flat_map(f32::to_le_bytes)
+        .collect()
 }
 
 fn one_pixel(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> wgpu::TextureView {
@@ -222,6 +272,17 @@ impl MeshGpu {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                // the skin table, loaded texel by texel: no sampler, so not filterable
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let shadow_scene_layout =
@@ -271,7 +332,8 @@ impl MeshGpu {
                 2 => Float32x2,
                 3 => Float32x4,
                 4 => Uint32x4,
-                5 => Float32x4
+                5 => Float32x4,
+                6 => Float32
             ],
         });
         let make = |double_sided: bool, blended: bool| {
@@ -404,6 +466,7 @@ impl MeshGpu {
                 ..Default::default()
             }),
             no_shadows,
+            skin_table: skin_table_texture(device, queue),
             scene_buffer: buffer(device, "mesh scenes", SCENE_BYTES, uniforms),
             scene_capacity: SCENE_BYTES,
             draw_buffer: buffer(device, "mesh draws", DRAW_BYTES * 16, uniforms),
@@ -482,6 +545,7 @@ impl MeshGpu {
             vertices.extend(floats_bytes(&floats));
             vertices.extend(words_bytes(&joints.map(u32::from)));
             vertices.extend(floats_bytes(&weights));
+            vertices.extend(mesh.curvature[index].to_le_bytes());
         }
         let vertex_buffer = buffer(
             device,
@@ -728,12 +792,8 @@ impl MeshGpu {
                 let mut floats = Vec::with_capacity(32);
                 floats.extend_from_slice(&draw.model);
                 floats.extend_from_slice(&material.color);
-                floats.extend_from_slice(&[
-                    material.scatter[0],
-                    material.scatter[1],
-                    material.scatter[2],
-                    material.wrap,
-                ]);
+                // `DrawU::skin`: what turns the mesh's curvature into the skin table's
+                floats.extend_from_slice(&[material.scatter_scale(), 0.0, 0.0, 0.0]);
                 floats.extend_from_slice(&[
                     material.roughness,
                     material.specular,
@@ -985,6 +1045,10 @@ impl MeshGpu {
                     wgpu::BindGroupEntry {
                         binding: 3,
                         resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&self.skin_table),
                     },
                 ],
             });

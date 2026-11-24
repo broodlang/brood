@@ -1520,7 +1520,8 @@ fn scene_spec(
     num: &dyn Fn(Value) -> f32,
 ) -> Result<Option<crate::host::gui::mesh::Scene>, String> {
     use crate::host::gui::mesh::{
-        AmbientOcclusion, DEFAULT_OCCLUSION_RADIUS, Draw, Material, SPECULAR_TO_F0, Scene, Surface,
+        AmbientOcclusion, DEFAULT_OCCLUSION_RADIUS, Draw, MAX_SCATTER, Material, SPECULAR_TO_F0,
+        Scene, Surface,
     };
     let Value::Map(map) = spec else {
         return Ok(None);
@@ -1632,10 +1633,22 @@ fn scene_spec(
         if let Some(specular) = number("specular") {
             material.specular = specular.clamp(0.0, 1.0 / SPECULAR_TO_F0);
         }
-        if let Some(wrap) = number("wrap") {
-            material.wrap = wrap.clamp(0.0, 1.0);
-        }
-        material.scatter = three(get(material_map, "scatter"), material.scatter);
+        // how far light travels under a `:skin` surface (ADR-794): a multiple of human skin's
+        // on a mesh in metres. Its old meaning, the wrapped light's colour, is refused by name,
+        // so a material written for the wrapped diffuse says what to change instead of drawing
+        // differently in silence.
+        material.scatter = match get(material_map, "scatter") {
+            None | Some(Value::Nil) => None,
+            Some(given) if is_number(given) && (0.0..=MAX_SCATTER).contains(&num(given)) => {
+                Some(num(given))
+            }
+            Some(given) => {
+                return Err(format!(
+                    "a material's :scatter is how far light travels under a :skin surface, a number from 0 (none) to {MAX_SCATTER} (1: human skin on a mesh in metres), not {}; the scattered light's colour is skin's own now, not a colour to give",
+                    crate::syntax::printer::print(heap, given)
+                ));
+            }
+        };
         if let Some(rim) = number("rim") {
             material.rim = rim.clamp(0.0, 16.0);
         }
@@ -3313,5 +3326,36 @@ mod gui_scene_light_tests {
             scene_with("[]", "{:lobes [0.75 1.3 1.5]}"),
             ":lobes is [rough-a rough-b mix]",
         );
+    }
+
+    #[test]
+    fn a_skins_scatter_reads_and_defaults_and_its_old_meaning_is_refused_with_why() {
+        // ADR-794: `:scatter` is how far light travels under skin; without it, human skin on
+        // a mesh in metres (a curvature a metre is a thousandth of one a millimetre)
+        use crate::host::gui::mesh::DEFAULT_SCATTER;
+        let default = scene_with("[]", "{:surface :skin}").expect("a scene");
+        let material = &default.draws[0].material;
+        assert_eq!(material.scatter, None);
+        assert_eq!(DEFAULT_SCATTER, 1.0);
+        assert_eq!(material.scatter_scale(), 0.001);
+        let given = scene_with("[]", "{:surface :skin :scatter 2.5}").expect("a scene");
+        assert_eq!(given.draws[0].material.scatter, Some(2.5));
+        assert_eq!(given.draws[0].material.scatter_scale(), 0.0025);
+        let none = scene_with("[]", "{:surface :skin :scatter 0}").expect("a scene");
+        assert_eq!(none.draws[0].material.scatter, Some(0.0));
+        assert_eq!(none.draws[0].material.scatter_scale(), 0.0);
+        let refused = |material: &str, why: &str| {
+            let error = scene_with("[]", material).expect_err(material);
+            assert!(
+                error.contains("%gui-draw") && error.contains(why),
+                "{material}: {error:?} does not say {why:?}"
+            );
+        };
+        let scatter = ":scatter is how far light travels under a :skin surface";
+        // the wrapped diffuse's colour and reach, as a game wrote them before
+        refused("{:surface :skin :scatter [0.8 0.62 0.55]}", scatter);
+        refused("{:surface :skin :scatter -1}", scatter);
+        refused("{:surface :skin :scatter :deep}", scatter);
+        refused("{:surface :skin :scatter 1e9}", scatter);
     }
 }

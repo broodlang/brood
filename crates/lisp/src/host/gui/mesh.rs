@@ -10,7 +10,8 @@
 //! The shading model is fixed on purpose (ADR-413: a frame carries no shader code). It is
 //! written ONCE here for the CPU painter, which rasterises a scene in software
 //! ([`rasterize`]), and mirrored in WGSL for the GPU target (`gpu/shaders.rs`, `MESH_SRC`):
-//! wrapped diffuse with a scatter tint at the terminator for skin, Blinn-Phong specular
+//! pre-integrated subsurface scattering for skin (ADR-794: a table of the diffuse light by
+//! the light's angle and the surface's curvature, [`skin_table`]), Blinn-Phong specular
 //! normalised by its exponent with Schlick's Fresnel (two lobes for skin), a fresnel rim, a
 //! hemispherical or spherical-harmonic ambient times an occlusion map, shadow maps filtered
 //! 3×3 or soft (ADR-793), a tangent-space normal map, alpha cut out (lashes, brows) or
@@ -57,6 +58,45 @@ pub const SPECULAR_TO_F0: f32 = 0.08;
 /// A `:skin` surface's two specular lobes by default: roughness times 0.75 and times 1.3,
 /// weighted 0.85 and 0.15 (UE4's dual-lobe skin, ADR-793).
 pub const SKIN_LOBES: [f32; 3] = [0.75, 1.3, 0.85];
+/// The skin table's columns (ADR-794): the cosine between the normal and the light from −1 to
+/// 1, a column at each end and an ODD count, so the terminator (cosine 0) is a column of its
+/// own and the flat row, plain Lambert with its corner there, is read back exactly.
+pub const SKIN_TABLE_WIDTH: usize = 65;
+/// The skin table's rows: the surface's curvature, row `index` holding `(index / 31)²` per
+/// millimetre — flat in row 0, a 1 mm radius in the last, the rows closest where a body's
+/// curvatures are (a thigh's 0.0125 per millimetre is row 3.5, a nose's 0.1 row 10).
+pub const SKIN_TABLE_HEIGHT: usize = 32;
+/// The sharpest curvature the skin table holds, per millimetre (a radius of 1 mm); a sharper
+/// surface is read as this.
+pub const SKIN_MAX_CURVATURE: f32 = 1.0;
+/// A `:skin` surface's `:scatter` by default: human skin on a mesh measured in metres.
+pub const DEFAULT_SCATTER: f32 = 1.0;
+/// The most a material's `:scatter` may be (a mesh in millimetres is 0.001, one in kilometres
+/// would be this).
+pub const MAX_SCATTER: f32 = 1.0e6;
+/// The millimetres in one of a mesh's units, taken as metres: the diffusion profile's
+/// distances are millimetres.
+pub const SKIN_MILLIMETRES_PER_UNIT: f32 = 1000.0;
+/// The skin diffusion profile (ADR-794): d'Eon and Luebke's sum of six Gaussians fitted to a
+/// three-layer skin model (GPU Gems 3, chapter 14), each `[variance mm², red, green, blue]`.
+/// The weights sum to 1 a channel, so the skin's colour is its texture's and the profile only
+/// moves light.
+pub const SKIN_PROFILE: [[f64; 4]; 6] = [
+    [0.0064, 0.233, 0.455, 0.649],
+    [0.0484, 0.100, 0.336, 0.344],
+    [0.187, 0.118, 0.198, 0.0],
+    [0.567, 0.113, 0.007, 0.007],
+    [1.99, 0.358, 0.004, 0.0],
+    [7.41, 0.078, 0.0, 0.0],
+];
+/// The steps each Gaussian of the profile is integrated over when the skin table is built.
+const SKIN_INTEGRATION_STEPS: usize = 128;
+/// The shortest edge a mesh's curvature is read along, in its units: across a shorter one (two
+/// vertices all but on one point: a pole's, a pinched seam's) the difference of two normals is
+/// rounding, and over so short a length it would read as a needle's point.
+const CURVATURE_SHORTEST_EDGE: f32 = 1e-6;
+/// The neighbour averagings a mesh's curvature is smoothed by ([`vertex_curvature`]).
+const CURVATURE_SMOOTHING_PASSES: usize = 2;
 /// The distance under which a point or spot light's inverse-square falloff stops growing (a
 /// surface touching the bulb is not infinitely bright).
 pub const NEAR_LIGHT: f32 = 0.01;
@@ -87,7 +127,7 @@ pub const HAIR_COVERAGE_STEPS: [[f32; 2]; 2] = [[0.125, 0.625], [0.875, 0.375]];
 /// The reach of the ambient occlusion, in metres, when `:ambient-occlusion` names none: the
 /// size of the folds it darkens (a mouth's corner, a crease beside the nose).
 pub const DEFAULT_OCCLUSION_RADIUS: f32 = 0.03;
-/// The most vertices one mesh may have: 80 bytes each on the GPU target stays under the
+/// The most vertices one mesh may have: 84 bytes each on the GPU target stays under the
 /// smallest buffer every device allows (256 MiB).
 pub const MAX_VERTICES: usize = 3 << 20;
 /// The most bytes of morph targets one mesh may carry as uploaded: 24 bytes a vertex a target
@@ -184,8 +224,99 @@ pub struct Mesh {
     pub weights: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
     pub morphs: Vec<Morph>,
+    /// How sharply the surface curves at each vertex, 1 over its radius in the mesh's own
+    /// units, found once from its positions and normals ([`vertex_curvature`]): what a `:skin`
+    /// surface's scattering reads (ADR-794).
+    pub curvature: Vec<f32>,
     /// Where its vertices can be, for fitting a shadow map to a scene without posing them.
     pub bounds: MeshBounds,
+}
+
+/// How sharply a mesh curves at each vertex: 1 over the radius of the surface there, in the
+/// mesh's own units (ADR-794). Along a triangle's edge the normal turns by `|Δnormal|` over
+/// `|Δposition|`, which on a sphere of radius r is exactly 1/r; a vertex's curvature is the mean
+/// over the edges that meet it, then averaged with its neighbours' [`CURVATURE_SMOOTHING_PASSES`]
+/// times (light under skin travels millimetres, so a curvature finer than the mesh's edges means
+/// nothing to it, and the mean of a few edges is noisy). Vertices at one position (a UV seam's
+/// two sides, a hard edge's) are one point of the surface and get one value, so no seam shows.
+/// It is the mesh at rest: a pose or a morph does not change it.
+pub fn vertex_curvature(positions: &[[f32; 3]], normals: &[[f32; 3]], indices: &[u32]) -> Vec<f32> {
+    // the surface's points: vertices at the same position share one
+    let mut point_of_position: HashMap<[u32; 3], u32> = HashMap::with_capacity(positions.len());
+    let points: Vec<u32> = positions
+        .iter()
+        .map(|position| {
+            // −0.0 and 0.0 are one place
+            let key = position.map(|coordinate| (coordinate + 0.0).to_bits());
+            let next = point_of_position.len() as u32;
+            *point_of_position.entry(key).or_insert(next)
+        })
+        .collect();
+    let point_count = point_of_position.len();
+    drop(point_of_position);
+    let each_edge = |visit: &mut dyn FnMut(usize, usize)| {
+        for triangle in indices.as_chunks::<3>().0 {
+            for corner in 0..3 {
+                visit(
+                    triangle[corner] as usize,
+                    triangle[(corner + 1) % 3] as usize,
+                );
+            }
+        }
+    };
+    let mut totals = vec![0.0f32; point_count];
+    let mut counts = vec![0u32; point_count];
+    each_edge(&mut |from, to| {
+        let along = subtract(positions[to], positions[from]);
+        let length = dot(along, along).sqrt();
+        if length <= CURVATURE_SHORTEST_EDGE {
+            return;
+        }
+        let turn = subtract(normalize(normals[to]), normalize(normals[from]));
+        let curvature = dot(turn, turn).sqrt() / length;
+        if !curvature.is_finite() {
+            return;
+        }
+        for end in [from, to] {
+            totals[points[end] as usize] += curvature;
+            counts[points[end] as usize] += 1;
+        }
+    });
+    let mut curvature: Vec<f32> = totals
+        .iter()
+        .zip(&counts)
+        .map(|(total, count)| {
+            if *count > 0 {
+                total / *count as f32
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    for _ in 0..CURVATURE_SMOOTHING_PASSES {
+        // each point with the points its edges reach, itself counted once
+        let mut sums = curvature.clone();
+        let mut shares = vec![1u32; point_count];
+        each_edge(&mut |from, to| {
+            let (first, second) = (points[from] as usize, points[to] as usize);
+            if first == second {
+                return;
+            }
+            sums[first] += curvature[second];
+            shares[first] += 1;
+            sums[second] += curvature[first];
+            shares[second] += 1;
+        });
+        curvature = sums
+            .iter()
+            .zip(&shares)
+            .map(|(sum, share)| sum / *share as f32)
+            .collect();
+    }
+    points
+        .iter()
+        .map(|point| curvature[*point as usize])
+        .collect()
 }
 
 /// An axis-aligned box: its least and greatest corner.
@@ -478,6 +609,7 @@ impl Mesh {
             morphs.push(morph);
         }
         let bounds = MeshBounds::of(&positions, &joints, &weights, &morphs);
+        let curvature = vertex_curvature(&positions, &normals, &indices);
         Ok(Mesh {
             positions,
             normals,
@@ -487,6 +619,7 @@ impl Mesh {
             weights,
             indices,
             morphs,
+            curvature,
             bounds,
         })
     }
@@ -495,7 +628,9 @@ impl Mesh {
 /// How a surface is shaded and blended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
-    /// Wrapped diffuse with the scatter colour at the terminator (light under the skin).
+    /// Diffuse light scattered under the surface (ADR-794): read from [`skin_table`] by the
+    /// light's angle and the mesh's curvature, so the terminator is a soft band, red reaching
+    /// furthest, as wide as the surface is sharply curved.
     Skin,
     /// Plain diffuse.
     Standard,
@@ -546,10 +681,10 @@ pub struct Material {
     /// weighted `mix` and times `rough-b` weighted `1 − mix`. None: [`SKIN_LOBES`] for skin,
     /// one lobe for any other surface ([`Material::lobes`]).
     pub lobes: Option<[f32; 3]>,
-    /// How far diffuse light wraps past the terminator, 0 … 1 (skin).
-    pub wrap: f32,
-    /// The colour the wrapped light takes (skin's red where light goes under it).
-    pub scatter: [f32; 3],
+    /// How far light travels under a `:skin` surface, as a multiple of human skin's on a mesh
+    /// measured in metres (ADR-794): it scales the mesh's curvature before the skin table is
+    /// read. 0 is plain Lambert; a mesh in centimetres is 0.01. None: [`DEFAULT_SCATTER`].
+    pub scatter: Option<f32>,
     /// The fresnel rim's strength, lit by the sky.
     pub rim: f32,
     /// The alpha under which a cutout texel is not drawn.
@@ -574,8 +709,7 @@ impl Default for Material {
             roughness: 0.6,
             specular: 0.5,
             lobes: None,
-            wrap: 0.0,
-            scatter: [0.0, 0.0, 0.0],
+            scatter: None,
             rim: 0.0,
             cutoff: 0.5,
             double_sided: false,
@@ -599,6 +733,16 @@ impl Material {
     /// Its reflectance at normal incidence.
     pub fn f0(&self) -> f32 {
         (self.specular * SPECULAR_TO_F0).clamp(0.0, 1.0)
+    }
+
+    /// What a mesh's curvature (1 over its radius in the mesh's units) is multiplied by to read
+    /// the skin table, whose curvatures are per millimetre: its `:scatter` over the millimetres
+    /// in a unit. Both painters multiply by this one number (the GPU's rides in `DrawU`).
+    pub fn scatter_scale(&self) -> f32 {
+        self.scatter
+            .unwrap_or(DEFAULT_SCATTER)
+            .clamp(0.0, MAX_SCATTER)
+            / SKIN_MILLIMETRES_PER_UNIT
     }
 }
 
@@ -1007,13 +1151,136 @@ pub fn specular_lobes(material: &Material, normal_dot_half: f32) -> f32 {
     }
 }
 
+/// The curvature, per millimetre, that row `row` of the skin table holds: `(row / last)²` of
+/// [`SKIN_MAX_CURVATURE`], so [`skin_diffuse`] finds a curvature's row by a square root.
+pub fn skin_table_curvature(row: usize) -> f32 {
+    let along = row as f32 / (SKIN_TABLE_HEIGHT - 1) as f32;
+    along * along * SKIN_MAX_CURVATURE
+}
+
+/// The skin table (ADR-794; Penner's pre-integrated skin shading): the diffuse light a
+/// `:skin` surface gives back, red, green and blue, LINEAR, by the cosine between its normal
+/// and the light ([`SKIN_TABLE_WIDTH`] columns, −1 … 1) and its curvature
+/// ([`SKIN_TABLE_HEIGHT`] rows, [`skin_table_curvature`]), row by row. Built once, in Rust,
+/// and the same numbers for both painters: the CPU's reads this slice, the GPU target uploads
+/// it as a texture.
+///
+/// Each texel is Lambert's light blurred round a ring of the surface's radius r by the skin's
+/// diffusion profile: `D(θ) = ∫ max(cos(θ + x), 0) · R(2r·sin(x/2)) dx / ∫ R(2r·sin(x/2)) dx`,
+/// x from −π to π, `2r·sin(x/2)` the straight distance under the skin between two points of
+/// the ring an angle x apart. `R` is [`SKIN_PROFILE`], each Gaussian of variance v taken as
+/// `exp(−s²/2v) / √(2πv)`: the profile is a blur over the surface's two directions, and the
+/// ring sees one, so each Gaussian is the 2D one of GPU Gems 3 with the direction along the
+/// ring's axis integrated out, which leaves its weight what the table says. A flat surface
+/// (row 0) is Lambert itself; on a curved one light is only moved along the ring, never added.
+pub fn skin_table() -> &'static [[f32; 3]] {
+    static TABLE: std::sync::OnceLock<Vec<[f32; 3]>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(build_skin_table)
+}
+
+fn build_skin_table() -> Vec<[f32; 3]> {
+    let mut table = Vec::with_capacity(SKIN_TABLE_WIDTH * SKIN_TABLE_HEIGHT);
+    for row in 0..SKIN_TABLE_HEIGHT {
+        let curvature = f64::from(skin_table_curvature(row));
+        // each Gaussian round the ring: the angles it is read at with their weights, and the
+        // weights' sum. Read out to six of its deviations (or the whole ring), so the
+        // narrowest is integrated as finely as the widest.
+        let rings: Vec<(Vec<(f64, f64)>, f64)> = SKIN_PROFILE
+            .iter()
+            .map(|gaussian| {
+                if row == 0 {
+                    return (Vec::new(), 0.0);
+                }
+                let variance = gaussian[0];
+                let radius = 1.0 / curvature;
+                let reach = 3.0 * variance.sqrt() / radius;
+                let furthest = if reach >= 1.0 {
+                    std::f64::consts::PI
+                } else {
+                    2.0 * reach.asin()
+                };
+                let step = 2.0 * furthest / SKIN_INTEGRATION_STEPS as f64;
+                let samples: Vec<(f64, f64)> = (0..SKIN_INTEGRATION_STEPS)
+                    .map(|index| {
+                        let offset = -furthest + (index as f64 + 0.5) * step;
+                        let distance = 2.0 * radius * (offset * 0.5).sin();
+                        let weight = (-distance * distance / (2.0 * variance)).exp() * step
+                            / (std::f64::consts::TAU * variance).sqrt();
+                        (offset, weight)
+                    })
+                    .collect();
+                let total = samples.iter().map(|(_, weight)| weight).sum();
+                (samples, total)
+            })
+            .collect();
+        for column in 0..SKIN_TABLE_WIDTH {
+            let cosine = column as f64 / (SKIN_TABLE_WIDTH - 1) as f64 * 2.0 - 1.0;
+            if row == 0 {
+                table.push([cosine.max(0.0) as f32; 3]);
+                continue;
+            }
+            let angle = cosine.clamp(-1.0, 1.0).acos();
+            let mut light = [0.0f64; 3];
+            let mut weight = [0.0f64; 3];
+            for (gaussian, (samples, total)) in SKIN_PROFILE.iter().zip(&rings) {
+                let lit: f64 = samples
+                    .iter()
+                    .map(|(offset, share)| (angle + offset).cos().max(0.0) * share)
+                    .sum();
+                for channel in 0..3 {
+                    light[channel] += gaussian[channel + 1] * lit;
+                    weight[channel] += gaussian[channel + 1] * total;
+                }
+            }
+            table.push([0, 1, 2].map(|channel| (light[channel] / weight[channel]) as f32));
+        }
+    }
+    table
+}
+
+/// The diffuse light, red, green and blue, a `:skin` surface gives back where its normal and
+/// the light meet at the cosine `facing` and it curves `curvature` per millimetre: `table`
+/// ([`skin_table`]) read between its four nearest texels — the columns evenly from −1 to 1,
+/// the rows by the square root of the curvature over [`SKIN_MAX_CURVATURE`]. The shader's
+/// `skin_diffuse` is the same arithmetic on the same texels (`textureLoad`, never a filtering
+/// sampler, whose weights are 8 bits).
+pub fn skin_diffuse(table: &[[f32; 3]], facing: f32, curvature: f32) -> [f32; 3] {
+    let across = (facing * 0.5 + 0.5).clamp(0.0, 1.0) * (SKIN_TABLE_WIDTH - 1) as f32;
+    let down = (curvature.clamp(0.0, SKIN_MAX_CURVATURE) / SKIN_MAX_CURVATURE).sqrt()
+        * (SKIN_TABLE_HEIGHT - 1) as f32;
+    let column = (across.floor() as usize).min(SKIN_TABLE_WIDTH - 2);
+    let row = (down.floor() as usize).min(SKIN_TABLE_HEIGHT - 2);
+    let across_share = across - column as f32;
+    let down_share = down - row as f32;
+    let texel = |column: usize, row: usize| table[row * SKIN_TABLE_WIDTH + column];
+    let corners = [
+        texel(column, row),
+        texel(column + 1, row),
+        texel(column, row + 1),
+        texel(column + 1, row + 1),
+    ];
+    [0, 1, 2].map(|channel| {
+        let upper =
+            corners[0][channel] + (corners[1][channel] - corners[0][channel]) * across_share;
+        let lower =
+            corners[2][channel] + (corners[3][channel] - corners[2][channel]) * across_share;
+        upper + (lower - upper) * down_share
+    })
+}
+
 /// The light leaving a surface point toward the eye, linear and before exposure: `base` its
 /// linear colour, `normal` its unit normal facing the viewer's side, `view` the unit
 /// direction from it to the eye, `world` where it is, `occlusion` how much of the ambient
 /// reaches it (its occlusion map's times the scene's [`ambient_occlusion`], 1 for all of it),
 /// `visibility` how much of each light (by index) its shadow lets through — 1 for a light it
-/// holds no entry for — and `strand` a `:hair` surface's unit strand direction (unused by the
-/// others).
+/// holds no entry for — `strand` a `:hair` surface's unit strand direction (unused by the
+/// others), and `curvature` how sharply the mesh curves there, 1 over its radius in the mesh's
+/// units ([`Mesh::curvature`]; read by a `:skin` surface only).
+///
+/// A `:skin` surface's diffuse light is [`skin_diffuse`]'s in place of Lambert's (ADR-794).
+/// A shadow multiplies the Lambert part of it and fades out of the rest — the light the
+/// scattering moved — toward the terminator, where a closed body always shadows itself and the
+/// light there came under the skin from the lit side (ADR-793).
 ///
 /// A light's `:color` is the irradiance it brings, π times its radiance, so the diffuse term
 /// is the albedo itself (Lambert's `albedo / π` times π) and the specular's normalised
@@ -1029,8 +1296,11 @@ pub fn shade(
     occlusion: f32,
     visibility: &[f32],
     strand: [f32; 3],
+    curvature: f32,
 ) -> [f32; 3] {
     let ambient = ambient(scene, normal);
+    let skin = (material.surface == Surface::Skin)
+        .then(|| (skin_table(), curvature * material.scatter_scale()));
     let mut out = [0, 1, 2].map(|channel| base[channel] * ambient[channel] * occlusion);
     let f0 = material.f0();
     // a `:hair` surface's highlights: as sharp as its roughness asks
@@ -1039,10 +1309,10 @@ pub fn shade(
         let (to_light, arriving) = light_arrival(light, world);
         let seen = visibility.get(index).copied().unwrap_or(1.0);
         let facing = dot(normal, to_light);
-        // the wrap light past the terminator is light under the skin, which the body's own
-        // shadow there would cut off in a hard line: the shadow fades out of it toward the
-        // terminator (ADR-793)
-        let wrap_seen = 1.0 + (seen - 1.0) * smoothstep(0.0, 0.3, facing);
+        // the light past the terminator is light under the skin, which the body's own shadow
+        // there would cut off in a hard line: the shadow fades out of what the scattering
+        // moved toward the terminator (ADR-793)
+        let scattered_seen = 1.0 + (seen - 1.0) * smoothstep(0.0, 0.3, facing);
         let lambert = facing.max(0.0);
         let half = normalize([
             to_light[0] + view[0],
@@ -1070,12 +1340,11 @@ pub fn shade(
         }
         let specular =
             fresnel(f0, dot(view, half)) * specular_lobes(material, dot(normal, half)) * lambert;
+        let scattered = skin.map(|(table, curved)| skin_diffuse(table, facing, curved));
         for channel in 0..3 {
-            let diffuse = if material.surface == Surface::Skin {
-                let wrapped = ((facing + material.wrap) / (1.0 + material.wrap)).clamp(0.0, 1.0);
-                lambert * seen + material.scatter[channel] * (wrapped - lambert) * wrap_seen
-            } else {
-                lambert * seen
+            let diffuse = match scattered {
+                Some(light) => lambert * seen + (light[channel] - lambert) * scattered_seen,
+                None => lambert * seen,
             };
             out[channel] +=
                 light.color[channel] * arriving * (base[channel] * diffuse + specular * seen);
@@ -2204,6 +2473,8 @@ struct ClipVertex {
     normal: [f32; 3],
     tangent: [f32; 4],
     uv: [f32; 2],
+    /// How sharply the mesh curves here ([`Mesh::curvature`]).
+    curvature: f32,
 }
 
 fn lerp_vertex(from: &ClipVertex, to: &ClipVertex, amount: f32) -> ClipVertex {
@@ -2223,6 +2494,7 @@ fn lerp_vertex(from: &ClipVertex, to: &ClipVertex, amount: f32) -> ClipVertex {
         &mut vertex.tangent[..3],
     );
     mix_n(&from.uv, &to.uv, &mut vertex.uv);
+    vertex.curvature = mix(from.curvature, to.curvature);
     vertex
 }
 
@@ -2583,6 +2855,9 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     occlusion,
                     &visibility,
                     strand,
+                    corners[0].curvature * weights[0]
+                        + corners[1].curvature * weights[1]
+                        + corners[2].curvature * weights[2],
                 ),
                 scene.exposure,
             );
@@ -2695,6 +2970,7 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
                     normal: ribbon_normal,
                     tangent: [direction[0], direction[1], direction[2], coverage],
                     uv,
+                    curvature: 0.0,
                 };
             }
             ClipVertex {
@@ -2706,6 +2982,7 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
                     [unit[0], unit[1], unit[2], tangent[3]]
                 },
                 uv: mesh.uvs[index],
+                curvature: mesh.curvature[index],
             }
         })
         .collect()
@@ -3128,43 +3405,292 @@ mod tests {
         );
     }
 
-    #[test]
-    fn skin_wraps_light_past_the_terminator() {
-        let scene = scene(draw());
-        let skin = Material {
-            surface: Surface::Skin,
-            wrap: 0.5,
-            scatter: [1.0, 0.3, 0.2],
-            ..Material::default()
+    /// `material` lit by one white light whose direction meets `normal` at the cosine
+    /// `facing`, nothing else: its diffuse light on a white surface curving `curvature` per
+    /// mesh unit.
+    fn diffuse_alone(material: &Material, facing: f32, curvature: f32) -> [f32; 3] {
+        let mut lit = scene(draw());
+        lit.sky = [0.0; 3];
+        lit.ground = [0.0; 3];
+        let across = (1.0 - facing * facing).max(0.0).sqrt();
+        // the light travels against (across, 0, facing); the normal is +z
+        lit.lights = vec![Light::directional([-across, 0.0, -facing], [1.0; 3])];
+        let quiet = Material {
+            specular: 0.0,
+            ..material.clone()
         };
-        // lit edge-on: plain diffuse gets nothing from the light, skin gets red
-        let normal = [1.0, 0.0, 0.0];
-        let plain = shade(
-            &scene,
-            &Material::default(),
+        shade(
+            &lit,
+            &quiet,
             [1.0; 3],
-            normal,
-            [0.0, 0.0, -1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
             [0.0; 3],
             1.0,
             &[],
             [0.0; 3],
-        );
-        let wrapped = shade(
-            &scene,
-            &skin,
-            [1.0; 3],
-            normal,
-            [0.0, 0.0, -1.0],
-            [0.0; 3],
-            1.0,
-            &[],
-            [0.0; 3],
-        );
-        assert!(wrapped[0] > plain[0] + 0.2, "red wraps round");
+            curvature,
+        )
+    }
+
+    fn skin() -> Material {
+        Material {
+            surface: Surface::Skin,
+            ..Material::default()
+        }
+    }
+
+    #[test]
+    fn flat_skin_is_lambert_and_white() {
+        // ADR-794: the profile's weights sum to 1 a channel and a flat surface has no ring to
+        // blur round, so the table's first row is Lambert itself, the same in every channel
+        let table = skin_table();
+        assert_eq!(table.len(), SKIN_TABLE_WIDTH * SKIN_TABLE_HEIGHT);
+        for (column, texel) in table[..SKIN_TABLE_WIDTH].iter().enumerate() {
+            let cosine = column as f32 / (SKIN_TABLE_WIDTH - 1) as f32 * 2.0 - 1.0;
+            assert_eq!(*texel, [cosine.max(0.0); 3], "column {column}");
+        }
+        // read between the columns it is still Lambert: its one corner is a column
+        for step in 0..=400 {
+            let facing = step as f32 / 200.0 - 1.0;
+            let read = skin_diffuse(table, facing, 0.0);
+            for channel in read {
+                assert!(
+                    (channel - facing.max(0.0)).abs() < 1e-6,
+                    "facing {facing}: {read:?}"
+                );
+            }
+            // and through the shading: a flat skin, or a curved one with no scattering, is a
+            // standard surface's diffuse
+            let plain = diffuse_alone(&Material::default(), facing, 0.0);
+            let flat = diffuse_alone(&skin(), facing, 0.0);
+            let unscattered = diffuse_alone(
+                &Material {
+                    scatter: Some(0.0),
+                    ..skin()
+                },
+                facing,
+                400.0,
+            );
+            for channel in 0..3 {
+                assert!((flat[channel] - plain[channel]).abs() < 1e-6, "{flat:?}");
+                assert!((unscattered[channel] - plain[channel]).abs() < 1e-6);
+            }
+        }
+        // the first curved row (a radius near a metre) is the integral itself, and still
+        // Lambert and white to a thousandth: the profile, normalised, only moves light
+        let nearly_flat = skin_table_curvature(1);
+        for step in 0..=400 {
+            let facing = step as f32 / 200.0 - 1.0;
+            for channel in skin_diffuse(table, facing, nearly_flat) {
+                assert!((channel - facing.max(0.0)).abs() < 1e-3, "facing {facing}");
+            }
+        }
+        // a surface sharply curved does differ: the lookup is not Lambert whatever it is given
+        assert!(skin_diffuse(table, 0.0, 0.4)[0] > 0.05);
+    }
+
+    /// `light(angle)` summed over the angles 0 … π from the light, each weighted by
+    /// `measure(angle)`.
+    fn over_angles(light: impl Fn(f32) -> f32, measure: impl Fn(f32) -> f32) -> f32 {
+        let steps = 4000;
+        (0..steps)
+            .map(|index| {
+                let angle = (index as f32 + 0.5) / steps as f32 * std::f32::consts::PI;
+                light(angle) * measure(angle) * std::f32::consts::PI / steps as f32
+            })
+            .sum()
+    }
+
+    #[test]
+    fn skin_scattering_moves_light_and_adds_none() {
+        // the table blurs Lambert round a ring, so round the ring the light is Lambert's
+        // exactly (∫ max(cos, 0) over 0 … π is 1), each channel, whatever the curvature; over
+        // a sphere (each angle weighted by its sine; Lambert's is ½) it is Lambert's to within
+        // the little the ring's blur is not a sphere's: 1 % on a nose (a 10 mm radius), under
+        // 10 % at a 2.5 mm radius
+        let table = skin_table();
+        for (curvature, sphere_slack) in [(0.0125f32, 0.002), (0.1, 0.01), (0.4, 0.1)] {
+            for channel in 0..3 {
+                let read = |angle: f32| skin_diffuse(table, angle.cos(), curvature)[channel];
+                let ring = over_angles(read, |_| 1.0);
+                assert!(
+                    (ring - 1.0).abs() < 2e-3,
+                    "curvature {curvature} channel {channel}: {ring} round the ring"
+                );
+                let sphere = over_angles(read, f32::sin);
+                assert!(
+                    (sphere - 0.5).abs() < 0.5 * sphere_slack,
+                    "curvature {curvature} channel {channel}: {sphere} over the sphere"
+                );
+            }
+        }
+        // through the shading too, on a mesh in metres: a finger's 8 mm radius is 125 a metre
+        for channel in 0..3 {
+            let ring = over_angles(
+                |angle| diffuse_alone(&skin(), angle.cos(), 125.0)[channel],
+                |_| 1.0,
+            );
+            assert!((ring - 1.0).abs() < 2e-3, "channel {channel}: {ring}");
+        }
+    }
+
+    /// How far past the terminator (as the cosine to the light, 0 … 1 behind it) `channel` of
+    /// a skin surface curving `curvature` per metre still gives back over 1 % of the light.
+    fn band(curvature: f32, channel: usize) -> f32 {
+        (0..1000)
+            .map(|step| step as f32 / 1000.0)
+            .filter(|behind| diffuse_alone(&skin(), -behind, curvature)[channel] > 0.01)
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn red_reaches_past_the_terminator_furthest_and_the_band_narrows_as_the_surface_flattens() {
+        // a finger (8 mm radius: 125 a metre): red light travels furthest under skin, so the
+        // terminator's band is red, then green, then blue
+        let finger = diffuse_alone(&skin(), -0.1, 125.0);
         assert!(
-            wrapped[0] - plain[0] > wrapped[2] - plain[2],
-            "more red than blue"
+            finger[0] > 0.015 && finger[0] > 10.0 * finger[1] && finger[1] > finger[2],
+            "a finger just past the terminator: {finger:?}"
+        );
+        assert!(band(125.0, 0) > 0.15 && band(125.0, 0) > band(125.0, 2) + 0.15);
+        // the band narrows as the curvature falls: an ear's rim (2.5 mm), a finger, a nose
+        // (10 mm), a thigh (80 mm), where nothing shows past the terminator at all — the fault
+        // the wrapped diffuse had, which reddened a knee as much as a nostril
+        let bands = [400.0, 125.0, 100.0, 12.5].map(|curvature| band(curvature, 0));
+        assert!(
+            bands.windows(2).all(|pair| pair[0] > pair[1]),
+            "narrower as it flattens: {bands:?}"
+        );
+        assert_eq!(bands[3], 0.0, "a thigh has no band");
+        let thigh = diffuse_alone(&skin(), 0.0, 12.5);
+        assert!(thigh[0] < 0.006, "a thigh at the terminator: {thigh:?}");
+        // on the lit side the red it moved is missing: light is moved, not added
+        let lit = diffuse_alone(&skin(), 1.0, 400.0);
+        assert!(
+            lit[0] < 0.95 && lit[2] > 0.99,
+            "an ear's rim head on: {lit:?}"
+        );
+        // `:scatter` scales the curvature: twice the scattering on a nose is a 5 mm radius
+        let doubled = Material {
+            scatter: Some(2.0),
+            ..skin()
+        };
+        assert_eq!(
+            diffuse_alone(&doubled, -0.05, 100.0),
+            diffuse_alone(&skin(), -0.05, 200.0)
+        );
+    }
+
+    #[test]
+    fn a_mesh_knows_how_sharply_it_curves() {
+        // a sphere curves 1 over its radius everywhere; a flat sheet not at all
+        let unit = sphere(12, 24);
+        assert_eq!(unit.curvature.len(), unit.positions.len());
+        for curvature in &unit.curvature {
+            assert!((curvature - 1.0).abs() < 1e-3, "a unit sphere: {curvature}");
+        }
+        let half: Vec<[f32; 3]> = unit
+            .positions
+            .iter()
+            .map(|position| position.map(|coordinate| coordinate * 0.5))
+            .collect();
+        for curvature in vertex_curvature(&half, &unit.normals, &unit.indices) {
+            assert!(
+                (curvature - 2.0).abs() < 2e-3,
+                "half the radius: {curvature}"
+            );
+        }
+        assert_eq!(triangle().curvature, vec![0.0; 3]);
+        // a strip along x that bends more and more: flat from 0 to 1, then its normal turns
+        let tilt = [0.0f32, 0.0, 0.1, 0.4];
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        for (column, angle) in tilt.iter().enumerate() {
+            for row in 0..2 {
+                positions.push([column as f32, row as f32, 0.0]);
+                normals.push([angle.sin(), 0.0, angle.cos()]);
+            }
+        }
+        let mut indices = Vec::new();
+        for column in 0..3u32 {
+            let corner = column * 2;
+            indices.extend([
+                corner,
+                corner + 2,
+                corner + 3,
+                corner,
+                corner + 3,
+                corner + 1,
+            ]);
+        }
+        let welded = vertex_curvature(&positions, &normals, &indices);
+        assert!(
+            welded[0] < welded[2] && welded[2] < welded[4] && welded[4] < welded[6],
+            "sharper along the strip: {welded:?}"
+        );
+        // the same strip with every triangle's corners its own vertices (a seam along every
+        // edge): vertices at one position are one point of the surface, with one curvature
+        let soup_positions: Vec<[f32; 3]> = indices
+            .iter()
+            .map(|index| positions[*index as usize])
+            .collect();
+        let soup_normals: Vec<[f32; 3]> = indices
+            .iter()
+            .map(|index| normals[*index as usize])
+            .collect();
+        let soup_indices: Vec<u32> = (0..indices.len() as u32).collect();
+        let soup = vertex_curvature(&soup_positions, &soup_normals, &soup_indices);
+        for (corner, index) in indices.iter().enumerate() {
+            assert!(
+                (soup[corner] - welded[*index as usize]).abs() < 1e-6,
+                "corner {corner}: {} against {}",
+                soup[corner],
+                welded[*index as usize]
+            );
+        }
+    }
+
+    #[test]
+    fn a_painted_skin_sphere_scatters_by_its_own_curvature() {
+        // a unit sphere lit from −x, seen from −z: past the terminator (x > 0 on its face) a
+        // skin a metre in radius is as dark as a standard surface — no band — while the same
+        // sphere scattering 400 times as far (a 2.5 mm radius's skin) shows a red one, read
+        // from the curvature the mesh found for itself
+        let painted = |material: Material| {
+            let mut lit = scene(Draw {
+                material: Material {
+                    specular: 0.0,
+                    ..material
+                },
+                ..draw()
+            });
+            lit.w = 128.0;
+            lit.h = 128.0;
+            lit.view_proj = from_rows([
+                [1.0 / 1.5, 0.0, 0.0, 0.0],
+                [0.0, 1.0 / 1.5, 0.0, 0.0],
+                [0.0, 0.0, 0.25, 0.5],
+                [0.0, 0.0, 0.0, 1.0],
+            ]);
+            lit.sky = [0.0; 3];
+            lit.ground = [0.0; 3];
+            lit.lights = vec![Light::directional([1.0, 0.0, 0.0], [2.0; 3])];
+            paint(&lit, &HashMap::from([(1, Arc::new(sphere(48, 96)))]))
+        };
+        // the middle row, a quarter of the way past the terminator (world x 0.25)
+        let at = (64 * 128 + (64.0 + 0.25 / 1.5 * 64.0) as usize) * 4;
+        let pixel = |rgba: &[u8]| [rgba[at], rgba[at + 1], rgba[at + 2]];
+        let standard = pixel(&painted(Material::default()));
+        assert_eq!(standard, [0, 0, 0], "Lambert is dark past the terminator");
+        assert_eq!(pixel(&painted(skin())), standard, "and so is a 1 m skin");
+        let small = pixel(&painted(Material {
+            scatter: Some(400.0),
+            ..skin()
+        }));
+        assert!(
+            small[0] > 40 && small[0] > small[1] + 30 && small[1] >= small[2],
+            "a red band: {small:?}"
         );
     }
 
@@ -3370,6 +3896,7 @@ mod tests {
                 1.0,
                 &[],
                 strand,
+                0.0,
             )[0]
         };
         let across = shine([1.0, 0.0, 0.0]);
@@ -3422,6 +3949,7 @@ mod tests {
             1.0,
             &[],
             [0.0; 3],
+            0.0,
         );
         assert!(lit.iter().all(|channel| channel.is_finite()));
     }
@@ -3449,6 +3977,7 @@ mod tests {
             1.0,
             &[],
             [0.0; 3],
+            0.0,
         )[0]
     }
 
@@ -4091,6 +4620,7 @@ mod tests {
                 1.0,
                 &[],
                 [0.0; 3],
+                0.0,
             );
             let by_sh = shade(
                 &sh,
@@ -4102,6 +4632,7 @@ mod tests {
                 1.0,
                 &[],
                 [0.0; 3],
+                0.0,
             );
             for channel in 0..3 {
                 assert!(
@@ -4140,6 +4671,7 @@ mod tests {
             1.0,
             &[],
             [0.0; 3],
+            0.0,
         )[0]
     }
 
@@ -4289,8 +4821,8 @@ mod tests {
         light.shadow.as_mut().unwrap().resolution = 512;
         let skin = Material {
             surface: Surface::Skin,
-            wrap: 0.5,
-            scatter: [1.0, 0.3, 0.2],
+            // a 1 m sphere scattering as a 6.7 mm one does: a band to compare
+            scatter: Some(150.0),
             specular: 0.0,
             ..Material::default()
         };

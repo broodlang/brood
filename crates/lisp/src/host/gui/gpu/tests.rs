@@ -121,6 +121,36 @@ fn the_mesh_shader_validates() {
         declared, packed,
         "SceneU is {declared} bytes, scene_uniform packs {packed}"
     );
+    // ADR-794: a draw's uniform fits the slot each draw is given, and the shader reads the
+    // skin table at the size the CPU painter builds it, a texel a table entry
+    let draw_type = module
+        .types
+        .iter()
+        .find(|(_, ty)| ty.name.as_deref() == Some("DrawU"))
+        .map(|(handle, _)| handle)
+        .expect("DrawU");
+    let draw_declared = u64::from(layouter[draw_type].size);
+    assert!(
+        draw_declared <= scenes::DRAW_BYTES,
+        "DrawU is {draw_declared} bytes, a draw's slot {}",
+        scenes::DRAW_BYTES
+    );
+    use crate::host::gui::mesh::{SKIN_MAX_CURVATURE, SKIN_TABLE_HEIGHT, SKIN_TABLE_WIDTH};
+    assert!(MESH_SRC.contains(&format!(
+        "const SKIN_TABLE_LAST = vec2<f32>({}.0, {}.0);",
+        SKIN_TABLE_WIDTH - 1,
+        SKIN_TABLE_HEIGHT - 1
+    )));
+    assert_eq!(
+        SKIN_MAX_CURVATURE, 1.0,
+        "the shader clamps the curvature to 1"
+    );
+    assert_eq!(
+        scenes::skin_table_bytes().len(),
+        SKIN_TABLE_WIDTH * SKIN_TABLE_HEIGHT * 16
+    );
+    assert_eq!(scenes::VERTEX_FLOATS, 21, "a vertex carries its curvature");
+    assert!(MESH_SRC.contains("@location(6) curvature: f32"));
 }
 
 #[test]

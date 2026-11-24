@@ -992,7 +992,8 @@ code paints to a terminal or a GUI window unchanged.
   nine-coefficient `:ambient-sh` ambient (darkened in folds with `:ambient-occlusion`), the
   skeletons' joint palettes and a fixed material model (`:skin`, `:standard`, `:cutout`,
   `:blend`, `:hair`; Fresnel specular with F0 = `:specular` × 0.08, `:lobes`, `:occlusion`,
-  `:cast-shadow`), composited in op order — 2D before it is behind, after it in
+  `:cast-shadow`; a `:skin` surface scatters light under it by the mesh's curvature, `:scatter`
+  scaling how far, ADR-794), composited in op order — 2D before it is behind, after it in
   front (ADR-786). A malformed light raises from `gui/draw`. Both window painters draw it;
   the browser tab does not yet.
 - **A picture** (a page, a photo) = `(editor/display/image row col w h source opts)`: PNG / JPEG

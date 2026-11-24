@@ -632,11 +632,11 @@ fn fs_particle(in: ParticleOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// The mesh shader (ADR-786, ADR-788, ADR-793): morph, skin and transform a vertex; shade a
+/// The mesh shader (ADR-786, ADR-788, ADR-793, ADR-794): morph, skin and transform a vertex; shade a
 /// fragment with the fixed model `host::gui::mesh` writes for the CPU painter (`shade`, `tone`,
 /// `ambient`, `sh_irradiance`, `fresnel`, `specular_lobes`, `light_arrival`,
 /// `shadow_visibility`, `sample_shadow`, `soft_shadow`, `receiver_slope`, `bilinear_tap`,
-/// `stored_depth`, `pixel_noise`, `disc_tap`) — keep the two in step. Writes
+/// `stored_depth`, `pixel_noise`, `disc_tap`, `skin_diffuse`) — keep the two in step. Writes
 /// premultiplied, sRGB-encoded colour, the space the scene's picture is composited in.
 /// `vs_shadow` / `fs_shadow` render a shadow map: the same posing, seen through the shadow
 /// view the instance index names, alpha-tested for a `:cutout` or `:blend` surface.
@@ -667,7 +667,7 @@ struct SceneU {
 struct DrawU {
     model: mat4x4<f32>,
     color: vec4<f32>,
-    scatter: vec4<f32>,         // rgb, wrap
+    skin: vec4<f32>,            // a `:skin` surface: its curvature (1 / mesh units) to 1 / mm, times `:scatter`
     material: vec4<f32>,        // roughness, specular, rim, cutoff
     lobes: vec4<f32>,           // roughness times a, times b, mix of a, F0
     flags: vec4<u32>,           // surface, texture bits, palette offset, skinned
@@ -678,6 +678,9 @@ struct DrawU {
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
 @group(0) @binding(2) var shadow_maps: texture_depth_2d_array;
 @group(0) @binding(3) var shadow_sampler: sampler_comparison;
+// `mesh::skin_table` (ADR-794): the diffuse light under skin, linear rgb, the cosine to the light
+// across and the curvature down; read with `textureLoad` only (`skin_diffuse`)
+@group(0) @binding(4) var skin_table: texture_2d<f32>;
 @group(1) @binding(0) var<uniform> draw: DrawU;
 // this frame's morph offsets, blended on the CPU from the sparse targets (`mesh::add_morphs`):
 // two vec4s a vertex (position, normal), a morphed draw's from `morph_info.w`, so a vertex
@@ -696,6 +699,7 @@ struct VertexIn {
     @location(3) tangent: vec4<f32>,
     @location(4) joints: vec4<u32>,
     @location(5) weights: vec4<f32>,
+    @location(6) curvature: f32,
 };
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
@@ -703,6 +707,7 @@ struct VertexOut {
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) tangent: vec4<f32>,
+    @location(4) curvature: f32,
 };
 
 // a vertex morphed, and the matrix that skins and places it
@@ -753,6 +758,7 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
     out.normal = (posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz;
     out.uv = input.uv;
     out.tangent = vec4<f32>((posed.matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz, input.tangent.w);
+    out.curvature = input.curvature;
     if (draw.flags.x == 5u) {
         // a ribbon turned to face the camera: its tangent the strand's direction (the mesh's
         // normal), its fourth the coverage
@@ -1224,7 +1230,28 @@ fn hair_highlight(strand: vec3<f32>, normal: vec3<f32>, half_vector: vec3<f32>, 
     return pow(sqrt(max(1.0 - along * along, 0.0)), sharpness);
 }
 
-fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>) -> vec3<f32> {
+// `mesh::skin_diffuse`: the skin table read between its four nearest texels, 65 columns for
+// the cosine to the light (−1 … 1), 32 rows by the square root of the curvature per millimetre
+const SKIN_TABLE_LAST = vec2<f32>(64.0, 31.0);
+
+fn skin_diffuse(facing: f32, curvature: f32) -> vec3<f32> {
+    let across = clamp(facing * 0.5 + 0.5, 0.0, 1.0) * SKIN_TABLE_LAST.x;
+    let down = sqrt(clamp(curvature, 0.0, 1.0)) * SKIN_TABLE_LAST.y;
+    let column = min(floor(across), SKIN_TABLE_LAST.x - 1.0);
+    let row = min(floor(down), SKIN_TABLE_LAST.y - 1.0);
+    let across_share = across - column;
+    let down_share = down - row;
+    let corner = vec2<i32>(i32(column), i32(row));
+    let upper_left = textureLoad(skin_table, corner, 0).rgb;
+    let upper_right = textureLoad(skin_table, corner + vec2<i32>(1, 0), 0).rgb;
+    let lower_left = textureLoad(skin_table, corner + vec2<i32>(0, 1), 0).rgb;
+    let lower_right = textureLoad(skin_table, corner + vec2<i32>(1, 1), 0).rgb;
+    let upper = upper_left + (upper_right - upper_left) * across_share;
+    let lower = lower_left + (lower_right - lower_left) * across_share;
+    return upper + (lower - upper) * down_share;
+}
+
+fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>, curvature: f32) -> vec3<f32> {
     var out = base * ambient(normal) * occlusion;
     let f0 = draw.lobes.w;
     // a `:hair` surface's highlights: as sharp as its roughness asks
@@ -1254,11 +1281,11 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         let specular = fresnel(f0, dot(view, half_vector)) * specular_lobes(dot(normal, half_vector)) * lambert;
         var diffuse = vec3<f32>(lambert * seen);
         if (draw.flags.x == 0u) {
-            // the CPU's: the shadow fades out of the wrap light toward the terminator
-            let wrap_seen = mix(1.0, seen, smoothstep(0.0, 0.3, facing));
-            let wrap = draw.scatter.w;
-            let wrapped = clamp((facing + wrap) / (1.0 + wrap), 0.0, 1.0);
-            diffuse = diffuse + draw.scatter.rgb * (wrapped - lambert) * wrap_seen;
+            // the CPU's: the light under the skin in place of Lambert's, the shadow fading out
+            // of what the scattering moved toward the terminator
+            let scattered_seen = mix(1.0, seen, smoothstep(0.0, 0.3, facing));
+            let scattered = skin_diffuse(facing, curvature * draw.skin.x);
+            diffuse = diffuse + (scattered - vec3<f32>(lambert)) * scattered_seen;
         }
         out = out + light.color.rgb * arriving * (base * diffuse + vec3<f32>(specular * seen));
     }
@@ -1346,7 +1373,7 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     if (draw.flags.x == 5u) {
         strand = safe_normalize(fragment.tangent.xyz);
     }
-    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand), scene.params.x);
+    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand, fragment.curvature), scene.params.x);
     return MeshFragment(vec4<f32>(lit * alpha, alpha), mask);
 }
 

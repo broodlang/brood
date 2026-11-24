@@ -74,6 +74,15 @@ replaces `:sky`/`:ground`. A material's specular gets Schlick's Fresnel with F0 
 two lobes every scene's highlights change, so re-tune `:specular`. A malformed `:ambient-sh`,
 `:lobes`, `:softness`, `:size` or `:angle` is an error raised by `gui/draw`.
 
+**Changed: skin scatters light by its curvature (ADR-794).** A `:skin` surface's diffuse is
+pre-integrated subsurface scattering: a soft band at the terminator, red reaching furthest, as
+wide as the surface is sharply curved (a nostril, a finger) and absent where it is flat (a
+thigh), where it is exactly Lambert. The curvature is found from the mesh when it is uploaded;
+no texture to author. **Breaking:** a material's `:scatter` is now a number, how far light
+travels under the skin (default 1: human skin on a mesh in metres; 0: none), and a `[r g b]` is
+an error raised by `gui/draw`; `:wrap` is gone and ignored. Skin no longer turns red-brown at
+grazing angles.
+
 ## v0.59.0 — shadow like other languages, named fn, smooth textures, 3D meshes
 
 **Added: smooth textures (ADR-783).** `(gui/texture id image {:filter :smooth})` — and the same
