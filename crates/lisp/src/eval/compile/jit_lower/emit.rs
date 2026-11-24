@@ -1031,8 +1031,9 @@ enum FOperand {
         payload: cranelift_codegen::ir::Value,
         slot: Option<usize>,
     },
-    /// Cannot be a float, and `as_f64` has always deopted on it: an unboxed `Op::Int`, a
-    /// bool, a hoisted vector/table.
+    /// Cannot be a number at all: a comparison's answer (an `Op::Int` of type `I8`), a
+    /// bool, a hoisted vector/table. (An unboxed `I64` int is a `Number` that is not a
+    /// float.)
     Never,
 }
 
@@ -1073,6 +1074,18 @@ fn classify_float_operand(b: &mut FunctionBuilder, op: Op, f: Frame) -> FOperand
             payload: w1,
             slot: None,
         },
+        // An unboxed int is a number that is known not to be a float: beside a float it
+        // promotes, the VM's own mixed rule, exactly as a tagged int read from a slot does
+        // ([`number_of`]); beside another int the pair deopts with `FloatPairBothInt`, and
+        // the VM answers an int. Classed `Never` it deopted on EVERY run, so the prelude's
+        // one-argument `-` (`(%sub 0 x)`) and `/` (`(%div 1 x)`) latched any float function
+        // that negated or inverted a value off the native tier: a quaternion product written
+        // with `(- (* a b))` ran ten times slower than the same sum written `(- 0.0 (* a b))`.
+        // (An `Op::Int` of type `I8` is a comparison's answer, not a number: still `Never`.)
+        Op::Int(v) if b.func.dfg.value_type(v) == types::I64 => FOperand::Number(NumberRead {
+            value: b.ins().fcvt_from_sint(types::F64, v),
+            is_float: b.ins().iconst(types::I8, 0),
+        }),
         Op::Int(_) | Op::Bool(_) | Op::HoistedVec { .. } | Op::HoistedTable { .. } => {
             FOperand::Never
         }

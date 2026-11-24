@@ -1,0 +1,129 @@
+;;; Guards for an unboxed int beside a float on the JIT's float path (`classify_float_operand`
+;;; in `jit_lower/emit.rs`). The prelude's one-argument `-` is `(%sub 0 x)` and its
+;;; one-argument `/` is `(%div 1 x)`: the `0` and the `1` reach the float lowering as unboxed
+;;; ints. Classed as "never a float" they deopted on every run, so any float function that
+;;; negated or inverted a value latched off the native tier (`float-pair-never-float`): a
+;;; quaternion product written with `(- (* a b))` ran ten times slower than the same sum
+;;; written `(- 0.0 (* a b))`.
+;;;
+;;; An unboxed int is a number that is not a float: beside a float it promotes (the VM's
+;;; mixed rule, KI-109), and beside another int the pair deopts so the VM answers an int
+;;; (KI-114). Each arm is driven until it SETTLES NATIVE on floats before the answer is
+;;; checked, so the check runs the lowered code; under a ceiling below Native the value
+;;; checks run on whatever engine is live.
+;;;
+;;; Sabotage-verified by construction: "settles native" fails with the int classed `Never`
+;;; again (the arm latches bailed); "an int keeps an int answer" fails if the unboxed int is
+;;; promoted without the `FloatPairBothInt` guard (`-3.0` for `-3`).
+
+(defmodule jit-float-int-literal-test (:use test) (:use suite-helpers))
+
+(defn- negated (x) (- x))
+
+(defn- inverted (x) (/ x))
+
+;; The shape that found it: b3d-math's quaternion product, its sums carrying a negated term.
+(defn- quaternion-product (a b)
+  (let (ax (nth a 0)
+        ay (nth a 1)
+        az (nth a 2)
+        aw (nth a 3)
+        bx (nth b 0)
+        by (nth b 1)
+        bz (nth b 2)
+        bw (nth b 3))
+    [(+ (* aw bx) (* ax bw) (* ay bz) (- (* az by)))
+      (+ (* aw by) (- (* ax bz)) (* ay bw) (* az bx))
+      (+ (* aw bz) (* ax by) (- (* ay bx)) (* az bw))
+      (- (* aw bw) (* ax bx) (* ay by) (* az bz))]))
+
+;; The same product with every negation written as a subtraction from a float zero: the
+;; reference the native arm must agree with, bit for bit.
+(defn- reference-product (a b)
+  (let (ax (nth a 0)
+        ay (nth a 1)
+        az (nth a 2)
+        aw (nth a 3)
+        bx (nth b 0)
+        by (nth b 1)
+        bz (nth b 2)
+        bw (nth b 3))
+    [(+ (* aw bx) (* ax bw) (* ay bz) (- 0.0 (* az by)))
+      (+ (* aw by) (- 0.0 (* ax bz)) (* ay bw) (* az bx))
+      (+ (* aw bz) (* ax by) (- 0.0 (* ay bx)) (* az bw))
+      (- (* aw bw) (* ax bx) (* ay by) (* az bz))]))
+
+(def- turn-a [0.1 0.2 0.3 0.9])
+(def- turn-b [0.5 -0.1 0.7 0.2])
+
+;; A float compared with an int literal: ordering coerces the int on both engines.
+(defn- below-zero? (x) (< x 0))
+
+(defn- settle-on (f argc thunk)
+  (when (%native-tier?)
+    (assert= :native (settle f argc thunk 500))))
+
+(describe "an unboxed int beside a float on the JIT's float path"
+  (test "a negated float settles native and is the VM's answer"
+    (settle-on negated 1 (fn () (fold (range 300) nil (fn (_acc _i) (negated 1.5)))))
+    (assert= -1.5 (negated 1.5))
+    (assert= 2.25 (negated -2.25))
+    ;; 0 - 0.0, as the VM computes it: a positive zero
+    (assert= "0.0" (pr-str (negated 0.0))))
+
+  (test "a negated int keeps an int answer after the arm has settled on floats"
+    (settle-on negated 1 (fn () (fold (range 300) nil (fn (_acc _i) (negated 1.5)))))
+    (assert= -3 (negated 3))
+    (assert= "-3" (pr-str (negated 3))))
+
+  (test "a float's reciprocal settles native and is the VM's answer"
+    (settle-on inverted 1 (fn () (fold (range 300) nil (fn (_acc _i) (inverted 4.0)))))
+    (assert= 0.25 (inverted 4.0))
+    ;; an int's reciprocal is exact, never a float
+    (assert= 1/4 (inverted 4)))
+
+  (test "a quaternion product with negated terms settles native and matches the reference"
+    (settle-on quaternion-product
+      2
+      (fn () (fold (range 300) nil (fn (_acc _i) (quaternion-product turn-a turn-b)))))
+    (assert= (pr-str (reference-product turn-a turn-b)) (pr-str (quaternion-product turn-a turn-b)))
+    (assert= (pr-str (reference-product turn-b turn-a)) (pr-str (quaternion-product turn-b turn-a))))
+
+  (test "a float ordered against an int literal is the VM's answer"
+    (settle-on below-zero? 1 (fn () (fold (range 300) nil (fn (_acc _i) (below-zero? -0.5)))))
+    (assert= true (below-zero? -0.5))
+    (assert= false (below-zero? 0.5))
+    (assert= false (below-zero? 0.0))
+    (assert= true (below-zero? -3))
+    (assert= false (below-zero? 3))))
+
+;; The root of a length that is often exactly zero: `math/sqrt`'s inline answers a float
+;; zero itself (the wrapper's `0.0`, for either sign of zero) instead of deopting, so an arm
+;; that roots zeros on its hot path stays native. Sabotage-verified by construction:
+;; "stays native" fails with the inline's guard back at "greater than zero" (the arm latches
+;; bailed, `sqrt-float-not-positive`); the negative zero check fails without the `+ 0.0`.
+(defn- root-of (x) (math/sqrt x))
+
+(defn- length-of (v) (math/sqrt (+ (* (nth v 0) (nth v 0)) (* (nth v 1) (nth v 1)))))
+
+(describe "math/sqrt's inline at zero"
+  (test "an arm that roots zeros stays native and answers the wrapper's 0.0"
+    (settle-on length-of
+      1
+      (fn ()
+        (fold (range 300)
+          nil
+          (fn (_acc i) (length-of (if (= 0 (math/rem i 2)) [0.0 0.0] [3.0 4.0]))))))
+    (assert= "0.0" (pr-str (length-of [0.0 0.0])))
+    (assert= 5.0 (length-of [3.0 4.0])))
+
+  (test "either sign of zero roots to a positive zero, as the wrapper says"
+    (settle-on root-of 1 (fn () (fold (range 300) nil (fn (_acc _i) (root-of 2.25)))))
+    (assert= 1.5 (root-of 2.25))
+    (assert= "0.0" (pr-str (root-of 0.0)))
+    (assert= "0.0" (pr-str (root-of (* -1.0 0.0))))
+    (assert= "0.0" (pr-str (root-of 0))))
+
+  (test "a negative still raises the wrapper's error once the arm is native"
+    (settle-on root-of 1 (fn () (fold (range 300) nil (fn (_acc _i) (root-of 2.25)))))
+    (assert-error (root-of -1.0))))

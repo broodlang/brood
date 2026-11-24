@@ -811,8 +811,32 @@ pub(crate) fn resolve_prim1(heap: &Heap, h: Symbol) -> Option<PrimOp1> {
     // `global_epoch` change, so a rebind of the wrapper, `<`, `<=`, or `%f64-sqrt` fails the
     // check and cleanly falls back to a dispatch. It degrades to no-inline on ANY deviation from
     // the shape (a reworded wrapper just stops inlining, guarded by a test) — never a miscompile.
+    //
+    // With contracts armed (`nest run`, `nest test`: ADR-381) the name holds a contract SHIM
+    // over that wrapper, and reading the shim's shape retired the inline for every program in
+    // development: 235 ns a root where the unarmed run pays under 1 ns. The inline's own
+    // guard is what makes looking through the shim sound. It fires only for a positive
+    // `Float` or `Int` and answers a `Float`, which a declaration of `(number -> float)` can
+    // never refuse, so the check the shim would have run is one that cannot fail; every other
+    // argument still dispatches the live head, shim and all. Any OTHER declaration (a `sig!`
+    // that narrows the argument) keeps the call, since the inline would then skip a check
+    // that can fail. A changed declaration rebinds the name, so the epoch guard re-reads it.
     if symbol_is_sqrt(h) {
-        return match heap.env_get(heap.global(), h)?.unpack() {
+        let bound = heap.env_get(heap.global(), h)?;
+        let wrapper = match crate::builtins::contracts::shim_original(heap, bound) {
+            Some(original)
+                if crate::builtins::contracts::declares_arrow(
+                    heap,
+                    h,
+                    &["number", "->", "float"],
+                ) =>
+            {
+                original
+            }
+            Some(_) => return None,
+            None => bound,
+        };
+        return match wrapper.unpack() {
             ValueRef::Fn(id) if is_canonical_sqrt_wrapper(heap, id) => Some(PrimOp1::Sqrt),
             _ => None,
         };
@@ -988,9 +1012,13 @@ pub(crate) fn is_canonical_sqrt_wrapper(heap: &Heap, id: ClosureId) -> bool {
     let Some((h_inner, inner)) = call_parts(heap, outer[2]) else {
         return false;
     };
+    // The zero branch must be the literal `0.0`: the inline answers a float zero itself
+    // (`+0.0` for either sign of zero), so a function's hot path that roots an exact zero
+    // does not deopt, and that is only the wrapper's answer if the wrapper says `0.0` there.
     value::symbol_is(h_inner, "if")
         && inner.len() == 3
         && is_zero_guard(heap, inner[0], p, "<=")
+        && matches!(inner[1].unpack(), ValueRef::Float(zero) if zero.to_bits() == 0)
         && is_f64_sqrt_call(heap, inner[2], p)
 }
 

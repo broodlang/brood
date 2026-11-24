@@ -378,6 +378,24 @@ fn declared_arrow(heap: &Heap, name: Symbol) -> Option<Value> {
         .then_some(t)
 }
 
+/// Whether the arrow declared for `name` is exactly the symbols `shape` (`["number", "->",
+/// "float"]`), nothing nested. For a call-site inline that looks through a contract shim
+/// (`lower::resolve_prim1`'s `sqrt`): it may skip the shim only where the declaration is the
+/// one its own guard already satisfies, so it asks for that declaration by its spelling.
+pub(crate) fn declares_arrow(heap: &Heap, name: Symbol, shape: &[&str]) -> bool {
+    let Some(arrow) = declared_arrow(heap, name) else {
+        return false;
+    };
+    let Ok(items) = heap.list_to_vec(arrow) else {
+        return false;
+    };
+    items.len() == shape.len()
+        && items
+            .iter()
+            .zip(shape)
+            .all(|(item, want)| matches!(item, Value::Sym(s) if value::symbol_is(*s, want)))
+}
+
 /// Give a name's binding to the policy hook and bind what comes back; `true` when a shim
 /// was installed. The kernel side of moments 1 and 2 above, and the per-name step of 3.
 ///

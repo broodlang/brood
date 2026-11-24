@@ -954,8 +954,14 @@ impl Heap {
         }
     }
 
-    /// The inline `(assoc coll k v)` for a map or a record — a record stays the same record
-    /// (ADR-542) — or `None` to decline (a vector, and every error, stay in the wrapper).
+    /// The inline `(assoc coll k v)` for a map, a record (which stays the same record,
+    /// ADR-542) or a vector at an integer index it has: a fresh vector with that element
+    /// replaced, as `%vector-assoc` makes it. `None` declines (an index out of range or not
+    /// an int, any other collection: the wrapper owns those and their errors).
+    ///
+    /// The vector arm is what keeps a function that sets one element of a pose or a list of
+    /// points on the native tier: declined, every such call deopted, and the arm latched
+    /// off after a few (`map-assoc-declined`).
     pub fn map_assoc_inline(&mut self, coll: Value, k: Value, v: Value) -> Option<Value> {
         match coll {
             Value::Map(mid) => Some(self.map_assoc(mid, k, v)),
@@ -963,6 +969,18 @@ impl Heap {
                 Value::Map(fields) => Some(Value::record(id, fields)),
                 other => Some(other),
             },
+            Value::Vector(vid) => {
+                let Value::Int(index) = k else {
+                    return None;
+                };
+                let items = self.vector(vid);
+                if index < 0 || index as usize >= items.len() {
+                    return None;
+                }
+                let mut items = items.to_vec();
+                items[index as usize] = v;
+                Some(self.alloc_vector(items))
+            }
             _ => None,
         }
     }

@@ -1,0 +1,71 @@
+;;; Guards for `(assoc v i x)` on a VECTOR in compiled code (`Heap::map_assoc_inline`, shared
+;;; by the VM's `Prim3` arm and the JIT's callback). The inline answered only a map or a
+;;; record and declined a vector, so every call deopted to the wrapper, and after a few the
+;;; arm was latched off the native tier (`map-assoc-declined`): a function that sets one
+;;; element of a pose or a list of points, the commonest write there is in a simulation, ran
+;;; in the VM for good.
+;;;
+;;; The inline now answers a vector at an integer index it has, with a fresh vector as
+;;; `%vector-assoc` makes it; an index out of range, or not an int, still reaches the wrapper
+;;; and its error. Each arm is driven until it SETTLES NATIVE before its answers are checked;
+;;; under a ceiling below Native the value checks run on whatever engine is live.
+;;;
+;;; Sabotage-verified by construction: "settles native" fails with the vector arm removed
+;;; (the arm latches bailed); "the vector given is unchanged" fails if the element were
+;;; written in place.
+
+(defmodule jit-vector-assoc-test (:use test) (:use suite-helpers))
+
+;; Set twice over: a function whose whole body is one `(assoc v i x)` on its own parameters is
+;; a pass-through the caller redirects past (thin-wrapper elision), so it never has an arm of
+;; its own to settle.
+(defn- with-element (v i x) (assoc (assoc v i x) i x))
+
+;; The shape that found it: one joint's entry replaced in a pose (b3d-skeleton's `with-local`).
+(defn- with-local (pose index key value) (assoc pose index (assoc (nth pose index) key value)))
+
+(def- pose [{:turn 0.0 :at 1.0} {:turn 0.5 :at 2.0} {:turn 1.0 :at 3.0}])
+
+(defn- settle-on (f argc thunk)
+  (when (%native-tier?)
+    (assert= :native (settle f argc thunk 500))))
+
+(describe "assoc on a vector in compiled code"
+  (test "replacing an element settles native and is the wrapper's answer"
+    (settle-on with-element
+      3
+      (fn () (fold (range 300) nil (fn (_acc i) (with-element [1 2 3] (math/rem i 3) 9)))))
+    (assert= [9 2 3] (with-element [1 2 3] 0 9))
+    (assert= [1 2 9] (with-element [1 2 3] 2 9))
+    (assert= [1 :x 3] (with-element [1 2 3] 1 :x)))
+
+  (test "the vector given is unchanged"
+    (settle-on with-element
+      3
+      (fn () (fold (range 300) nil (fn (_acc i) (with-element [1 2 3] (math/rem i 3) 9)))))
+    (let (before [1.0 2.0 3.0]
+          after (with-element before 1 7.0))
+      (assert= [1.0 2.0 3.0] before)
+      (assert= [1.0 7.0 3.0] after)))
+
+  (test "an index out of range still raises the wrapper's error once the arm is native"
+    (settle-on with-element
+      3
+      (fn () (fold (range 300) nil (fn (_acc i) (with-element [1 2 3] (math/rem i 3) 9)))))
+    (assert-error (with-element [1 2 3] 3 9))
+    (assert-error (with-element [1 2 3] -1 9))
+    (assert-error (with-element [] 0 9)))
+
+  (test "a map through the same arm is still a map's assoc"
+    (settle-on with-element
+      3
+      (fn () (fold (range 300) nil (fn (_acc i) (with-element [1 2 3] (math/rem i 3) 9)))))
+    (assert= {:a 1 :b 2} (with-element {:a 1} :b 2)))
+
+  (test "one joint of a pose replaced settles native and leaves the others as they were"
+    (settle-on with-local
+      4
+      (fn () (fold (range 300) nil (fn (_acc i) (with-local pose (math/rem i 3) :turn 2.0)))))
+    (assert= [{:turn 0.0 :at 1.0} {:turn 2.0 :at 2.0} {:turn 1.0 :at 3.0}]
+      (with-local pose 1 :turn 2.0))
+    (assert= 0.5 (get (nth pose 1) :turn))))

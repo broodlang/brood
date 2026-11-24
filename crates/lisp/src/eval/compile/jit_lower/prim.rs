@@ -294,20 +294,26 @@ pub(super) fn emit_prim1(
             stack.push(Op::Int(r));
         }
         PrimOp1::Sqrt => {
-            // Prelude `sqrt`, x > 0 only: one IEEE `fsqrt` (correctly rounded —
-            // identical to the wrapper's `f64::sqrt`). Zero, negatives (the wrapper's
-            // error), NaN, and non-float shapes deopt so the VM dispatches the real
-            // wrapper.
+            // `math/sqrt` of a float that is not negative: one IEEE `fsqrt` (correctly
+            // rounded, identical to the wrapper's `f64::sqrt`), a zero of either sign
+            // answering the wrapper's `0.0`. A function that roots an exact zero on its
+            // hot path (a length that is often nothing) deopted every time while zero was
+            // left to the wrapper, and latched off the native tier. Negatives (the
+            // wrapper's error), NaN, an int that is not positive and non-number shapes
+            // deopt so the VM dispatches the real wrapper.
             match operand {
                 Op::Float(v) => {
                     let zero = b.ins().f64const(0.0);
-                    let pos = b.ins().fcmp(FloatCC::GreaterThan, v, zero);
+                    let pos = b.ins().fcmp(FloatCC::GreaterThanOrEqual, v, zero);
                     let cont = b.create_block();
                     let deopt_reason = deopt_code(b, DeoptReason::SqrtFloatNotPositive);
                     b.ins()
                         .brif(pos, cont, &[], deopt, &[BlockArg::Value(deopt_reason)]);
                     b.switch_to_block(cont);
-                    stack.push(Op::Float(b.ins().sqrt(v)));
+                    // `+ 0.0` makes a negative zero's root the wrapper's `0.0`; it changes
+                    // no other answer
+                    let root = b.ins().sqrt(v);
+                    stack.push(Op::Float(b.ins().fadd(root, zero)));
                 }
                 Op::Int(v) if b.func.dfg.value_type(v) == types::I64 => {
                     let pos = b.ins().icmp_imm_s(IntCC::SignedGreaterThan, v, 0);
@@ -333,13 +339,14 @@ pub(super) fn emit_prim1(
                     b.switch_to_block(fblk);
                     let fv = b.ins().bitcast(types::F64, MemFlagsData::new(), w1);
                     let zero = b.ins().f64const(0.0);
-                    let posf = b.ins().fcmp(FloatCC::GreaterThan, fv, zero);
+                    let posf = b.ins().fcmp(FloatCC::GreaterThanOrEqual, fv, zero);
                     let fok = b.create_block();
                     let deopt_reason = deopt_code(b, DeoptReason::SqrtBoxedFloatNotPositive);
                     b.ins()
                         .brif(posf, fok, &[], deopt, &[BlockArg::Value(deopt_reason)]);
                     b.switch_to_block(fok);
-                    let fr = b.ins().sqrt(fv);
+                    let root = b.ins().sqrt(fv);
+                    let fr = b.ins().fadd(root, zero);
                     b.ins().jump(done, &[BlockArg::Value(fr)]);
                     b.switch_to_block(not_f);
                     let is_i = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_INT as i64);

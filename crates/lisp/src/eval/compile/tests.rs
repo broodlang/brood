@@ -1929,6 +1929,48 @@ fn sqrt_call_site_inline_recognizes_the_moved_math_wrapper() {
     );
 }
 
+/// The `sqrt` call-site inline survives a contract SHIM over the canonical wrapper. With
+/// contracts armed (`nest run`, `nest test`: ADR-381) `math/sqrt` holds a shim, and reading
+/// the shim's shape retired the inline for every program in development: 235 ns a root
+/// against under 1 ns unarmed. `resolve_prim1` looks through the shim exactly when the
+/// declaration is `(number -> float)`, which the inline's own guard (a positive `Float` or
+/// `Int` in, a `Float` out) can never violate.
+///
+/// A shim is forced here with `sig!` (arming is a process-wide switch a unit test cannot
+/// flip): first with `math/sqrt`'s own declaration, which must still inline, then with a
+/// narrower one, which must not: there the inline would skip a check that can fail
+/// (`(math/sqrt 2.0)` is refused by `(int -> float)`).
+#[test]
+fn sqrt_call_site_inline_looks_through_a_contract_shim_it_cannot_violate() {
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(require-one 'math)")
+        .expect("load std/math");
+    interp
+        .eval_str("(sig! math/sqrt (number -> float))")
+        .expect("force math/sqrt's own declaration");
+    let bound = interp.eval_str("math/sqrt").expect("read math/sqrt back");
+    assert!(
+        crate::builtins::contracts::shim_original(&interp.heap, bound).is_some(),
+        "`sig!` must have bound a contract shim, or this test proves nothing"
+    );
+    assert_eq!(
+        resolve_prim1(&interp.heap, value::intern("math/sqrt")),
+        Some(PrimOp1::Sqrt),
+        "a shim declaring (number -> float) over the canonical wrapper must still inline: \
+         armed runs (`nest run`, `nest test`) otherwise pay a full contracted call a root"
+    );
+    interp
+        .eval_str("(sig! math/sqrt (int -> float))")
+        .expect("narrow the declaration");
+    assert_eq!(
+        resolve_prim1(&interp.heap, value::intern("math/sqrt")),
+        None,
+        "a declaration the inline's guard does not already satisfy must keep the call, \
+         so the shim's check still runs"
+    );
+}
+
 /// KI-48: the caller sizes the frame, then `jit_tier` re-loads the code
 /// pointer — and a peer can swap the inlined body in between (`CompiledArm` is shared across
 /// a runtime's processes since ADR-215). Running the inlined native against the small frame

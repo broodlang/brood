@@ -549,14 +549,16 @@ pub(crate) fn exec_chunk(
                             heap.push_root(Value::boolean(false));
                             continue;
                         }
-                        // `sqrt`, x > 0 only: `f64::sqrt` is IEEE correctly-rounded —
-                        // identical to the wrapper's `%f64-sqrt`. Zero/negative/NaN/
-                        // BigInt fall through to dispatch the real wrapper (its error
-                        // and 0.0 cases, bit-identical).
-                        (PrimOp1::Sqrt, ValueRef::Float(f)) if f > 0.0 => {
+                        // `sqrt` of a float that is not negative: `f64::sqrt` is IEEE
+                        // correctly-rounded, identical to the wrapper's `%f64-sqrt`, and a
+                        // zero of either sign answers the wrapper's `0.0` (`+ 0.0` turns a
+                        // negative zero's root positive and changes nothing else). A
+                        // negative, a NaN, an int that is not positive and a BigInt fall
+                        // through to dispatch the real wrapper.
+                        (PrimOp1::Sqrt, ValueRef::Float(f)) if f >= 0.0 => {
                             crate::perf_bump!(prim1_inline);
                             heap.truncate_roots(n - 1);
-                            heap.push_root(Value::Float(f.sqrt()));
+                            heap.push_root(Value::Float(f.sqrt() + 0.0));
                             continue;
                         }
                         (PrimOp1::Sqrt, ValueRef::Int(i)) if i > 0 => {

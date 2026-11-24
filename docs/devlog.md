@@ -2821,6 +2821,37 @@ band on a thigh), the curvature of a sphere (1/r exactly) and of a seamed strip,
 face on the GPU before and after. Run here: build, fmt, clippy, check-desktop; the tests are
 written and compile but were NOT run (desktop rule) — CI's.
 
+2026-11-24. **Three places a float function fell off the native tier for no reason of its own.**
+Found from womanblend's frame (b3d-math), each with `dev/jit-state` and a 200 000-call loop.
+(1) **`math/sqrt` under contracts.** `nest run`/`nest test` arm contracts (ADR-381), which binds
+`math/sqrt` to a checking shim; `resolve_prim1` recognised the plain wrapper by its shape, so
+every program in development paid a contracted call a root, 235 ns against 0.85 ns unarmed. It
+now looks through a shim whose declaration is exactly `(number -> float)`
+(`contracts::declares_arrow`), which the inline's own guard (a float or int that is not
+negative in, a float out) cannot violate; any other declaration keeps the call, since the
+inline would then skip a check that can fail. (2) **An unboxed int beside a float**
+(`classify_float_operand`). The prelude's one-argument `-` is `(%sub 0 x)` and `/` is
+`(%div 1 x)`; the literal reached the float path as an unboxed int, was classed `Never`, and
+the arm deopted on every call until it latched (`float-pair-never-float`): a quaternion
+product with `(- (* a b))` terms ran in 1.2 µs, 0.12 µs written `(- 0.0 (* a b))`. An `I64`
+int is now a number known not to be a float: beside a float it promotes (KI-109's rule),
+beside another int the pair still deopts with `FloatPairBothInt` (KI-114). An `I8` `Op::Int`
+is a comparison's answer and stays `Never`. Six of womanblend's functions were latched by
+this; none is now. (3) **The root of exactly zero.** With (1) the inline was reached by
+functions that often root a zero length, where it deopted (`sqrt-float-not-positive`) and
+latched two of them. The inline (VM and JIT) now answers a float zero of either sign with
+the wrapper's `0.0` (`fsqrt` then `+ 0.0`, which changes no other answer), and
+`is_canonical_sqrt_wrapper` requires the wrapper's zero branch to be the literal `0.0`.
+Negatives, NaN and ints that are not positive still dispatch the wrapper. Tests:
+`tests/jit_float_int_literal_test.blsp` (new; each arm settled native before its answers are
+compared with the VM's) and `sqrt_call_site_inline_looks_through_a_contract_shim_it_cannot_violate`
+in `eval/compile/tests.rs`. Run here: release build, fmt, the new `.blsp` file and
+`jit_float_run_cache_test.blsp` (both green); the Rust test compiles but was NOT run, nor any
+suite, A/B or fuzz-differential pass (desktop rule): CI's and the test machine's. Not done,
+measured in womanblend's `docs/research/frame-time.md`: a message to a parked process is queued
+on the sender's worker and no idle worker is woken to steal it (`wake_enqueue`), so a fan-out
+to long-lived workers runs serially where a fan-out of spawns does not.
+
 2026-11-24. **A detail tile for materials: a tiled micro-normal whose cavity damps the specular
 (ADR-797).** womanblend's figure bakes one normal map for her whole body at half a millimetre a
 texel, too coarse for pores, so close up her skin read smooth as plastic. A material's `:detail`
@@ -2851,3 +2882,27 @@ it is a number (shots were taken with a temporary acceptance of it, removed agai
 that refusal the process segfaults on the `brood-gui` thread at exit instead of just raising.
 Run here: build, fmt, clippy, check-desktop's static gates; the tests are written and compile
 but were NOT run (desktop rule) — CI's.
+
+2026-11-25. **`assoc` on a vector inlines, and `math/tanh`.** Continuing the entry above.
+(4) **`(assoc v i x)` on a vector** (`Heap::map_assoc_inline`, shared by the VM's `Prim3` arm
+and `brood_rt_map_assoc`). The inline answered a map or a record and declined a vector, so
+each call deopted to the wrapper and the arm latched off the native tier
+(`map-assoc-declined`): any function that replaces one element of a vector, the commonest
+write a simulation makes. The new binary showed it at once in four of b3d-skeleton's
+functions (`turn`, `with-local`, `update-local`, `with-world-rotation`). A vector at an
+integer index it has now answers a fresh vector, as `%vector-assoc` makes it; an index out of
+range or not an int still reaches the wrapper and its error. Test:
+`tests/jit_vector_assoc_test.blsp`. (5) **`math/tanh`**, written in Brood on `%exp` (no new
+primitive): a series below 0.02, where the quotient of exponentials loses digits; the
+quotient to 20; 1 past it. Within an ulp or two of the true value at the points checked
+(`tests/math_test.blsp`). Asked for by womanblend, whose flesh layer levels a share off at a
+ceiling with it. Run here: release build from a clean clone of main with this diff alone,
+fmt, the two new `.blsp` files, `jit_float_run_cache_test.blsp`, `math_test.blsp`; womanblend's
+scripted run (seven stretches, every layer's state checksummed) is bit-identical under the
+old and the new binary. NOT run: the Rust suite, any other `.blsp` suite, A/B, fuzz.
+
+2026-11-25 (ADR-793 follow-up). **`:strands` ribbons narrow where the strand runs at the eye.**
+womanblend's hair is now wisps (ribbons 6 mm wide, textured with fine hairs); end-on they broke
+into shingles. `strand_vertex` (CPU and shader) scales the width by the sine of the angle to the
+line of sight, floor `STRAND_END_ON` 0.3. Run here: build, fmt, check-desktop's static gates; the
+new test compiles but was NOT run (desktop rule): CI's.
