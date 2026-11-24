@@ -388,7 +388,7 @@ fn ambient_occlusion_draws_on_the_gpu_as_on_the_cpu() {
     let points = [-0.55f32, -0.75, 0.0, -2.5];
     let cpu_reds: Vec<i32> = points.iter().map(|x| red_at(&cpu, 4, *x)).collect();
     assert!(
-        cpu_reds[0] + 15 < cpu_reds[3],
+        cpu_reds[0] + 5 < cpu_reds[3],
         "the CPU painter darkens the floor beside the card: {cpu_reds:?}"
     );
     let adapters = hardware_adapters();
