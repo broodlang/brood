@@ -1094,22 +1094,35 @@ fn number_of(
     f: Frame,
     reason: DeoptReason,
 ) -> NumberRead {
+    // A branch, not a select: float code reads floats, so `is_float` predicts almost
+    // perfectly, and the float path is one bitcast. Computing both the bitcast and the int's
+    // `fcvt_from_sint` and selecting put the conversion's latency and a data dependency on
+    // every read — a point transform ran 18% slower that way than on the branch it replaced.
     let is_float = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_FLOAT as i64);
+    let as_float = b.create_block();
+    let not_float = b.create_block();
+    let as_int = b.create_block();
+    let merge = b.create_block();
+    b.append_block_param(merge, types::F64);
+    b.ins().brif(is_float, as_float, &[], not_float, &[]);
+    b.switch_to_block(as_float);
+    let bits = b.ins().bitcast(types::F64, MemFlagsData::new(), payload);
+    b.ins().jump(merge, &[BlockArg::Value(bits)]);
+    b.switch_to_block(not_float);
     let is_int = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_INT as i64);
-    let is_number = b.ins().bor(is_float, is_int);
-    let number = b.create_block();
     let deopt_reason = deopt_code(b, reason);
     b.ins().brif(
-        is_number,
-        number,
+        is_int,
+        as_int,
         &[],
         f.deopt,
         &[BlockArg::Value(deopt_reason)],
     );
-    b.switch_to_block(number);
-    let bits = b.ins().bitcast(types::F64, MemFlagsData::new(), payload);
+    b.switch_to_block(as_int);
     let promoted = b.ins().fcvt_from_sint(types::F64, payload);
-    let value = b.ins().select(is_float, bits, promoted);
+    b.ins().jump(merge, &[BlockArg::Value(promoted)]);
+    b.switch_to_block(merge);
+    let value = b.block_params(merge)[0];
     NumberRead { value, is_float }
 }
 
