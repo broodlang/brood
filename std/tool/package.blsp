@@ -379,7 +379,6 @@ transitively-closed lock file and puts each dep's source on *load-path*."
     (apply vector
       (list (get e :name)
         :path (get e :path)
-        :sha256 (get e :sha256)
         :deps (package-dep-names-vec (get e :deps)))))
   (dep-entry-node (d)
     [:vector
@@ -511,9 +510,10 @@ transitively-closed lock file and puts each dep's source on *load-path*."
   (let (abs (path/join root (get dep :path)))
     (when (not (file/dir? abs))
       (error "package: :path dependency " (get dep :name) " not found at " abs))
+    ;; No content hash: a path dep loads live from a tree outside this project, so a hash
+    ;; pins nothing and only rewrote the lock whenever that tree changed.
     (assoc dep
       :resolved-path abs
-      :sha256 (tree-hash abs)
       :deps (package-manifest-deps (path/join abs "project.blsp")))))
 
 ;; --- git deps (ADR-037 Slice 2) ---------------------------------------------
@@ -1447,7 +1447,8 @@ a bad or changed signature is reported, not refused.
 
 ;; --- the lock file -----------------------------------------------------------
 ;; project.lock.blsp is generated, committed, and plain Brood data so a PR diff is
-;; reviewable. Each entry is a vector `[name :path PATH :sha256 HASH :deps [names…]]`;
+;; reviewable. Each entry is a vector — `[name :path PATH :deps [names…]]` for a path dep,
+;; the fetched kinds adding their `:commit`/`:registry` and `:sha256` pins;
 ;; :deps records the dep's own direct deps (by name) for traceability / `nest tree`.
 
 (defn- package-dep-names-vec (deps) (apply vector (map deps :name)))

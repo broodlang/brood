@@ -2654,6 +2654,23 @@ the light colour's spare fourth. Guards: `a_soft_shadow_grades_its_edge_and_keep
 (CPU) and `a_soft_shadow_draws_on_the_gpu_as_on_the_cpu` (both adapters here, within 11 of 255).
 Run here: fmt, clippy, the 268 `gui` unit tests; suites are CI's.
 
+2026-11-24. **Matrix math stays on the fast path: the straight-line vector hoist (ADR-790).**
+A 3D kernel benchmark (mat4 multiply, point transform, projection, a 1 000-point frame) found
+`mat4-mul` making 100 runtime calls a product: the JIT's vector-base hoist served only loops
+that allocate nothing, and a matrix multiply is straight-line code ending in `MakeVector`. An
+arm whose control only moves forward now hoists a parameter vector read four or more times
+before its first allocation. `mat4-mul` ~385 → 256 ns, transform 171 → 109 ns, the frame
+~345 → ~280 µs; `make ab` noise on every row (a control build shows the +1–4% leaners are
+layout). Also measured on the way: the published `ring` +6.3% between 0.57 and 0.59 is +0.9%
+against a 2.6% floor under `make ab` — session drift, not a regression.
+
+2026-11-24. **A `:path` dependency is locked without a hash.** `project.lock.blsp` recorded a
+tree hash of every path dependency, which nothing read; a path dep loads live from outside the
+project, so the hash pinned nothing and rewrote the committed lock whenever that tree changed
+(bedit-agent's lock, after every bedit commit). Path entries are now `[name :path P :deps […]]`,
+and `nest` no longer hashes the tree on every resolve. Guard: `package_test` "editing a path
+dep's source leaves the lock as it was" (red with the hash back, as are two shape assertions).
+
 2026-11-24 (ADR-788 follow-up). **Ambient occlusion: `:ambient-occlusion {:radius m :strength s}`.**
 The ambient light lit every point alike, so folds forming as a figure moves read flat (womanblend:
 the corners of her mouth and the seam between her lips in a smile, the creases beside her nose).

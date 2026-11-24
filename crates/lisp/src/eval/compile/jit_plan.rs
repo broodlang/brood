@@ -856,6 +856,99 @@ pub(super) mod codegen {
         })
     }
 
+    /// How many reads of one parameter vector pay for resolving its base at entry. The
+    /// resolution is a call (`brood_rt_vector_base`); the inline read it replaces is not, for a
+    /// small LOCAL vector — so a pair read (`bintree`'s `(nth node 0)`/`(nth node 1)`) is
+    /// cheaper left inline. A vec4 is read four times, a mat4 sixteen.
+    pub const STRAIGHT_LINE_HOIST_MIN_READS: usize = 4;
+
+    /// The parameter slots whose vector base a **straight-line** arm may hoist into its entry
+    /// block, although the arm allocates — the 3D-math lever. `mat4-mul`, a point transform and
+    /// a projection each read a parameter vector element by element and then build their
+    /// result (`MakeVector`), so [`vector_base_hoist_safe`]'s whole-arm gate refused them and
+    /// every `(nth m 5)` re-decoded the handle (and called out for a shared vector).
+    ///
+    /// Sound because nothing can move the storage before the last read: control only moves
+    /// forward (no `Jump`/`JumpIfFalse` backward, no `SelfCall`, no `try` or `binding` frame,
+    /// whose handlers and unwinds are not forward edges), so every instruction executed after
+    /// the first allocation or call has a higher index than it, and every read of a hoisted
+    /// slot comes before that index. A slot qualifies when it is a required parameter (only a
+    /// parameter has its value at entry), no `SetLocal` writes it, its first read comes before
+    /// any branch (the read is certain, so a non-vector there would have failed `nth` anyway —
+    /// the entry deopt is not spurious), and it is read at least
+    /// [`STRAIGHT_LINE_HOIST_MIN_READS`] times.
+    pub fn straight_line_vector_hoist_slots(code: &[Inst], nrequired: usize) -> Vec<usize> {
+        let forward_only = code.iter().enumerate().all(|(ip, inst)| match inst {
+            Inst::Jump(target) | Inst::JumpIfFalse(target) => *target > ip,
+            Inst::SelfCall { .. } | Inst::TryEnter { .. } | Inst::BindEnter { .. } => false,
+            _ => true,
+        });
+        if !forward_only {
+            return Vec::new();
+        }
+        let vector_read_slot = |inst: &Inst| match inst {
+            Inst::Prim2SlotSlot {
+                op: PrimOp::VectorRef,
+                slot_a,
+                ..
+            }
+            | Inst::Prim2SlotInt {
+                op: PrimOp::VectorRef,
+                slot_a,
+                ..
+            } => Some(*slot_a),
+            _ => None,
+        };
+        let is_vector_read = |inst: &Inst| {
+            matches!(
+                inst,
+                Inst::Prim2 {
+                    op: PrimOp::VectorRef,
+                    ..
+                } | Inst::Prim2SlotSlot {
+                    op: PrimOp::VectorRef,
+                    ..
+                } | Inst::Prim2SlotInt {
+                    op: PrimOp::VectorRef,
+                    ..
+                }
+            )
+        };
+        let first_unsafe = code
+            .iter()
+            .position(|inst| {
+                !is_vector_read(inst)
+                    && (matches!(inst, Inst::Call { .. }) || inst_may_allocate(inst))
+            })
+            .unwrap_or(code.len());
+        let first_branch = code
+            .iter()
+            .position(|inst| matches!(inst, Inst::Jump(_) | Inst::JumpIfFalse(_)))
+            .unwrap_or(code.len());
+        let mut slots: Vec<usize> = Vec::new();
+        for slot in 0..nrequired {
+            if code
+                .iter()
+                .any(|inst| matches!(inst, Inst::SetLocal(written) if *written == slot))
+            {
+                continue;
+            }
+            let reads: Vec<usize> = code
+                .iter()
+                .enumerate()
+                .filter(|(_, inst)| vector_read_slot(inst) == Some(slot))
+                .map(|(ip, _)| ip)
+                .collect();
+            if reads.len() >= STRAIGHT_LINE_HOIST_MIN_READS
+                && reads[0] < first_branch
+                && reads.iter().all(|&ip| ip < first_unsafe)
+            {
+                slots.push(slot);
+            }
+        }
+        slots
+    }
+
     /// Does `i` allocate on its **fast path** — the gate for emitting a back-edge GC safepoint?
     ///
     /// Narrower than [`inst_may_allocate`] by exactly the table ops: including them costs `sieve`
