@@ -476,7 +476,7 @@ pub(super) fn emit_call(
             // stack slot and passed by pointer; every callback that consults activation
             // state asserts it from there (`JitCallCtx::assert_into`), so no save/restore of
             // env, dbg name, depth, force-VM flag, IC cursors or gateway token runs around
-            // the call. What remains per call: the seven
+            // the call. What remains per call: the
             // stores that fill the ctx, and the gateway counter bump (the token must be
             // unique among live activations — frame bases repeat across time and Rust
             // gateways use the same counter, so the counter stays; only its
@@ -547,6 +547,11 @@ pub(super) fn emit_call(
                 b.ins().stack_store(pt, mine, ctx_slot, unw_o);
                 let z8 = b.ins().iconst(types::I8, 0);
                 b.ins().stack_store(pt, z8, ctx_slot, pin_o);
+                // ADR-789: this activation's own context is the callee's parent, so the
+                // sampling profiler can name the native callers of a sample taken in it.
+                // One store; nothing reads it unless a sample is taken.
+                let parent_o = std::mem::offset_of!(JitCallCtx, parent) as i32;
+                b.ins().stack_store(pt, funcs.ctx, ctx_slot, parent_o);
             }
             let ctx_addr = b.ins().stack_addr(funcs.ptr_ty, ctx_slot, 0);
             // The call itself — straight into the callee's native code.
