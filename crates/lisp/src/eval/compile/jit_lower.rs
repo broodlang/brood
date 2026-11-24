@@ -435,6 +435,12 @@ fn jit_lower_arm_inner(
     // SSA value instead of reloading and re-tag-checking the slot.
     let slot_i64_cache: std::cell::RefCell<Vec<Option<cranelift_codegen::ir::Value>>> =
         std::cell::RefCell::new(vec![None; nslots]);
+    // A slot read as a number, and a vector slot's decoded element storage, each kept for
+    // the rest of a straight-line run (`Frame::slot_num_cache`, `Frame::slot_vec_cache`).
+    let slot_num_cache: std::cell::RefCell<Vec<Option<emit::NumberRead>>> =
+        std::cell::RefCell::new(vec![None; nslots]);
+    let slot_vec_cache: std::cell::RefCell<Vec<Option<emit::VectorStorage>>> =
+        std::cell::RefCell::new(vec![None; nslots]);
     // Handle-spill scratch: `[spill_base, spill_base + reserve)` are the frame slots
     // reserved (above the compiler's slot ceiling) for spilling call-result handles
     // that must survive a later call's safepoint. `reserve` matches what arm
@@ -509,6 +515,9 @@ fn jit_lower_arm_inner(
         record_mid_emit_detail("prepass-unmodelled-inst", name);
         return None;
     }
+    // Which fused `(nth slot k)` reads open a run that reads the same vector again, and so
+    // decode its storage once for the run (`Frame::slot_vec_cache`).
+    let vector_read_reused = prepass::vector_reads_reused(code, &is_leader);
 
     let m = jit.module();
     let ptr_ty = m.target_config().pointer_type();
@@ -615,6 +624,8 @@ fn jit_lower_arm_inner(
         blockarg_spill_len,
         slot_f64_cache: &slot_f64_cache,
         slot_i64_cache: &slot_i64_cache,
+        slot_num_cache: &slot_num_cache,
+        slot_vec_cache: &slot_vec_cache,
     };
     // A scratch `Value`-sized stack slot the handle / call / global ops write their result
     // into (the out-pointer ABI). One per arm, reused: each result is read straight back
@@ -778,6 +789,7 @@ fn jit_lower_arm_inner(
         vnbase: callbacks.vector_nursery_base,
         vobase: callbacks.vector_old_base,
         vref: callbacks.vector_ref,
+        vbase: callbacks.vector_base,
         car: callbacks.car,
         first: callbacks.first,
         rest: callbacks.rest,
@@ -862,9 +874,16 @@ fn jit_lower_arm_inner(
         for cache in [frame.slot_i64_cache, frame.slot_f64_cache] {
             cache.borrow_mut().fill(None);
         }
+        frame.slot_num_cache.borrow_mut().fill(None);
+        frame.slot_vec_cache.borrow_mut().fill(None);
         let mut stack = control::leader_entry_stack(&mut b, blk, reprs.as_deref());
         let mut j = ip;
         loop {
+            // A decoded vector storage pointer survives only instructions that provably
+            // neither allocate nor call: anything else may move a small vector's slab slot.
+            if !prepass::keeps_vector_storage(&code[j]) {
+                frame.slot_vec_cache.borrow_mut().fill(None);
+            }
             match &code[j] {
                 Inst::Const(constant) => load::emit_const(
                     &mut b,
@@ -1040,6 +1059,7 @@ fn jit_lower_arm_inner(
                         *slot_a,
                         *int_b,
                         &hoisted.slots,
+                        vector_read_reused[j],
                         frame,
                         funcs,
                     )?;
