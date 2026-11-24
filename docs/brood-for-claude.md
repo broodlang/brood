@@ -970,9 +970,12 @@ code paints to a terminal or a GUI window unchanged.
   attribute bytes) drawn into a pixel rect with a camera matrix, up to 8 lights — directional
   `{:direction}`, point `{:position :range}` (`:color` is the light 1 m away, inverse-square
   falloff), spot `{:position :direction :range :cone [inner outer]}` — and `:shadow true` (or
-  `{:resolution :bias :normal-bias …}`) on up to 4 of them for PCF shadow maps (ADR-788), the
+  `{:resolution :bias :normal-bias :softness …}`) on up to 4 of them for PCF shadow maps
+  (ADR-788) — soft, contact-hardening ones for a light with a `:size` (`:angle` when
+  directional) (ADR-791) — a `:sky`/`:ground` or nine-coefficient `:ambient-sh` ambient, the
   skeletons' joint palettes and a fixed material model (`:skin`, `:standard`, `:cutout`,
-  `:blend`, `:cast-shadow`), composited in op order — 2D before it is behind, after it in
+  `:blend`; Fresnel specular with F0 = `:specular` × 0.08, `:lobes`, `:occlusion`,
+  `:cast-shadow`), composited in op order — 2D before it is behind, after it in
   front (ADR-786). A malformed light raises from `gui/draw`. Both window painters draw it;
   the browser tab does not yet.
 - **A picture** (a page, a photo) = `(editor/display/image row col w h source opts)`: PNG / JPEG

@@ -772,33 +772,59 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; ones after in front, so a game lays a backdrop, a 3D figure and a HUD in one frame with no
 ;; mode to switch. The spec carries a camera (`:camera`, 16 numbers: a column-major
 ;; view-projection with clip depth 0 … 1, and `:eye`), up to eight `:lights` over a
-;; `:sky`/`:ground` ambient, an
+;; `:sky`/`:ground` ambient (or `:ambient-sh`, below), an
 ;; `:exposure`, a `:background` ([r g b a], transparent by default), the skeletons' joint
 ;; `:palettes` (16 numbers a joint, or f32 bytes), and the `:draws` — each `{:mesh handle
 ;; :model [16] :palette i :morphs [[target weight] …] :material {…}}`. A material is the fixed
-;; shading model's parameters: `:surface` (:skin, :standard, :cutout or :blend), `:base` and
-;; `:normal` (texture handles), `:color`, `:roughness`, `:specular`, `:wrap` and `:scatter`
-;; (light under the skin), `:rim`, `:cutoff`, `:double-sided`, `:cast-shadow` (true by
-;; default). A glTF loader, a skeleton's maths, a camera — policy above this, in the engine.
-;; Both window painters draw a scene: the GPU target with a depth buffer and 4×
-;; multisampling, the CPU painter in software.
+;; shading model's parameters: `:surface` (:skin, :standard, :cutout or :blend), `:base`,
+;; `:normal` and `:occlusion` (texture handles), `:color`, `:roughness`, `:specular`,
+;; `:lobes`, `:wrap` and `:scatter` (light under the skin), `:rim`, `:cutoff`,
+;; `:double-sided`, `:cast-shadow` (true by default). A glTF loader, a skeleton's maths, a
+;; camera — policy above this, in the engine. Both window painters draw a scene: the GPU
+;; target with a depth buffer and 4× multisampling, the CPU painter in software.
+;;
+;; SHADING (ADR-791). A light's `:color` is the irradiance it brings (π times its radiance),
+;; so diffuse is the albedo times it and the Blinn-Phong specular is normalised to (n + 8)/8 —
+;; one scale for both. `:specular` × 0.08 is the reflectance at normal incidence, F0 (UE4's
+;; mapping; default 0.5 = 4 %, a common dielectric; skin's 2.8 % is 0.35; 0 … 12.5), raised
+;; toward grazing angles by Schlick's Fresnel (to min(50·F0, 1), so 0 reflects nothing).
+;; `:lobes [rough-a rough-b mix]` splits the specular in two: the roughness times rough-a
+;; weighted mix, times rough-b weighted 1 − mix (multipliers above 0, mix 0 … 1); a :skin
+;; surface has [0.75 1.3 0.85] by default (UE4's dual-lobe skin), any other one lobe. The
+;; `:occlusion` texture's red channel (linear, glTF's convention) multiplies the ambient only.
+;; `:ambient-sh` is nine [r g b] L2 spherical-harmonic coefficients of the light arriving
+;; from every way (linear radiance projected onto the real SH basis on world directions, in
+;; the order L00 L1-1 L10 L11 L2-2 L2-1 L20 L21 L22, three.js's `SphericalHarmonics3`
+;; normalisation: Y00 0.282095, Y1-1 0.488603·y, Y10 0.488603·z, Y11 0.488603·x …); the
+;; diffuse ambient is the albedo times Ramamoorthi and Hanrahan's cosine-convolved irradiance
+;; over π, in place of :sky/:ground (the `:rim` stays lit by :sky). A uniform radiance L is
+;; L00 = 3.5449·L (2√π·L), the rest 0 — the same as `:sky L :ground L`.
 ;;
 ;; LIGHTS (ADR-788), linear, their keys saying their kind:
-;;   directional  {:direction [x y z] :color [r g b] :shadow …}   (direction: the way it travels)
-;;   point        {:position [x y z] :color [r g b] :range r :shadow …}
+;;   directional  {:direction [x y z] :color [r g b] :angle a :shadow …}  (direction: its travel)
+;;   point        {:position [x y z] :color [r g b] :range r :size s :shadow …}
 ;;   spot         {:position [x y z] :direction [x y z] :color [r g b] :range r
-;;                 :cone [inner outer] :shadow …}
+;;                 :cone [inner outer] :size s :shadow …}
 ;; A point or spot light's `:color` is the light arriving 1 m away; it falls off with the
 ;; inverse square of the distance, windowed smoothly to nothing at `:range` (none: no end).
 ;; A spot is full inside its inner half-angle and dark past its outer (radians, below π/2).
 ;; `:shadow true` (or a map: `:resolution` texels 16 … 4096, default 1024; `:bias` and
-;; `:normal-bias` in texels, default 1 and 1.5; a directional light's `:extent` metres about
-;; `:center`, else fitted to the scene each frame; a spot or point light's `:near`, default
-;; 0.05 m) gives the light a shadow map — six, a cube, for a point light — rendered every
-;; frame from the posed, morphed meshes and filtered 3×3; at most four shadowed lights a
-;; scene. A `:cutout` or `:blend` surface casts where its alpha reaches `:cutoff`. A
-;; malformed light, an unknown key, or too many lights or shadows is an error, raised by the
-;; gui/draw (or gui/render-frame) that carries it.
+;; `:normal-bias` in texels, default 1 and 1.5; `:softness`, below; a directional light's
+;; `:extent` metres about `:center`, else fitted to the scene each frame; a spot or point
+;; light's `:near`, default 0.05 m) gives the light a shadow map — six, a cube, for a point
+;; light — rendered every frame from the posed, morphed meshes and filtered 3×3; at most four
+;; shadowed lights a scene. A `:cutout` or `:blend` surface casts where its alpha reaches
+;; `:cutoff`.
+;; SOFT SHADOWS (ADR-791): a shadow's `:softness` (texels of radius, above 0) filters it over a
+;; disc of 16 taps that radius wide, turned per pixel. A light's size — a point or spot
+;; light's `:size` (its diameter, metres), a directional light's `:angle` (its apparent
+;; diameter, radians: the sun's 0.0093) — makes the penumbra grow with the distance from
+;; caster to receiver, as a real lamp's does (percentage-closer soft shadows): crisp where an
+;; object touches, wide far from it, up to `:softness` texels (32 by default with a size). A
+;; 0.4 m lamp 1.5 m away gives about half a centimetre of penumbra under a nose and 25 cm on
+;; a wall a metre behind the figure. With neither, the 3×3 filter as before.
+;; A malformed light, an unknown key, a malformed `:ambient-sh` or `:lobes`, or too many
+;; lights or shadows is an error, raised by the gui/draw (or gui/render-frame) that carries it.
 
 ;; The mesh counter: handles from 1, process-wide, made at load like the textures' registry.
 (def *meshes* (table/new))

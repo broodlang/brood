@@ -2612,3 +2612,19 @@ CPU blend of 37 targets 0.27 ms (was 7.7 ms), the CPU painter's whole vertex pas
 across the picture; checked on both adapters here, red with the GPU's morph flag cleared), and
 the timings `morph_cost_at_her_size` and `gpu_morph_cost_at_her_size` (ignored, run by hand).
 Run here: fmt, clippy, the 267 `gui` unit tests including the device test; suites are CI's.
+
+2026-11-24. **Soft shadows, an SH ambient, Fresnel and dual-lobe skin (ADR-791).** For the
+game's woman under a lamp: ADR-788's shadows all had the same texel-wide edge, the ambient was a
+two-colour hemisphere and the specular had no Fresnel. A shadow's `:softness` (texels) filters
+it over a 16-tap golden-angle disc turned per pixel by interleaved gradient noise; a light's
+`:size` (point/spot, metres) or `:angle` (directional, radians) makes it PCSS — a blocker search
+over the same taps, the penumbra from the blockers' mean distance, crisp at contact and wide far
+off, held to `:softness` (32 by default). A scene's `:ambient-sh` (nine `[r g b]` radiance
+coefficients, three.js's basis, Ramamoorthi–Hanrahan irradiance) replaces `:sky`/`:ground`.
+Specular: the normalised Blinn-Phong had kept its `1/π` while the diffuse had folded it into the
+light, so it sat π too dim — fixed; Schlick's Fresnel with F0 = `:specular` × 0.08 (default 0.5
+= 4 %, skin 0.35 = 2.8 %); `:lobes [rough-a rough-b mix]`, skin `[0.75 1.3 0.85]` by default.
+A material's `:occlusion` texture multiplies the ambient. Malformed `:ambient-sh`/`:lobes`/
+`:softness`/`:size`/`:angle` are refused. Both painters, mirrored function for function; the
+scene uniform grows to 3072 bytes. Built (default and `gui-gpu`), clippy clean; tests written
+(`host::gui::mesh`, `gui_scene_light_tests`) and left to CI (desktop rule) — none run here.

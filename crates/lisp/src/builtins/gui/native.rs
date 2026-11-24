@@ -1499,21 +1499,22 @@ fn emitter_spec(
 /// A `[:scene x y w h spec]` op's spec read into a `mesh::Scene` (ADR-786): `:camera` (16
 /// numbers, a column-major view-projection with clip depth 0 … 1 — required), `:eye [x y z]`,
 /// `:lights` (up to `MAX_LIGHTS`, each directional, point or spot — [`light_spec`], ADR-788),
-/// `:sky` / `:ground [r g b]` (the ambient from above and below), `:exposure`, `:background
+/// `:sky` / `:ground [r g b]` (the ambient from above and below) or `:ambient-sh` (nine
+/// `[r g b]` spherical-harmonic coefficients, ADR-791), `:exposure`, `:background
 /// [r g b a]` (0 … 1, transparent by default), `:palettes` (joint matrices, 16 numbers each: a
 /// vector of numbers or f32 bytes per skeleton) and `:draws [{:mesh h :model [16] :palette i
 /// :morphs [[target weight] …] :material {…}} …]`. Colours and light are linear. A key of the
 /// wrong shape keeps its default and a draw without a mesh handle is dropped — except the
-/// lights and a material's `:cast-shadow`, where a mistake would light the scene wrongly
-/// without a word: those are refused (`Err`, which `%gui-draw` raises). No 16-number
-/// `:camera` is no scene (`Ok(None)`).
+/// lights, `:ambient-sh`, and a material's `:cast-shadow` and `:lobes`, where a mistake would
+/// light the scene wrongly without a word: those are refused (`Err`, which `%gui-draw` raises).
+/// No 16-number `:camera` is no scene (`Ok(None)`).
 fn scene_spec(
     heap: &Heap,
     rect: [f32; 4],
     spec: Value,
     num: &dyn Fn(Value) -> f32,
 ) -> Result<Option<crate::host::gui::mesh::Scene>, String> {
-    use crate::host::gui::mesh::{Draw, Material, Scene, Surface};
+    use crate::host::gui::mesh::{Draw, Material, SPECULAR_TO_F0, Scene, Surface};
     let Value::Map(map) = spec else {
         return Ok(None);
     };
@@ -1610,6 +1611,7 @@ fn scene_spec(
         }
         material.base = handle("base");
         material.normal = handle("normal");
+        material.occlusion = handle("occlusion");
         if let Some(color) = numbers(get(material_map, "color"), 4) {
             material.color = [color[0], color[1], color[2], color[3]];
         } else if let Some(color) = numbers(get(material_map, "color"), 3) {
@@ -1619,7 +1621,7 @@ fn scene_spec(
             material.roughness = roughness.clamp(0.0, 1.0);
         }
         if let Some(specular) = number("specular") {
-            material.specular = specular.clamp(0.0, 16.0);
+            material.specular = specular.clamp(0.0, 1.0 / SPECULAR_TO_F0);
         }
         if let Some(wrap) = number("wrap") {
             material.wrap = wrap.clamp(0.0, 1.0);
@@ -1631,6 +1633,22 @@ fn scene_spec(
         if let Some(cutoff) = number("cutoff") {
             material.cutoff = cutoff.clamp(0.0, 1.0);
         }
+        material.lobes = match get(material_map, "lobes") {
+            None | Some(Value::Nil) => None,
+            Some(given) => match numbers(Some(given), 3) {
+                Some(lobes)
+                    if lobes[0] > 0.0 && lobes[1] > 0.0 && (0.0..=1.0).contains(&lobes[2]) =>
+                {
+                    Some([lobes[0], lobes[1], lobes[2]])
+                }
+                _ => {
+                    return Err(format!(
+                        "a material's :lobes is [rough-a rough-b mix], the roughness multipliers above 0 and the mix 0 … 1, not {}",
+                        crate::syntax::printer::print(heap, given)
+                    ));
+                }
+            },
+        };
         material.double_sided =
             matches!(get(material_map, "double-sided"), Some(Value::Bool(true)));
         material.cast_shadow = match get(material_map, "cast-shadow") {
@@ -1706,6 +1724,27 @@ fn scene_spec(
     };
     let background = numbers(get(map, "background"), 4)
         .map_or([0.0; 4], |color| [color[0], color[1], color[2], color[3]]);
+    let ambient_sh = match get(map, "ambient-sh") {
+        None | Some(Value::Nil) => None,
+        Some(given) => {
+            let triples = match given {
+                Value::Vector(id) if heap.vector(id).len() == 9 => heap
+                    .vector(id)
+                    .iter()
+                    .map(|triple| numbers(Some(*triple), 3).map(|rgb| [rgb[0], rgb[1], rgb[2]]))
+                    .collect::<Option<Vec<[f32; 3]>>>(),
+                _ => None,
+            };
+            let Some(triples) = triples else {
+                return Err(format!(
+                    ":ambient-sh is 9 [r g b] spherical-harmonic coefficients (L00 L1-1 L10 L11 \
+                     L2-2 L2-1 L20 L21 L22), not {}",
+                    crate::syntax::printer::print(heap, given)
+                ));
+            };
+            Some(std::array::from_fn(|index| triples[index]))
+        }
+    };
     Ok(Some(Scene {
         x: rect[0],
         y: rect[1],
@@ -1716,6 +1755,7 @@ fn scene_spec(
         lights,
         sky: three(get(map, "sky"), [0.3, 0.32, 0.36]),
         ground: three(get(map, "ground"), [0.1, 0.08, 0.06]),
+        ambient_sh,
         exposure,
         background,
         palettes,
@@ -1796,8 +1836,11 @@ fn lights_spec(
 ///   :shadow …}`, the half-angles in radians, `0 ≤ inner ≤ outer < π/2`.
 ///
 /// `:color` (linear, 0 or more; white by default) is a point or spot light's light 1 m away.
+/// `:size` (a point or spot light's diameter, metres) or `:angle` (a directional light's apparent
+/// diameter, radians), 0 or more, softens its shadow by distance (ADR-791).
 /// `:range` (above 0) windows its falloff to nothing there. `:shadow` is `true`, `false` or a
 /// map of `:resolution` (texels, 16 … 4096), `:bias` and `:normal-bias` (texels, 0 or more),
+/// `:softness` (the soft penumbra's radius in texels, above 0; with a size, its most),
 /// for a directional light `:extent` (metres, above 0) and `:center [x y z]`, for a spot or
 /// point light `:near` (metres, above 0).
 fn light_spec(
@@ -1841,11 +1884,25 @@ fn light_spec(
         (true, false) => LightKind::Point,
     };
     let (name, takes): (&str, &[&str]) = match kind {
-        LightKind::Directional => ("a directional light", &["direction", "color", "shadow"]),
-        LightKind::Point => ("a point light", &["position", "color", "range", "shadow"]),
+        LightKind::Directional => (
+            "a directional light",
+            &["direction", "color", "angle", "shadow"],
+        ),
+        LightKind::Point => (
+            "a point light",
+            &["position", "color", "range", "size", "shadow"],
+        ),
         LightKind::Spot => (
             "a spot light",
-            &["position", "direction", "color", "range", "cone", "shadow"],
+            &[
+                "position",
+                "direction",
+                "color",
+                "range",
+                "cone",
+                "size",
+                "shadow",
+            ],
         ),
     };
     let mut light = Light::directional([0.0, -1.0, 0.0], [1.0, 1.0, 1.0]);
@@ -1862,6 +1919,10 @@ fn light_spec(
                 (LightKind::Directional, "range" | "cone") => {
                     " (give it a :position to make it a point or spot light)"
                 }
+                (LightKind::Directional, "size") => {
+                    " (a directional light's size is its :angle, in radians)"
+                }
+                (_, "angle") => " (a point or spot light's size is its :size, in metres)",
                 _ => "",
             };
             return Err(format!(
@@ -1892,6 +1953,21 @@ fn light_spec(
                 light.color = color;
             }
             "range" => light.range = positive("range", value)?,
+            "size" | "angle" => {
+                light.size = number(value)
+                    .filter(|amount| *amount >= 0.0)
+                    .ok_or_else(|| {
+                        format!(
+                            ":{key_name} is 0 or more {}, not {}",
+                            if key_name == "size" {
+                                "metres"
+                            } else {
+                                "radians"
+                            },
+                            shown(value)
+                        )
+                    })?;
+            }
             "cone" => {
                 let cone = numbers("cone", value, 2)?;
                 if !(0.0 <= cone[0] && cone[0] <= cone[1] && cone[1] < std::f32::consts::FRAC_PI_2)
@@ -1956,9 +2032,12 @@ fn light_spec(
                                     shadow.center = Some(triple("center", setting)?)
                                 }
                                 ("near", false) => shadow.near = positive("near", setting)?,
+                                ("softness", _) => {
+                                    shadow.softness = Some(positive("softness", setting)?)
+                                }
                                 _ => {
                                     return Err(format!(
-                                        "{name}'s :shadow has no {}; it takes :resolution :bias :normal-bias {}",
+                                        "{name}'s :shadow has no {}; it takes :resolution :bias :normal-bias :softness {}",
                                         shown(option),
                                         if directional {
                                             ":extent :center"
@@ -2947,9 +3026,14 @@ mod gui_scene_light_tests {
     /// `[:scene 0 0 8 8 {:camera … :lights <lights>}]` through `%gui-draw`'s parse: the scene,
     /// or the error `%gui-draw` raises.
     fn scene_with(lights: &str, material: &str) -> Result<Scene, String> {
+        scene_keyed(lights, material, "")
+    }
+
+    /// The same, `more` keys added to the spec.
+    fn scene_keyed(lights: &str, material: &str, more: &str) -> Result<Scene, String> {
         let mut heap = Heap::new();
         let source = format!(
-            "[:scene 0 0 8 8 {{:camera {CAMERA} :lights {lights} :draws [{{:mesh 1 :material {material}}}]}}]"
+            "[:scene 0 0 8 8 {{:camera {CAMERA} :lights {lights} {more} :draws [{{:mesh 1 :material {material}}}]}}]"
         );
         let op = crate::syntax::reader::read_one(&mut heap, &source).expect("reads");
         let tags = GuiOpTags::new();
@@ -3088,5 +3172,103 @@ mod gui_scene_light_tests {
         refused(&format!("[{big}]"), "lower a :resolution");
         let error = scene_with("[]", "{:cast-shadow :no}").expect_err("cast-shadow");
         assert!(error.contains(":cast-shadow is true or false"), "{error}");
+    }
+
+    #[test]
+    fn soft_shadows_sh_ambient_lobes_and_occlusion_read_and_default() {
+        // ADR-791: every new key read, and what each is without it
+        let scene = scene_keyed(
+            "[{:position [0 2 0] :direction [0 -1 0] :cone [0.3 0.6] :size 0.4
+               :shadow {:softness 24}}
+              {:direction [1 -1 0] :angle 0.0093 :shadow true}
+              {:position [0 1 0] :shadow true}]",
+            "{:surface :skin :specular 0.35 :lobes [0.8 1.4 0.9] :occlusion 5}",
+            ":ambient-sh [[1 1 1] [0 0.5 0] [0 0 0] [0 0 0] [0 0 0] [0 0 0] [0 0 0] [0 0 0] [0.1 0.2 0.3]]",
+        )
+        .expect("a scene");
+        let spot = &scene.lights[0];
+        assert_eq!(spot.size, 0.4);
+        assert_eq!(spot.shadow.as_ref().unwrap().softness, Some(24.0));
+        assert_eq!(scene.lights[1].size, 0.0093);
+        assert_eq!(scene.lights[1].shadow.as_ref().unwrap().softness, None);
+        assert_eq!(scene.lights[2].size, 0.0, "a light is a point by default");
+        let sh = scene.ambient_sh.expect("the SH ambient");
+        assert_eq!(
+            (sh[0], sh[1], sh[8]),
+            ([1.0; 3], [0.0, 0.5, 0.0], [0.1, 0.2, 0.3])
+        );
+        let material = &scene.draws[0].material;
+        assert_eq!(material.lobes, Some([0.8, 1.4, 0.9]));
+        assert_eq!(material.occlusion, Some(5));
+        assert!(
+            (material.f0() - 0.028).abs() < 1e-6,
+            "skin's F0: {}",
+            material.f0()
+        );
+        let plain = lights("[]").expect("a scene");
+        assert_eq!(plain.ambient_sh, None, "no :ambient-sh: the sky and ground");
+        let default = &plain.draws[0].material;
+        assert_eq!(
+            (default.lobes(), default.occlusion),
+            ([1.0, 1.0, 1.0], None)
+        );
+        assert!((default.f0() - 0.04).abs() < 1e-6, "the default F0 is 4 %");
+        let skin = scene_with("[]", "{:surface :skin}").expect("a scene");
+        assert_eq!(
+            skin.draws[0].material.lobes(),
+            crate::host::gui::mesh::SKIN_LOBES
+        );
+    }
+
+    #[test]
+    fn a_malformed_soft_shadow_sh_ambient_or_lobes_is_refused_with_why() {
+        let refused = |result: Result<Scene, String>, why: &str| {
+            let error = result.expect_err(why);
+            assert!(
+                error.contains("%gui-draw") && error.contains(why),
+                "{error:?} does not say {why:?}"
+            );
+        };
+        refused(
+            lights("[{:direction [0 -1 0] :shadow {:softness 0}}]"),
+            ":softness is a number above 0",
+        );
+        refused(
+            lights("[{:position [0 1 0] :size -1}]"),
+            ":size is 0 or more metres",
+        );
+        refused(
+            lights("[{:direction [0 -1 0] :angle :wide}]"),
+            ":angle is 0 or more radians",
+        );
+        refused(
+            lights("[{:direction [0 -1 0] :size 0.4}]"),
+            "its :angle, in radians",
+        );
+        refused(
+            lights("[{:position [0 1 0] :angle 0.1}]"),
+            "its :size, in metres",
+        );
+        refused(
+            scene_keyed("[]", "{}", ":ambient-sh [[1 1 1]]"),
+            ":ambient-sh is 9 [r g b]",
+        );
+        let short = "[1 1] ".repeat(9);
+        refused(
+            scene_keyed("[]", "{}", &format!(":ambient-sh [{short}]")),
+            ":ambient-sh is 9 [r g b]",
+        );
+        refused(
+            scene_with("[]", "{:lobes [0.75 1.3]}"),
+            ":lobes is [rough-a rough-b mix]",
+        );
+        refused(
+            scene_with("[]", "{:lobes [0 1.3 0.85]}"),
+            ":lobes is [rough-a rough-b mix]",
+        );
+        refused(
+            scene_with("[]", "{:lobes [0.75 1.3 1.5]}"),
+            ":lobes is [rough-a rough-b mix]",
+        );
     }
 }

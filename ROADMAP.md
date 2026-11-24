@@ -3109,8 +3109,12 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
     directional, point (inverse-square, windowed to `:range`) and spot (`:cone`) lights, up to
     8; `:shadow` gives up to 4 of them PCF shadow maps (a cube for a point light), recomputed
     every frame from the posed meshes, alpha-tested for cutout/blend, `:cast-shadow false` per
-    draw. Both painters, one plan. ⬜ Cascaded maps for a large sunlit scene; ⬜ soft
-    (contact-hardening) shadows.
+    draw. Both painters, one plan. ⬜ Cascaded maps for a large sunlit scene; ✅ soft
+    (contact-hardening) shadows, ADR-791.
+  - ✅ **Soft shadows, SH ambient, Fresnel, dual-lobe skin, occlusion maps** (ADR-791,
+    2026-11-24) — `:softness` / `:size` / `:angle` (PCSS over a 16-tap disc), `:ambient-sh`
+    (nine L2 coefficients), Schlick Fresnel with F0 from `:specular`, `:lobes` (skin two by
+    default), `:occlusion` on the ambient. ⬜ Energy conservation between diffuse and specular.
 - ✅ **Telemetry** (ADR-106) — core landed; the kernel event *sources* shipped
   2026-07-19 (ADR-137: `system-monitor` → `telemetry/watch-runtime`, GC/spawn/exit/
   deopt as `[:runtime kind]` events). ✅ **Metric aggregators + sampling** shipped
