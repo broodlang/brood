@@ -1252,11 +1252,51 @@ pub(super) fn emit_prim2_slot_int(
     map: [u8; 2],
     slot_a: usize,
     int_b: i64,
+    hoisted: &HashMap<usize, (Value, Value)>,
     frame: Frame,
     funcs: Funcs,
 ) -> Option<()> {
     let deopt = frame.deopt;
-    if matches!(op, PrimOp::VectorRef) {
+    if matches!(op, PrimOp::VectorRef)
+        && (0..=65_536).contains(&int_b)
+        && let Some(&(pointer, length)) = hoisted.get(&slot_a)
+    {
+        // `(nth m 5)` on a vector whose base the entry block resolved
+        // (`straight_line_vector_hoist_slots`, or the loop hoist): bounds-check the constant
+        // against the length — out of range deopts, so the VM gives `nth`'s exact answer —
+        // and load the element at its fixed offset. No handle decode, no slab lookup.
+        let index = b.ins().iconst(types::I64, int_b);
+        let out_of_range = b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, index, length);
+        let cont = b.create_block();
+        let deopt_reason = deopt_code(b, DeoptReason::HoistedSlotVectorIndexOutOfRange);
+        b.ins().brif(
+            out_of_range,
+            deopt,
+            &[BlockArg::Value(deopt_reason)],
+            cont,
+            &[],
+        );
+        b.switch_to_block(cont);
+        let offset = (int_b.wrapping_mul(STRIDE)) as i32;
+        let w0 = b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), pointer, offset);
+        let w1 = b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            pointer,
+            offset + PAYLOAD_OFFSET as i32,
+        );
+        let w2 = b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            pointer,
+            offset + PAYLOAD_OFFSET as i32 + 8,
+        );
+        stack.push(Op::Handle(w0, w1, w2));
+    } else if matches!(op, PrimOp::VectorRef) {
         // `(nth v 0)` / `(nth v 1)` — constant index fused into the slot. slot_a is
         // always the vector (source 0 after map normalisation). Inline the read for a
         // LOCAL small vector (deopting otherwise), the analog of the pair car/cdr inline

@@ -6,7 +6,8 @@ use super::*;
 use super::jit_plan::chunk_in_jit_subset;
 use super::jit_plan::codegen::{
     inst_allocates_hot, inst_may_allocate, inst_opcode_name, invariant_global_vecs,
-    invariant_param_slots, jit_i64_enabled, plan_general_lowering, vector_base_hoist_safe,
+    invariant_param_slots, jit_i64_enabled, plan_general_lowering,
+    straight_line_vector_hoist_slots, vector_base_hoist_safe,
 };
 
 // The unboxed scalar (i64/f64) register worker, tried first by `jit_lower_arm`.
@@ -1032,7 +1033,15 @@ fn jit_lower_arm_inner(
                     ..
                 } => {
                     prim::emit_prim2_slot_int(
-                        &mut b, &mut stack, op, *map, *slot_a, *int_b, frame, funcs,
+                        &mut b,
+                        &mut stack,
+                        op,
+                        *map,
+                        *slot_a,
+                        *int_b,
+                        &hoisted.slots,
+                        frame,
+                        funcs,
                     )?;
                 }
                 Inst::Jump(t) => {

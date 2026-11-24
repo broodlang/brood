@@ -2638,3 +2638,20 @@ form-tool block of `tests/mcp_test.blsp` (sabotaged: the edit guard disabled tur
 --check`, `nest check` and `--strict` over std/tests/examples, banned-names, `source_map`,
 `embedded_paths_tracked`, `doc_refs`, `error_format_parity`, the reader unit tests and the
 touched test files one by one; the suites are CI's (desktop rule).
+
+2026-11-24. **Matrix math stays on the fast path: the straight-line vector hoist (ADR-790).**
+A 3D kernel benchmark (mat4 multiply, point transform, projection, a 1 000-point frame) found
+`mat4-mul` making 100 runtime calls a product: the JIT's vector-base hoist served only loops
+that allocate nothing, and a matrix multiply is straight-line code ending in `MakeVector`. An
+arm whose control only moves forward now hoists a parameter vector read four or more times
+before its first allocation. `mat4-mul` ~385 → 256 ns, transform 171 → 109 ns, the frame
+~345 → ~280 µs; `make ab` noise on every row (a control build shows the +1–4% leaners are
+layout). Also measured on the way: the published `ring` +6.3% between 0.57 and 0.59 is +0.9%
+against a 2.6% floor under `make ab` — session drift, not a regression.
+
+2026-11-24. **A `:path` dependency is locked without a hash.** `project.lock.blsp` recorded a
+tree hash of every path dependency, which nothing read; a path dep loads live from outside the
+project, so the hash pinned nothing and rewrote the committed lock whenever that tree changed
+(bedit-agent's lock, after every bedit commit). Path entries are now `[name :path P :deps […]]`,
+and `nest` no longer hashes the tree on every resolve. Guard: `package_test` "editing a path
+dep's source leaves the lock as it was" (red with the hash back, as are two shape assertions).

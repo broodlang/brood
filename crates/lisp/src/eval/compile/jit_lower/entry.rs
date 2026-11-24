@@ -77,6 +77,11 @@ pub(super) fn plan_hoists(code: &[Inst], lower_body: &Node, nrequired: usize) ->
             }
         }
     }
+    if slots.is_empty() {
+        // Not a loop the gate above admits: a straight-line arm (a matrix multiply, a point
+        // transform) may still hoist the parameter vectors it reads before it allocates.
+        slots = straight_line_vector_hoist_slots(code, nrequired);
+    }
     let mut globals: HashSet<Symbol> = HashSet::new();
     if hoist_safe {
         invariant_global_vecs(lower_body, &mut globals);

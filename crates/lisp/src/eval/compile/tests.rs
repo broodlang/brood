@@ -2112,6 +2112,121 @@ fn the_vector_base_hoist_is_off_for_any_allocating_arm() {
     );
 }
 
+/// The straight-line vector-base hoist (`straight_line_vector_hoist_slots`): a parameter read
+/// element by element BEFORE the arm's first allocation is hoisted, so `mat4-mul` and a point
+/// transform read `ptr + index*STRIDE` instead of re-decoding the handle per element. Every
+/// condition that keeps the raw pointer sound is pinned here, because a stale read returns
+/// freed-but-intact memory far more often than garbage and no end-to-end answer shows it.
+///
+/// Sabotage-verified: dropping the `ip < first_unsafe` test fails the read-after-allocation
+/// case; dropping the backward-jump test fails the loop case.
+#[cfg(feature = "jit")]
+#[test]
+fn the_straight_line_vector_hoist_takes_only_reads_before_the_first_allocation() {
+    use super::jit_plan::codegen::{
+        STRAIGHT_LINE_HOIST_MIN_READS, straight_line_vector_hoist_slots,
+    };
+    let read = |slot: usize, index: i64| Inst::Prim2SlotInt {
+        op: PrimOp::VectorRef,
+        map: [0, 1],
+        slot_a: slot,
+        int_b: index,
+        swapped: false,
+        head: value::intern("nth"),
+        guard: AtomicU64::new(0),
+        pos: None,
+    };
+    // Enough reads of `slot` to pay for the hoist, so each refusal below is for its own reason.
+    let reads = |slot: usize| -> Vec<Inst> {
+        (0..STRAIGHT_LINE_HOIST_MIN_READS as i64)
+            .map(|index| read(slot, index))
+            .collect()
+    };
+    let call = || Inst::Call {
+        argc: 1,
+        tail: false,
+        pos: None,
+        site: NO_SITE,
+        head: None,
+        staged: false,
+    };
+    let arm = |parts: Vec<Vec<Inst>>| -> Vec<Inst> { parts.into_iter().flatten().collect() };
+    let none = Vec::<usize>::new();
+
+    // The lever: each parameter read enough times, then the result vector.
+    assert_eq!(
+        straight_line_vector_hoist_slots(
+            &arm(vec![reads(0), reads(1), vec![Inst::MakeVector(2)]]),
+            2
+        ),
+        vec![0, 1],
+        "reads before the arm's only allocation hoist both parameters"
+    );
+    // A read after an allocation could see storage the allocation moved.
+    assert_eq!(
+        straight_line_vector_hoist_slots(
+            &arm(vec![reads(0), vec![Inst::MakeVector(1), read(0, 0)]]),
+            1
+        ),
+        none,
+        "a read after a MakeVector must not use a base resolved before it"
+    );
+    assert_eq!(
+        straight_line_vector_hoist_slots(&arm(vec![reads(0), vec![call(), read(0, 0)]]), 1),
+        none,
+        "a call is a safepoint: no hoisted read after it"
+    );
+    // A backward jump makes a lower index run after a higher one: not straight-line.
+    assert_eq!(
+        straight_line_vector_hoist_slots(
+            &arm(vec![reads(0), vec![Inst::MakeVector(1), Inst::Jump(0)]]),
+            1
+        ),
+        none,
+        "a loop can reach the reads again after its allocation"
+    );
+    assert_eq!(
+        straight_line_vector_hoist_slots(&arm(vec![reads(0), vec![Inst::SelfCall { argc: 1 }]]), 1),
+        none,
+        "a self-call is a back edge"
+    );
+    // A parameter the arm rebinds holds another value by the later reads.
+    assert_eq!(
+        straight_line_vector_hoist_slots(
+            &arm(vec![vec![read(0, 0), Inst::SetLocal(0)], reads(0)]),
+            1
+        ),
+        none,
+        "a rebound parameter is not invariant"
+    );
+    // Too few reads: the entry call would cost more than the inline reads it replaces.
+    assert_eq!(
+        straight_line_vector_hoist_slots(&[read(0, 0), read(0, 1), Inst::MakeVector(1)], 1),
+        none,
+        "a pair read does not pay for the entry resolution"
+    );
+    // A read behind a branch may never run; a non-vector there must not deopt the arm at entry.
+    let after_branch = 2 + STRAIGHT_LINE_HOIST_MIN_READS + 1;
+    assert_eq!(
+        straight_line_vector_hoist_slots(
+            &arm(vec![
+                vec![Inst::Local(0), Inst::JumpIfFalse(after_branch)],
+                reads(0),
+                vec![Inst::Const(ConstVal::new(Value::Nil))],
+            ]),
+            1
+        ),
+        none,
+        "a read that is not certain to run is not hoisted"
+    );
+    // Only required parameters have their value at entry.
+    assert_eq!(
+        straight_line_vector_hoist_slots(&reads(2), 1),
+        none,
+        "a let-bound slot has no value at entry"
+    );
+}
+
 /// A `letrec`-bound loop's tail self-call is a `SelfCall`, not a call through the
 /// captured closure. `#3 lexical addressing` binds every capture to a frame slot — and the
 /// self-name IS a capture (the frame binds it to the closure) — so the self-call rule's
