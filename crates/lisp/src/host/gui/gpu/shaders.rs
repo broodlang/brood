@@ -1112,6 +1112,37 @@ fn shadow_visibility(light: Light, world: vec3<f32>, surface_normal: vec3<f32>, 
     return shadow_sample(at, biased);
 }
 
+// `mesh::hair_shadow`: the light left for a hair at `world` after its way through the hair
+// before it: how far it lies behind the map's first surface, a mean of HAIR_SHADOW_TAPS (16)
+// taps of a disc HAIR_SHADOW_TEXELS (6) texels round it, absorbed at HAIR_ABSORPTION (40) a metre
+fn hair_shadow(light: Light, world: vec3<f32>, turn: f32) -> f32 {
+    var at = light.shadow.y;
+    if (light.shadow.z == 6u) {
+        at = at + cube_face(world - light.position.xyz);
+    }
+    let view = scene.shadows[at];
+    let projected = project_into(view, world);
+    if (!projected.inside) {
+        return 1.0;
+    }
+    let perspective = light.shadow.x != 0u;
+    let receiver = view_distance(view, perspective, projected.depth);
+    var way = 0.0;
+    for (var tap = 0u; tap < 16u; tap = tap + 1u) {
+        let offset = disc_tap(tap * 2u, turn) * 6.0;
+        let stored = stored_depth(at, floor(projected.at + offset));
+        way = way + max(receiver - view_distance(view, perspective, stored), 0.0);
+    }
+    return exp(-40.0 * way / 16.0);
+}
+
+// `mesh::hair_light`: that light channel by channel, taking the hair's colour as it passes
+// (HAIR_TINT 0.7)
+fn hair_light(seen: f32, base: vec3<f32>) -> vec3<f32> {
+    let most = max(max(base.r, base.g), max(base.b, 1e-3));
+    return pow(vec3<f32>(max(seen, 0.0)), vec3<f32>(1.0) - 0.7 * base / most);
+}
+
 // the CPU's `sh_irradiance`: Ramamoorthi and Hanrahan's irradiance from the scene's nine
 // coefficients, held at 0, over π
 fn sh_irradiance(normal: vec3<f32>) -> vec3<f32> {
@@ -1291,7 +1322,12 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         let arriving = arrival.amount;
         var seen = 1.0;
         if (light.shadow.z > 0u) {
-            seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn);
+            if (draw.flags.x == 4u || draw.flags.x == 5u) {
+                // hair shades hair by how much of it the light crossed, not in or out
+                seen = hair_shadow(light, world, turn);
+            } else {
+                seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn);
+            }
         }
         let to_light = arrival.to_light;
         let facing = dot(normal, to_light);
@@ -1303,7 +1339,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             let lit_side = clamp(facing + 0.25, 0.0, 1.0);
             let hair_diffuse = clamp(0.25 + 0.75 * facing, 0.0, 1.0);
             let shine = draw.material.y * lit_side * (vec3<f32>(primary) + secondary * base);
-            out = out + light.color.rgb * arriving * seen * (base * hair_diffuse + shine);
+            out = out + light.color.rgb * arriving * hair_light(seen, base) * (base * hair_diffuse + shine);
             continue;
         }
         let specular = fresnel(f0, dot(view, half_vector)) * specular_lobes(dot(normal, half_vector)) * lambert * specular_kept;

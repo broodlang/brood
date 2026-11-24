@@ -53,6 +53,13 @@ pub const MIN_SOFTNESS: f32 = 1.0;
 /// How many depth-map reads a soft shadow takes: as many to look for blockers, then as many
 /// filtered comparisons (ADR-793).
 pub const SOFT_TAPS: u32 = 32;
+/// A hair's own shadow ([`hair_shadow`]): the reads of the depth map it takes, the radius of
+/// their disc in texels, the share of light lost a metre of hair (1/e in 2.5 cm), and how far
+/// the light that passes takes the hair's colour ([`hair_light`]).
+pub const HAIR_SHADOW_TAPS: u32 = 16;
+pub const HAIR_SHADOW_TEXELS: f32 = 6.0;
+pub const HAIR_ABSORPTION: f32 = 40.0;
+pub const HAIR_TINT: f32 = 0.7;
 /// A material's `:specular` times this is its reflectance at normal incidence, F0 (ADR-793):
 /// UE4's mapping, so the default 0.5 is 4 %, a common dielectric's, and skin's 2.8 % is 0.35.
 pub const SPECULAR_TO_F0: f32 = 0.08;
@@ -1411,10 +1418,14 @@ pub fn shade(
             let secondary = highlight(HAIR_SHIFT_SECONDARY, exponent * HAIR_SECONDARY_SHARPNESS);
             let lit_side = (facing + 0.25).clamp(0.0, 1.0);
             let diffuse = (0.25 + 0.75 * facing).clamp(0.0, 1.0);
+            // what the hair before it let through, in the hair's colour
+            let passed = hair_light(seen, base);
             for channel in 0..3 {
                 let shine = material.specular * lit_side * (primary + secondary * base[channel]);
-                out[channel] +=
-                    light.color[channel] * arriving * seen * (base[channel] * diffuse + shine);
+                out[channel] += light.color[channel]
+                    * arriving
+                    * passed[channel]
+                    * (base[channel] * diffuse + shine);
             }
             continue;
         }
@@ -2126,6 +2137,66 @@ pub fn shadow_visibility(
         ),
         None => sample_shadow(view, plan.layer_side, depth_map, biased),
     }
+}
+
+/// How much of light `index` reaches a hair at `world` through the hair before it (ADR-793
+/// follow-up): hair is no opaque wall, so a hair is not in or out of shadow but lit by what
+/// is left after the light's way through the hair in front. That way is how far `world` lies
+/// behind the shadow map's first surface, averaged over [`HAIR_SHADOW_TAPS`] taps of a disc
+/// [`HAIR_SHADOW_TEXELS`] texels round it (the hair's own strands in the map are a dotted
+/// surface: one tap would be noise), and the light left is `e^(−HAIR_ABSORPTION × way)`: all of
+/// it on the hair's lit surface, falling away smoothly into the hair, nearly none behind her
+/// head. After Yuksel & Keyser's deep opacity maps (2008) in what it gives, by Rünz's (2012)
+/// depth difference in how: no second pass, no layers, the one map every light already has.
+/// The shader's `hair_shadow` is the same.
+pub fn hair_shadow(
+    scene: &Scene,
+    plan: &ShadowPlan,
+    maps: &[Vec<f32>],
+    index: usize,
+    world: [f32; 3],
+    turn: f32,
+) -> f32 {
+    let (first, count) = plan.lights.get(index).copied().unwrap_or((0, 0));
+    let (Some(light), true) = (scene.lights.get(index), count > 0) else {
+        return 1.0;
+    };
+    let face = if count == 6 {
+        cube_face(subtract(world, light.position))
+    } else {
+        0
+    };
+    let at = first as usize + face;
+    let (Some(view), Some(depth_map)) = (plan.views.get(at), maps.get(at)) else {
+        return 1.0;
+    };
+    let Some((texel, depth)) = project_into(view, world) else {
+        return 1.0;
+    };
+    let receiver = view.distance(depth);
+    let mut way = 0.0f32;
+    for tap in 0..HAIR_SHADOW_TAPS {
+        let offset = disc_tap(tap * (SOFT_TAPS / HAIR_SHADOW_TAPS), turn)
+            .map(|axis| axis * HAIR_SHADOW_TEXELS);
+        let stored = stored_depth(
+            view,
+            plan.layer_side,
+            depth_map,
+            (texel[0] + offset[0]).floor() as i64,
+            (texel[1] + offset[1]).floor() as i64,
+        );
+        way += (receiver - view.distance(stored)).max(0.0);
+    }
+    (-HAIR_ABSORPTION * way / HAIR_SHADOW_TAPS as f32).exp()
+}
+
+/// The light left of `seen` (a hair's [`hair_shadow`]) channel by channel: what passes through
+/// hair takes the hair's colour, so the more of `base` a channel has the less of it is lost
+/// ([`HAIR_TINT`] of the way to none). Hair in its own shade is a deeper copper or gold, not
+/// grey: the forward scattering of Zinke et al.'s dual scattering (2008), without its tables.
+pub fn hair_light(seen: f32, base: [f32; 3]) -> [f32; 3] {
+    let most = base[0].max(base[1]).max(base[2]).max(1e-3);
+    base.map(|channel| seen.max(0.0).powf(1.0 - HAIR_TINT * channel / most))
 }
 
 /// The radius a shadowed light's soft filter reaches, in texels where the receiver stands
@@ -2948,7 +3019,20 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                 );
             let mut visibility = [1.0f32; MAX_LIGHTS];
             for (index, seen) in visibility.iter_mut().enumerate().take(lights) {
-                if context.shadows.lights[index].1 > 0 {
+                if context.shadows.lights[index].1 == 0 {
+                    continue;
+                }
+                if matches!(material.surface, Surface::Hair | Surface::Strands) {
+                    // hair shades hair by how much of it the light crossed, not in or out
+                    *seen = hair_shadow(
+                        scene,
+                        context.shadows,
+                        context.shadow_maps,
+                        index,
+                        world,
+                        turn,
+                    );
+                } else {
                     *seen = shadow_visibility(
                         scene,
                         context.shadows,
@@ -4026,6 +4110,51 @@ mod tests {
             "covering its share of it: {}",
             thin.2
         );
+    }
+
+    #[test]
+    fn hair_is_shaded_by_how_much_hair_the_light_crossed() {
+        // a floor of hair under a card, the light 45° from straight down. Under a card a metre
+        // up the light has a long way behind the map's first surface: dark. Under a card 2 cm
+        // up it has 2.8 cm: about e^(−1.1) of it is left, neither lit nor dark. Away from the
+        // card the floor is the map's first surface: lit as with no shadow at all.
+        let hair_floor = |card_height: f32, shadow: bool| {
+            let light = if shadow {
+                shadowed(slanted())
+            } else {
+                slanted()
+            };
+            let (mut seen, mut meshes) = floor_and_card(light);
+            seen.draws[0].material.surface = Surface::Hair;
+            meshes.insert(
+                2,
+                Arc::new(quad([
+                    [-0.5, card_height, 0.5],
+                    [0.5, card_height, 0.5],
+                    [0.5, card_height, -0.5],
+                    [-0.5, card_height, -0.5],
+                ])),
+            );
+            paint(&seen, &meshes)
+        };
+        let unshadowed = hair_floor(1.0, false);
+        let far = hair_floor(1.0, true);
+        let near = hair_floor(0.02, true);
+        let lit = red_at(&unshadowed, -1.0, 0.0);
+        let (dark, half) = (red_at(&far, -1.0, 0.0), red_at(&near, 0.0, 0.0));
+        assert!(
+            u16::from(dark) + 60 < u16::from(lit),
+            "{dark} against {lit}"
+        );
+        assert!(
+            u16::from(dark) + 15 < u16::from(half) && u16::from(half) + 15 < u16::from(lit),
+            "a little hair in the way leaves some of the light: {dark} < {half} < {lit}"
+        );
+        assert_eq!(red_at(&far, 2.0, 2.0), red_at(&unshadowed, 2.0, 2.0));
+        // and what passes takes the hair's colour: copper keeps its red longest
+        let passed = hair_light(0.3, [0.8, 0.4, 0.1]);
+        assert!(passed[0] > passed[1] && passed[1] > passed[2], "{passed:?}");
+        assert_eq!(hair_light(1.0, [0.8, 0.4, 0.1]), [1.0; 3]);
     }
 
     #[test]
