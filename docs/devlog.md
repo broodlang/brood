@@ -2734,3 +2734,17 @@ Still open: the fresh vector's `malloc`/`free` (~85 ns for 16 elements), which w
 element storage. Run here: `cargo check`/clippy/fmt and short single timing runs only; the new
 `jit_float_run_cache_test`, the extended `message_roundtrip_test` and
 `process::message::float_vector_tests` are CI's (desktop rule).
+
+2026-11-24. **A number read on the float path branches again (ADR-792 follow-up).** With
+ADR-790 and ADR-792 both on main, a point transform measured 112 → 132 ns and a projection
+200 → 216 ns against the commit before ADR-792. `number_of` computed both the float's bits and
+the int's `fcvt_from_sint` on every read and `select`ed, so each read carried the conversion's
+latency and a data dependency; float code reads floats, so a branch on the tag predicts almost
+perfectly. It now branches (float: a bitcast; int: a side block that converts; anything else
+deopts), with the same `is_float` flag for the mixed rule. Against the pre-ADR-792 commit:
+transform 112 → 111 ns, projection 200 → 197 ns, `mat4-mul` ~260 → 219 ns, a chain of products
+223 → 189 ns, the 1 000-point frame 270 → 265 µs; `make ab`: `nbody` −6.3%, the rest noise
+(`ring` read +5% twice; its generated code is identical to HEAD's but for embedded heap
+addresses, so that is the Rust binary's layout). The int side was untested — reading an int's
+bits as a float passed every test — so `jit_float_run_cache_test` gains "an int meets native
+code settled on floats" (red with that sabotage).

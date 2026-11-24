@@ -116,3 +116,28 @@
       (assert= (map (range 8)
                  (fn (_i) (receive ([:product answer] answer) (after test/*wait-ms* :timeout))))
         (map (range 8) (fn (_i) expected))))))
+
+;; ---- an int read on the float path -------------------------------------------------------
+;; A number read on the float path branches on the tag: a float is its bits, an int is
+;; converted (`number_of`). Native code that settled on floats then meets an int element or an
+;; int parameter: it must answer what the VM answers — a mixed product is the float, two ints
+;; stay ints. With the int's bits read as a float these answered 5e-324 and the like.
+
+(defn frc-mix (v w)
+  (let (a (nth v 0) b (nth v 1) c (nth w 0) d (nth w 1))
+    [(* a c) (* b d) (+ a d) (- b c) (* a d)]))
+
+(defn frc-scale (x v)
+  (+ (* x (nth v 0)) (* x (nth v 1)) (* x (nth v 2)) (* x (nth v 3))))
+
+(describe "an int meets native code settled on floats"
+  (test "an int element in a float product is converted, two ints stay ints"
+    (settle frc-mix 2 (fn () (doseq (_ (range 300)) (frc-mix [1.5 2.5] [0.5 4.0]))) 50)
+    (assert= [1.0 10.0 6.0 2.0 8.0] (frc-mix [2 2.5] [0.5 4.0]))
+    (assert= [4.5 10.0 5.5 -0.5 6.0] (frc-mix [1.5 2.5] [3 4.0]))
+    (assert= [8 15 7 -1 10] (frc-mix [2 3] [4 5])))
+  (test "an int parameter beside float elements is converted, beside int elements it stays"
+    (settle frc-scale 2 (fn () (doseq (_ (range 300)) (frc-scale 1.5 [1.0 2.0 3.0 4.0]))) 50)
+    (assert= 20.0 (frc-scale 2 [1.0 2.0 3.0 4.0]))
+    (assert= 15.0 (frc-scale 1.5 [1 2 3 4]))
+    (assert= 20 (frc-scale 2 [1 2 3 4]))))
