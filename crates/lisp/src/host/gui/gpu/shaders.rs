@@ -766,6 +766,12 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
     return out;
 }
 
+// `mesh::strand_sample_step`: the coverage a strand's fragment at `world` needs at `sample`
+fn strand_sample_step(world: vec3<f32>, sample: u32) -> f32 {
+    let seed = dot(world, vec3<f32>(12.9898, 78.233, 37.719)) * 1000.0 + f32(sample) * 7.31;
+    return fract(sin(seed) * 43758.547);
+}
+
 struct StrandVertex {
     world: vec3<f32>,
     normal: vec3<f32>,
@@ -1297,12 +1303,19 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     var mask = 0xFFFFFFFFu;
     if (draw.flags.x == 4u || draw.flags.x == 5u) {
         var coverage = clamp((texel.a * draw.color.a - 0.5 * draw.material.w) / max(draw.material.w, 1e-6), 0.0, 1.0);
-        // a strand thinner than a pixel covers only its share of one
-        if (draw.flags.x == 5u) {
-            coverage = coverage * fragment.tangent.w;
-        }
         mask = select(0u, 1u, coverage > 0.125) | select(0u, 2u, coverage > 0.625)
             | select(0u, 4u, coverage > 0.875) | select(0u, 8u, coverage > 0.375);
+        // a strand thinner than a pixel covers only its share of one, at samples its own
+        // position picks, so overlapping strands add up (`mesh::strand_sample_step`)
+        if (draw.flags.x == 5u) {
+            coverage = coverage * fragment.tangent.w;
+            mask = 0u;
+            for (var sample = 0u; sample < 4u; sample = sample + 1u) {
+                if (coverage > strand_sample_step(fragment.world, sample)) {
+                    mask = mask | (1u << sample);
+                }
+            }
+        }
         if (mask == 0u) {
             discard;
         }

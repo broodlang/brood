@@ -2468,13 +2468,22 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     let mut coverage = ((alpha - 0.5 * material.cutoff)
                         / material.cutoff.max(1e-6))
                     .clamp(0.0, 1.0);
-                    // a strand thinner than a pixel covers only its share of one
-                    if material.surface == Surface::Strands {
+                    // a strand thinner than a pixel covers only its share of one, at samples
+                    // its own position picks (`strand_sample_step`): strands overlapping in a
+                    // pixel fill different samples and add up, where one dither would have them
+                    // all cover the same few
+                    let step = if material.surface == Surface::Strands {
                         coverage *= corners[0].tangent[3] * weights[0]
                             + corners[1].tangent[3] * weights[1]
                             + corners[2].tangent[3] * weights[2];
-                    }
-                    if coverage <= HAIR_COVERAGE_STEPS[row % 2][column % 2] {
+                        strand_sample_step(
+                            blend3(|vertex| vertex.world),
+                            (row % 2) * 2 + column % 2,
+                        )
+                    } else {
+                        HAIR_COVERAGE_STEPS[row % 2][column % 2]
+                    };
+                    if coverage <= step {
                         return;
                     }
                     alpha = 1.0;
@@ -2589,6 +2598,17 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
             }
         },
     );
+}
+
+/// The coverage a `:strands` fragment at `world` needs to be drawn at sample `sample` (0 … 3:
+/// the GPU target's samples, the CPU painter's 2×2 sub-samples row by row): a hash of where it
+/// is and which sample, 0 … 1 (stochastic coverage). Overlapping strands thinner than a pixel
+/// then cover different samples and add up as hair does, where a fixed dither would have them
+/// all cover the same few. The shader's `strand_sample_step` is the same.
+pub fn strand_sample_step(world: [f32; 3], sample: usize) -> f32 {
+    let seed = (world[0] * 12.9898 + world[1] * 78.233 + world[2] * 37.719) * 1000.0
+        + sample as f32 * 7.31;
+    (seed.sin() * 43_758.547).rem_euclid(1.0)
 }
 
 /// A `:strands` ribbon's vertex: the strand's point `centre` (world) on the side `side` (−1 or 1)
@@ -3267,6 +3287,36 @@ mod tests {
         assert!(
             row.iter().all(|red| (60..200).contains(red)),
             "grey, neither the checker's black nor its white: {row:?}"
+        );
+    }
+
+    #[test]
+    fn strand_samples_are_spread_evenly_and_differ_from_point_to_point() {
+        // over many points a strand of half coverage takes about half the samples, and two
+        // strands at different points take different ones (so overlapping strands add up)
+        let points: Vec<[f32; 3]> = (0..4000)
+            .map(|index| {
+                let index = index as f32;
+                [index * 0.000_37, 1.5 + index * 0.000_11, index * 0.000_23]
+            })
+            .collect();
+        let taken = points
+            .iter()
+            .flat_map(|point| (0..4).map(|sample| strand_sample_step(*point, sample)))
+            .filter(|step| *step < 0.5)
+            .count() as f32
+            / (points.len() * 4) as f32;
+        assert!(
+            (taken - 0.5).abs() < 0.04,
+            "half the samples at half coverage: {taken}"
+        );
+        let differ = points
+            .windows(2)
+            .filter(|pair| strand_sample_step(pair[0], 0) != strand_sample_step(pair[1], 0))
+            .count();
+        assert!(
+            differ > points.len() * 9 / 10,
+            "neighbouring points pick their own"
         );
     }
 

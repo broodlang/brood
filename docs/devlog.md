@@ -2794,3 +2794,11 @@ the pixel (`strand_vertex`, both painters), shaded as `:hair`. Material `:width 
 Checked on her: 12 000 strands of 16 points read as hair up close and at mid distance (CPU
 painter headless; the GPU window was not presented while the screen was locked). Run here: fmt,
 clippy; the tests are CI's (desktop rule).
+
+2026-11-24 (ADR-793 follow-up). **Strands cover by position, so they add up.** At 1.6 m
+womanblend's strands thinned into a see-through veil: every strand thinner than a pixel took
+the same samples of the fixed 2×2 dither, so ten overlapping strands covered no more than one.
+A `:strands` fragment now picks its samples by a hash of where it is (`strand_sample_step`,
+stochastic coverage, both painters), so overlapping strands fill different samples and the
+hair reads as a volume. Guard: `strand_samples_are_spread_evenly_and_differ_from_point_to_point`.
+Run here: fmt, clippy, a headless shot before and after; the tests are CI's (desktop rule).
