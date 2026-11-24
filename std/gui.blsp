@@ -782,10 +782,11 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; lit along the bitangent, their alpha coverage — or :strands, ribbons turned to the camera, a
 ;; pixel wide at least, `:width [root tip]` metres), `:base`, `:normal` and `:occlusion` (texture
 ;; handles), `:color`, `:roughness`, `:specular`, `:lobes`, `:scatter` (light under the skin,
-;; below), `:rim`, `:cutoff`, `:double-sided`, `:cast-shadow` (true by default). A glTF
-;; loader, a skeleton's maths, a camera — policy above this, in the engine. Both window painters
-;; draw a scene: the GPU target with a depth buffer and 4× multisampling, the CPU painter in
-;; software.
+;; below), `:detail` with `:detail-scale`, `:detail-strength` and `:detail-cavity` (a tiled
+;; micro-relief, below), `:rim`, `:cutoff`, `:double-sided`, `:cast-shadow` (true by default).
+;; A glTF loader, a skeleton's maths, a camera — policy above this, in the engine. Both window
+;; painters draw a scene: the GPU target with a depth buffer and 4× multisampling, the CPU
+;; painter in software.
 ;;
 ;; SHADING (ADR-793). A light's `:color` is the irradiance it brings (π times its radiance),
 ;; so diffuse is the albedo times it and the Blinn-Phong specular is normalised to (n + 8)/8 —
@@ -808,6 +809,21 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; measured in metres, 0 is plain Lambert, 2 twice as far (waxier), and a mesh in centimetres
 ;; takes 0.01. The curvature is the mesh's at rest. A :skin material with the old
 ;; `:scatter [r g b]` or `:wrap` is refused, saying so.
+;;
+;; DETAIL (ADR-797). `:detail` is a texture handle: a small TILE of fine relief (pores, the
+;; fine lines of skin, a weave, a grain) read `:detail-scale` times across the mesh's UV
+;; square (a number, or [u v]; above 0, at most 4096; default 1), for what a map baked over a
+;; whole body is too coarse to hold. Its texels are linear: RED and GREEN a tangent-space
+;; normal's x and y, the byte 128 no tilt (z is found from them); BLUE the cavity, 1 on the
+;; open surface falling to 0 in a pore or crease; alpha opaque (255), as for every material
+;; texture. The normal is in the `:normal` map's convention (the same tangent frame). Upload it `{:filter :smooth}` so it has mip levels: far away the tile fades into
+;; its average (a tile that tilts as much one way as the other fades to flat) instead of
+;; glittering. The normal is laid over the `:normal` map's, or over the bare surface without
+;; one, as a second height field: slopes add. It needs the mesh's tangents, as `:normal` does.
+;; `:detail-strength` (0 … 16, default 1) multiplies its slope. The cavity damps the specular
+;; and the rim, never the diffuse or the ambient (a pore reflects less; it is not darker
+;; skin), by `:detail-cavity` (0 none … 1 all, the default); it needs no tangents. Any surface
+;; but :hair and :strands reads it. A malformed `:detail` key is an error raised by gui/draw.
 ;; `:ambient-sh` is nine [r g b] L2 spherical-harmonic coefficients of the light arriving
 ;; from every way (linear radiance projected onto the real SH basis on world directions, in
 ;; the order L00 L1-1 L10 L11 L2-2 L2-1 L20 L21 L22, three.js's `SphericalHarmonics3`

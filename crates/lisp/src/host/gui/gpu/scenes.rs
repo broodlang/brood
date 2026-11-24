@@ -310,6 +310,8 @@ impl MeshGpu {
                     count: None,
                 },
                 texture(3),
+                // the detail tile (ADR-797), through the same repeating sampler
+                texture(4),
             ],
         });
         let layouts = [
@@ -754,6 +756,10 @@ impl MeshGpu {
                     None
                 };
                 let occlusion = material.occlusion.and_then(|handle| textures.get(&handle));
+                // none for a hair surface, as the CPU painter reads none there
+                let detail = material
+                    .detail_texture()
+                    .and_then(|handle| textures.get(&handle));
                 // where the draw's palette starts in the shared buffer and how many joints it holds;
                 // none for a rigid draw (`Scene::palette_of`, as the CPU painter skins)
                 let palette = scene.palette_of(draw).and_then(|joints| {
@@ -768,15 +774,12 @@ impl MeshGpu {
                     Surface::Hair => 4,
                     Surface::Strands => 5,
                 };
-                let premultiplied = |texture: Option<&GpuTexture>| {
-                    texture.is_some_and(|texture| texture.filter != TextureFilter::Nearest)
-                };
-                let bits = u32::from(base.is_some())
-                    | (u32::from(premultiplied(base)) << 1)
-                    | (u32::from(normal.is_some()) << 2)
-                    | (u32::from(premultiplied(normal)) << 3)
-                    | (u32::from(occlusion.is_some()) << 4)
-                    | (u32::from(premultiplied(occlusion)) << 5);
+                let bits = texture_bits(
+                    [base, normal, occlusion, detail].map(|texture| {
+                        texture.map(|texture| texture.filter != TextureFilter::Nearest)
+                    }),
+                    mesh.has_tangents,
+                );
                 // its morphs blended here, sparse, into one offset a vertex (none when no target
                 // it names moves anything, or the frame's offsets would pass the binding limit)
                 let vertex_count = mesh.vertex_count as usize;
@@ -789,36 +792,18 @@ impl MeshGpu {
                     morph_offsets.resize(span + vertex_count * 32, 0);
                     add_morphs_packed(&mesh.morphs, &draw.morphs, &mut morph_offsets[span..]);
                 }
-                let mut floats = Vec::with_capacity(32);
-                floats.extend_from_slice(&draw.model);
-                floats.extend_from_slice(&material.color);
-                // `DrawU::skin`: what turns the mesh's curvature into the skin table's
-                floats.extend_from_slice(&[material.scatter_scale(), 0.0, 0.0, 0.0]);
-                floats.extend_from_slice(&[
-                    material.roughness,
-                    material.specular,
-                    material.rim,
-                    material.cutoff,
-                ]);
-                let lobes = material.lobes();
-                floats.extend_from_slice(&[lobes[0], lobes[1], lobes[2], material.f0()]);
-                let mut bytes = floats_bytes(&floats);
                 let (palette_start, palette_joints) = palette.unwrap_or((0, 0));
                 let skinned = u32::from(mesh.skinned && palette_joints > 0);
-                bytes.extend(words_bytes(&[surface, bits, palette_start, skinned]));
-                bytes.extend(words_bytes(&[
-                    u32::from(morphed),
-                    mesh.vertex_count,
-                    palette_joints,
-                    morph_start,
-                ]));
-                // a `:strands` surface's width at the root and the tip (`DrawU::strand`)
-                bytes.extend(floats_bytes(&[
-                    material.strand_width[0],
-                    material.strand_width[1],
-                    0.0,
-                    0.0,
-                ]));
+                let mut bytes = draw_uniform(
+                    draw,
+                    [surface, bits, palette_start, skinned],
+                    [
+                        u32::from(morphed),
+                        mesh.vertex_count,
+                        palette_joints,
+                        morph_start,
+                    ],
+                );
                 bytes.resize(DRAW_BYTES as usize, 0);
                 let at = draw_bytes.len() / DRAW_BYTES as usize;
                 draw_bytes.extend(bytes);
@@ -956,6 +941,8 @@ impl MeshGpu {
                     }
                     .unwrap_or(&self.flat);
                     let occlusion = view(draw.material.occlusion).unwrap_or(&self.white);
+                    // no tile: a flat, open texel (the normal map's stand-in is one)
+                    let detail = view(draw.material.detail_texture()).unwrap_or(&self.flat);
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("mesh material"),
                         layout: &self.material_layout,
@@ -975,6 +962,10 @@ impl MeshGpu {
                             wgpu::BindGroupEntry {
                                 binding: 3,
                                 resource: wgpu::BindingResource::TextureView(occlusion),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::TextureView(detail),
                             },
                         ],
                     })
@@ -1098,6 +1089,67 @@ impl MeshGpu {
             }
         }
     }
+}
+
+/// A draw's texture bits (`DrawU::flags.y`): for its base, normal, occlusion and detail
+/// texture in turn — `None` when the draw has none, else whether it was uploaded premultiplied
+/// (a smooth texture is) — a bit that it is there and a bit that it is premultiplied (1 and 2,
+/// 4 and 8, 16 and 32, 64 and 128); then 256 when the detail tile's normal tilts the
+/// surface's, which takes the mesh's tangents (ADR-797; its cavity does not).
+pub(super) fn texture_bits(textures: [Option<bool>; 4], has_tangents: bool) -> u32 {
+    let mut bits = 0;
+    for (slot, texture) in textures.iter().enumerate() {
+        bits |= match texture {
+            Some(premultiplied) => (1 | (u32::from(*premultiplied) << 1)) << (2 * slot),
+            None => 0,
+        };
+    }
+    if textures[3].is_some() && has_tangents {
+        bits |= 256;
+    }
+    bits
+}
+
+/// `draw`'s `DrawU` uniform (the WGSL struct in `MESH_SRC`) before its padding to
+/// [`DRAW_BYTES`]: its model matrix and material, then `flags` (surface, texture bits, palette
+/// offset, skinned) and `morph_info` (morphed, vertex count, palette joint count, first offset).
+pub(super) fn draw_uniform(
+    draw: &crate::host::gui::mesh::Draw,
+    flags: [u32; 4],
+    morph_info: [u32; 4],
+) -> Vec<u8> {
+    let material = &draw.material;
+    let mut floats = Vec::with_capacity(32);
+    floats.extend_from_slice(&draw.model);
+    floats.extend_from_slice(&material.color);
+    // `DrawU::skin`: what turns the mesh's curvature into the skin table's
+    floats.extend_from_slice(&[material.scatter_scale(), 0.0, 0.0, 0.0]);
+    floats.extend_from_slice(&[
+        material.roughness,
+        material.specular,
+        material.rim,
+        material.cutoff,
+    ]);
+    let lobes = material.lobes();
+    floats.extend_from_slice(&[lobes[0], lobes[1], lobes[2], material.f0()]);
+    let mut bytes = floats_bytes(&floats);
+    bytes.extend(words_bytes(&flags));
+    bytes.extend(words_bytes(&morph_info));
+    // a `:strands` surface's width at the root and the tip (`DrawU::strand`)
+    bytes.extend(floats_bytes(&[
+        material.strand_width[0],
+        material.strand_width[1],
+        0.0,
+        0.0,
+    ]));
+    // `DrawU::detail`: the detail tile's repeats, its normal's strength, its cavity's amount
+    bytes.extend(floats_bytes(&[
+        material.detail_scale[0],
+        material.detail_scale[1],
+        material.detail_strength,
+        material.detail_cavity,
+    ]));
+    bytes
 }
 
 /// One draw of a scene as the passes issue it.

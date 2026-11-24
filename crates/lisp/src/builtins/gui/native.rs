@@ -1510,8 +1510,9 @@ fn emitter_spec(
 /// (joint matrices, 16 numbers each: a vector of numbers or f32 bytes per skeleton) and `:draws [{:mesh h :model [16] :palette i
 /// :morphs [[target weight] …] :material {…}} …]`. Colours and light are linear. A key of the
 /// wrong shape keeps its default and a draw without a mesh handle is dropped — except the
-/// lights, `:ambient-sh`, and a material's `:cast-shadow` and `:lobes`, where a mistake would
-/// light the scene wrongly without a word: those are refused (`Err`, which `%gui-draw` raises).
+/// lights, `:ambient-sh`, and a material's `:cast-shadow`, `:lobes`, `:scatter` and `:detail`
+/// keys (ADR-797), where a mistake would light the scene wrongly without a word: those are
+/// refused (`Err`, which `%gui-draw` raises).
 /// No 16-number `:camera` is no scene (`Ok(None)`).
 fn scene_spec(
     heap: &Heap,
@@ -1520,8 +1521,8 @@ fn scene_spec(
     num: &dyn Fn(Value) -> f32,
 ) -> Result<Option<crate::host::gui::mesh::Scene>, String> {
     use crate::host::gui::mesh::{
-        AmbientOcclusion, DEFAULT_OCCLUSION_RADIUS, Draw, MAX_SCATTER, Material, SPECULAR_TO_F0,
-        Scene, Surface,
+        AmbientOcclusion, DEFAULT_OCCLUSION_RADIUS, Draw, MAX_DETAIL_SCALE, MAX_DETAIL_STRENGTH,
+        MAX_SCATTER, Material, SPECULAR_TO_F0, Scene, Surface,
     };
     let Value::Map(map) = spec else {
         return Ok(None);
@@ -1622,6 +1623,58 @@ fn scene_spec(
         material.base = handle("base");
         material.normal = handle("normal");
         material.occlusion = handle("occlusion");
+        // the detail tile and its settings (ADR-797), each refused when malformed: a tile
+        // dropped or read at the wrong size is skin gone smooth again without a word
+        material.detail = match get(material_map, "detail") {
+            None | Some(Value::Nil) => None,
+            Some(Value::Int(given)) if u32::try_from(given).is_ok() => u32::try_from(given).ok(),
+            Some(given) => {
+                return Err(format!(
+                    "a material's :detail is a texture handle (a whole number, 0 or more), not {}",
+                    crate::syntax::printer::print(heap, given)
+                ));
+            }
+        };
+        let repeats = |given: f32| given > 0.0 && given <= MAX_DETAIL_SCALE;
+        material.detail_scale = match get(material_map, "detail-scale") {
+            None | Some(Value::Nil) => material.detail_scale,
+            Some(given) if is_number(given) && repeats(num(given)) => [num(given); 2],
+            Some(given) => match numbers(Some(given), 2) {
+                Some(scale) if repeats(scale[0]) && repeats(scale[1]) => [scale[0], scale[1]],
+                _ => {
+                    return Err(format!(
+                        "a material's :detail-scale is how many times its :detail tile repeats across the UV square, a number or [u v] above 0 and at most {MAX_DETAIL_SCALE}, not {}",
+                        crate::syntax::printer::print(heap, given)
+                    ));
+                }
+            },
+        };
+        let within = |key: &str, most: f32, what: &str| -> Result<Option<f32>, String> {
+            match get(material_map, key) {
+                None | Some(Value::Nil) => Ok(None),
+                Some(given) if is_number(given) && (0.0..=most).contains(&num(given)) => {
+                    Ok(Some(num(given)))
+                }
+                Some(given) => Err(format!(
+                    "a material's :{key} is {what}, a number from 0 to {most}, not {}",
+                    crate::syntax::printer::print(heap, given)
+                )),
+            }
+        };
+        if let Some(strength) = within(
+            "detail-strength",
+            MAX_DETAIL_STRENGTH,
+            "what its :detail normal's slope is multiplied by (1: as baked)",
+        )? {
+            material.detail_strength = strength;
+        }
+        if let Some(cavity) = within(
+            "detail-cavity",
+            1.0,
+            "how much its :detail tile's cavity damps the specular (1: all of it)",
+        )? {
+            material.detail_cavity = cavity;
+        }
         if let Some(color) = numbers(get(material_map, "color"), 4) {
             material.color = [color[0], color[1], color[2], color[3]];
         } else if let Some(color) = numbers(get(material_map, "color"), 3) {
@@ -3357,5 +3410,90 @@ mod gui_scene_light_tests {
         refused("{:surface :skin :scatter -1}", scatter);
         refused("{:surface :skin :scatter :deep}", scatter);
         refused("{:surface :skin :scatter 1e9}", scatter);
+    }
+
+    #[test]
+    fn a_detail_tile_reads_and_defaults_and_a_malformed_one_is_refused_with_why() {
+        // ADR-797: without the keys a material has no tile; with only `:detail`, the tile once
+        // across the UV square, as baked
+        use crate::host::gui::mesh::{DEFAULT_DETAIL_CAVITY, DEFAULT_DETAIL_STRENGTH, Material};
+        let none = scene_with("[]", "{:surface :skin}").expect("a scene");
+        let material = &none.draws[0].material;
+        assert_eq!(material.detail, None);
+        assert_eq!(material.detail_scale, [1.0, 1.0]);
+        assert_eq!(
+            (material.detail_strength, material.detail_cavity),
+            (DEFAULT_DETAIL_STRENGTH, DEFAULT_DETAIL_CAVITY)
+        );
+        assert_eq!((DEFAULT_DETAIL_STRENGTH, DEFAULT_DETAIL_CAVITY), (1.0, 1.0));
+        let bare = scene_with("[]", "{:detail 7}").expect("a scene");
+        let material = &bare.draws[0].material;
+        assert_eq!(material.detail, Some(7));
+        assert_eq!(material.detail_texture(), Some(7));
+        assert_eq!(material.detail_scale, [1.0, 1.0]);
+        // every key, the scale as one number and as [u v]
+        let given = scene_with(
+            "[]",
+            "{:surface :skin :detail 7 :detail-scale 60 :detail-strength 0.5 :detail-cavity 0.25}",
+        )
+        .expect("a scene");
+        let material = &given.draws[0].material;
+        assert_eq!(material.detail_scale, [60.0, 60.0]);
+        assert_eq!(
+            (material.detail_strength, material.detail_cavity),
+            (0.5, 0.25)
+        );
+        let pair = scene_with("[]", "{:detail 7 :detail-scale [40 80.5]}").expect("a scene");
+        assert_eq!(pair.draws[0].material.detail_scale, [40.0, 80.5]);
+        let ends = scene_with(
+            "[]",
+            "{:detail 0 :detail-scale 4096 :detail-strength 16 :detail-cavity 0}",
+        )
+        .expect("a scene");
+        let material = &ends.draws[0].material;
+        assert_eq!(material.detail, Some(0));
+        assert_eq!(material.detail_scale, [4096.0, 4096.0]);
+        assert_eq!(
+            (material.detail_strength, material.detail_cavity),
+            (16.0, 0.0)
+        );
+        // nil is the key left out; a hair surface keeps the handle and reads no tile
+        let nil = scene_with(
+            "[]",
+            "{:detail nil :detail-scale nil :detail-strength nil :detail-cavity nil}",
+        )
+        .expect("a scene");
+        assert_eq!(nil.draws[0].material, Material::default());
+        let hair = scene_with("[]", "{:surface :hair :detail 7}").expect("a scene");
+        assert_eq!(hair.draws[0].material.detail, Some(7));
+        assert_eq!(hair.draws[0].material.detail_texture(), None);
+        let refused = |material: &str, why: &str| {
+            let error = scene_with("[]", material).expect_err(material);
+            assert!(
+                error.contains("%gui-draw") && error.contains(why),
+                "{material}: {error:?} does not say {why:?}"
+            );
+        };
+        let handle = ":detail is a texture handle";
+        refused("{:detail :pores}", handle);
+        refused("{:detail -1}", handle);
+        refused("{:detail 1.5}", handle);
+        refused("{:detail [7]}", handle);
+        let scale = ":detail-scale is how many times its :detail tile repeats";
+        refused("{:detail 7 :detail-scale 0}", scale);
+        refused("{:detail 7 :detail-scale -60}", scale);
+        refused("{:detail 7 :detail-scale 5000}", scale);
+        refused("{:detail 7 :detail-scale [60]}", scale);
+        refused("{:detail 7 :detail-scale [60 0]}", scale);
+        refused("{:detail 7 :detail-scale [60 60 60]}", scale);
+        refused("{:detail 7 :detail-scale :fine}", scale);
+        let strength = ":detail-strength is what its :detail normal's slope is multiplied by";
+        refused("{:detail 7 :detail-strength -0.5}", strength);
+        refused("{:detail 7 :detail-strength 17}", strength);
+        refused("{:detail 7 :detail-strength [1 1]}", strength);
+        let cavity = ":detail-cavity is how much its :detail tile's cavity damps the specular";
+        refused("{:detail 7 :detail-cavity 1.5}", cavity);
+        refused("{:detail 7 :detail-cavity -0.1}", cavity);
+        refused("{:detail 7 :detail-cavity true}", cavity);
     }
 }

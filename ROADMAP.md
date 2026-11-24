@@ -3123,6 +3123,10 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
     read from a pre-integrated table (Penner) by the light's angle and the mesh's own
     per-vertex curvature, found at upload; `:scatter` scales its reach. ⬜ Blurred normals for
     a normal map; ⬜ curvature of the posed mesh.
+  - ✅ **A detail tile for materials** (ADR-797, 2026-11-24) — `:detail` with `:detail-scale`,
+    `:detail-strength` and `:detail-cavity`: a tiled micro-normal laid over the surface's
+    (slopes add), its cavity damping the specular, fading by its own mip level. ⬜ Roughness
+    from the variance the fade loses (Toksvig).
 - ✅ **Telemetry** (ADR-106) — core landed; the kernel event *sources* shipped
   2026-07-19 (ADR-137: `system-monitor` → `telemetry/watch-runtime`, GC/spawn/exit/
   deopt as `[:runtime kind]` events). ✅ **Metric aggregators + sampling** shipped

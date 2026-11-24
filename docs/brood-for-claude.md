@@ -993,7 +993,8 @@ code paints to a terminal or a GUI window unchanged.
   skeletons' joint palettes and a fixed material model (`:skin`, `:standard`, `:cutout`,
   `:blend`, `:hair`; Fresnel specular with F0 = `:specular` × 0.08, `:lobes`, `:occlusion`,
   `:cast-shadow`; a `:skin` surface scatters light under it by the mesh's curvature, `:scatter`
-  scaling how far, ADR-794), composited in op order — 2D before it is behind, after it in
+  scaling how far, ADR-794; `:detail` a tiled micro-normal with a specular cavity, repeated
+  `:detail-scale` times, ADR-797), composited in op order — 2D before it is behind, after it in
   front (ADR-786). A malformed light raises from `gui/draw`. Both window painters draw it;
   the browser tab does not yet.
 - **A picture** (a page, a photo) = `(editor/display/image row col w h source opts)`: PNG / JPEG

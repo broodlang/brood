@@ -636,7 +636,8 @@ fn fs_particle(in: ParticleOut) -> @location(0) vec4<f32> {
 /// fragment with the fixed model `host::gui::mesh` writes for the CPU painter (`shade`, `tone`,
 /// `ambient`, `sh_irradiance`, `fresnel`, `specular_lobes`, `light_arrival`,
 /// `shadow_visibility`, `sample_shadow`, `soft_shadow`, `receiver_slope`, `bilinear_tap`,
-/// `stored_depth`, `pixel_noise`, `disc_tap`, `skin_diffuse`) — keep the two in step. Writes
+/// `stored_depth`, `pixel_noise`, `disc_tap`, `skin_diffuse`, `detail_tilt`, `detail_normal`,
+/// `detail_specular`) — keep the two in step. Writes
 /// premultiplied, sRGB-encoded colour, the space the scene's picture is composited in.
 /// `vs_shadow` / `fs_shadow` render a shadow map: the same posing, seen through the shadow
 /// view the instance index names, alpha-tested for a `:cutout` or `:blend` surface.
@@ -670,9 +671,10 @@ struct DrawU {
     skin: vec4<f32>,            // a `:skin` surface: its curvature (1 / mesh units) to 1 / mm, times `:scatter`
     material: vec4<f32>,        // roughness, specular, rim, cutoff
     lobes: vec4<f32>,           // roughness times a, times b, mix of a, F0
-    flags: vec4<u32>,           // surface, texture bits, palette offset, skinned
+    flags: vec4<u32>,           // surface, texture bits (`scenes::texture_bits`), palette offset, skinned
     morph_info: vec4<u32>,      // morphed (0 or 1), vertex count, palette joint count, first offset
     strand: vec4<f32>,          // a `:strands` surface's width at the root and the tip (metres)
+    detail: vec4<f32>,          // the detail tile's repeats along u and v, its strength, its cavity
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
@@ -690,6 +692,9 @@ struct DrawU {
 @group(3) @binding(1) var normal_texture: texture_2d<f32>;
 @group(3) @binding(2) var texture_sampler: sampler;
 @group(3) @binding(3) var occlusion_texture: texture_2d<f32>;
+// a material's `:detail` tile (ADR-797): a tangent-space normal's x and y in red and green
+// about DETAIL_FLAT, the cavity in blue; a flat, open texel where the material has none
+@group(3) @binding(4) var detail_texture: texture_2d<f32>;
 
 struct VertexIn {
     @builtin(vertex_index) index: u32,
@@ -1251,7 +1256,27 @@ fn skin_diffuse(facing: f32, curvature: f32) -> vec3<f32> {
     return upper + (lower - upper) * down_share;
 }
 
-fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>, curvature: f32) -> vec3<f32> {
+// `mesh::DETAIL_FLAT`: the byte 128, a detail texel that does not tilt
+const DETAIL_FLAT = 128.0 / 255.0;
+
+// `mesh::detail_tilt`
+fn detail_tilt(texel: vec4<f32>) -> vec2<f32> {
+    return (texel.rg - vec2<f32>(DETAIL_FLAT)) * 2.0;
+}
+
+// `mesh::detail_normal`: the partial-derivative blend, both z's multiplied through; not unit
+// length
+fn detail_normal(surface: vec3<f32>, tilt: vec2<f32>, strength: f32) -> vec3<f32> {
+    let upright = sqrt(max(1.0 - tilt.x * tilt.x - tilt.y * tilt.y, 0.0));
+    return vec3<f32>(surface.xy * upright + tilt * strength * surface.z, surface.z * upright);
+}
+
+// `mesh::detail_specular`: how much of the specular and the rim a cavity leaves
+fn detail_specular(cavity: f32, amount: f32) -> f32 {
+    return clamp(1.0 - amount * (1.0 - cavity), 0.0, 1.0);
+}
+
+fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>, curvature: f32, specular_kept: f32) -> vec3<f32> {
     var out = base * ambient(normal) * occlusion;
     let f0 = draw.lobes.w;
     // a `:hair` surface's highlights: as sharp as its roughness asks
@@ -1278,7 +1303,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             out = out + light.color.rgb * arriving * seen * (base * hair_diffuse + shine);
             continue;
         }
-        let specular = fresnel(f0, dot(view, half_vector)) * specular_lobes(dot(normal, half_vector)) * lambert;
+        let specular = fresnel(f0, dot(view, half_vector)) * specular_lobes(dot(normal, half_vector)) * lambert * specular_kept;
         var diffuse = vec3<f32>(lambert * seen);
         if (draw.flags.x == 0u) {
             // the CPU's: the light under the skin in place of Lambert's, the shadow fading out
@@ -1289,7 +1314,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         }
         out = out + light.color.rgb * arriving * (base * diffuse + vec3<f32>(specular * seen));
     }
-    let rim = draw.material.z * pow(1.0 - max(dot(normal, view), 0.0), 3.0);
+    let rim = draw.material.z * specular_kept * pow(1.0 - max(dot(normal, view), 0.0), 3.0);
     return out + rim * scene.sky.rgb;
 }
 
@@ -1313,6 +1338,8 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     let base_texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
     let normal_texel = straight(textureSample(normal_texture, texture_sampler, fragment.uv), (draw.flags.y & 8u) != 0u);
     let occlusion_texel = straight(textureSample(occlusion_texture, texture_sampler, fragment.uv), (draw.flags.y & 32u) != 0u);
+    // the detail tile at its own repeats, so its mip level follows them (the CPU's `detail_lod`)
+    let detail_texel = straight(textureSample(detail_texture, texture_sampler, fragment.uv * draw.detail.xy), (draw.flags.y & 128u) != 0u);
     let texel = select(vec4<f32>(1.0), base_texel, (draw.flags.y & 1u) != 0u);
     var alpha = texel.a * draw.color.a;
     if (draw.flags.x == 2u) {
@@ -1354,11 +1381,29 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     }
     // the shadow lookups move the receiver along the surface's own normal, not the normal map's
     let surface_normal = normal;
-    if ((draw.flags.y & 4u) != 0u) {
+    // the normal map's normal, and the detail tile's laid over it (or over the bare surface)
+    // unless it is flat there: the CPU's `fill_triangle`
+    var local = vec3<f32>(0.0, 0.0, 1.0);
+    var framed = (draw.flags.y & 4u) != 0u;
+    if (framed) {
+        local = normal_texel.rgb * 2.0 - vec3<f32>(1.0);
+    }
+    if ((draw.flags.y & 256u) != 0u) {
+        let tilt = detail_tilt(detail_texel);
+        if (tilt.x != 0.0 || tilt.y != 0.0) {
+            local = detail_normal(local, tilt, draw.detail.z);
+            framed = true;
+        }
+    }
+    // its cavity damps the specular and the rim, never the diffuse
+    var specular_kept = 1.0;
+    if ((draw.flags.y & 64u) != 0u) {
+        specular_kept = detail_specular(detail_texel.b, draw.detail.w);
+    }
+    if (framed) {
         let tangent = safe_normalize(fragment.tangent.xyz);
         let bitangent = cross(normal, tangent);
         let sign = select(1.0, -1.0, fragment.tangent.w < 0.0);
-        let local = normal_texel.rgb * 2.0 - vec3<f32>(1.0);
         normal = safe_normalize(tangent * local.x + sign * bitangent * local.y + normal * local.z);
     }
     let view = safe_normalize(scene.eye.xyz - fragment.world);
@@ -1373,7 +1418,7 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     if (draw.flags.x == 5u) {
         strand = safe_normalize(fragment.tangent.xyz);
     }
-    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand, fragment.curvature), scene.params.x);
+    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand, fragment.curvature, specular_kept), scene.params.x);
     return MeshFragment(vec4<f32>(lit * alpha, alpha), mask);
 }
 

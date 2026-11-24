@@ -14,8 +14,9 @@
 //! the light's angle and the surface's curvature, [`skin_table`]), Blinn-Phong specular
 //! normalised by its exponent with Schlick's Fresnel (two lobes for skin), a fresnel rim, a
 //! hemispherical or spherical-harmonic ambient times an occlusion map, shadow maps filtered
-//! 3×3 or soft (ADR-793), a tangent-space normal map, alpha cut out (lashes, brows) or
-//! blended (hair), ACES tone mapping and sRGB.
+//! 3×3 or soft (ADR-793), a tangent-space normal map, a tiled detail normal over it whose
+//! cavity damps the specular (ADR-797), alpha cut out (lashes, brows) or blended (hair), ACES
+//! tone mapping and sRGB.
 //! A scene is composited into the frame as a premultiplied picture where its op stands, so
 //! 2D ops before it are behind it and ops after it in front.
 
@@ -77,6 +78,18 @@ pub const MAX_SCATTER: f32 = 1.0e6;
 /// The millimetres in one of a mesh's units, taken as metres: the diffusion profile's
 /// distances are millimetres.
 pub const SKIN_MILLIMETRES_PER_UNIT: f32 = 1000.0;
+/// What a `:detail` texture's red or green channel reads where its normal does not tilt
+/// (ADR-797): the byte 128, the one a mip chain's averages of a tile that tilts as much one way
+/// as the other land on. Half, 127.5, is no byte, so `2t − 1` would leave every flat texel
+/// tilted by a 255th.
+pub const DETAIL_FLAT: f32 = 128.0 / 255.0;
+/// A material's `:detail-strength` and `:detail-cavity` by default: the tile as it was baked.
+pub const DEFAULT_DETAIL_STRENGTH: f32 = 1.0;
+pub const DEFAULT_DETAIL_CAVITY: f32 = 1.0;
+/// The most a `:detail-strength` may be, and the most times a `:detail-scale` may repeat the
+/// tile across the UV square.
+pub const MAX_DETAIL_STRENGTH: f32 = 16.0;
+pub const MAX_DETAIL_SCALE: f32 = 4096.0;
 /// The skin diffusion profile (ADR-794): d'Eon and Luebke's sum of six Gaussians fitted to a
 /// three-layer skin model (GPU Gems 3, chapter 14), each `[variance mm², red, green, blue]`.
 /// The weights sum to 1 a channel, so the skin's colour is its texture's and the profile only
@@ -670,6 +683,19 @@ pub struct Material {
     /// An ambient-occlusion map (a `gui-texture` handle; linear, its red channel, glTF's
     /// convention) multiplying the ambient light only (ADR-793).
     pub occlusion: Option<u32>,
+    /// A detail tile (a `gui-texture` handle; linear, ADR-797), read `detail_scale` times
+    /// across the UV square: red and green a tangent-space normal's x and y about
+    /// [`DETAIL_FLAT`], laid over the surface's own ([`detail_normal`]) where the mesh has
+    /// tangents; blue the cavity, 1 on the open surface falling to 0 in a pore, which damps
+    /// the specular and the rim and nothing else ([`detail_specular`]). Not read by a `:hair`
+    /// or `:strands` surface ([`Material::detail_texture`]).
+    pub detail: Option<u32>,
+    /// How many times the detail tile repeats across the UV square, along u and along v.
+    pub detail_scale: [f32; 2],
+    /// What the detail normal's slope is multiplied by: 0 none, 1 as baked.
+    pub detail_strength: f32,
+    /// How much of the cavity's damping the specular takes: 0 none, 1 all of it.
+    pub detail_cavity: f32,
     /// Linear RGBA factor on the base colour.
     pub color: [f32; 4],
     /// 0 (mirror) … 1 (chalk).
@@ -705,6 +731,10 @@ impl Default for Material {
             base: None,
             normal: None,
             occlusion: None,
+            detail: None,
+            detail_scale: [1.0, 1.0],
+            detail_strength: DEFAULT_DETAIL_STRENGTH,
+            detail_cavity: DEFAULT_DETAIL_CAVITY,
             color: [1.0, 1.0, 1.0, 1.0],
             roughness: 0.6,
             specular: 0.5,
@@ -743,6 +773,16 @@ impl Material {
             .unwrap_or(DEFAULT_SCATTER)
             .clamp(0.0, MAX_SCATTER)
             / SKIN_MILLIMETRES_PER_UNIT
+    }
+
+    /// The detail tile it is drawn with (ADR-797): its `:detail`, but none for a `:hair` or
+    /// `:strands` surface, whose tangents are its strands and whose light is not this model's.
+    /// Both painters ask here, so neither reads a tile the other does not.
+    pub fn detail_texture(&self) -> Option<u32> {
+        match self.surface {
+            Surface::Hair | Surface::Strands => None,
+            Surface::Skin | Surface::Standard | Surface::Cutout | Surface::Blend => self.detail,
+        }
     }
 }
 
@@ -1268,14 +1308,50 @@ pub fn skin_diffuse(table: &[[f32; 3]], facing: f32, curvature: f32) -> [f32; 3]
     })
 }
 
+/// A detail texel's tilt (ADR-797): its normal's x and y in the tangent frame, from the red
+/// and green channels about [`DETAIL_FLAT`]. Exactly `[0, 0]` for a flat texel (the byte 128).
+pub fn detail_tilt(texel: [f32; 4]) -> [f32; 2] {
+    [
+        (texel[0] - DETAIL_FLAT) * 2.0,
+        (texel[1] - DETAIL_FLAT) * 2.0,
+    ]
+}
+
+/// The tangent-space normal `surface` (the normal map's, or `[0, 0, 1]` without one) with a
+/// detail normal of `tilt` laid over it, its slope scaled by `strength` (ADR-797); not unit
+/// length. The partial-derivative blend: each normal is a height field's, and the two heights
+/// add, so their slopes do — `surface.xy / surface.z + strength × tilt / z`, the detail's z
+/// reconstructed from its tilt — here multiplied through by both z's, so nothing is divided.
+/// A detail that does not tilt gives `surface` back exactly, a flat surface the detail itself,
+/// and the detail's angle θ becomes `atan(strength × tan θ)`.
+pub fn detail_normal(surface: [f32; 3], tilt: [f32; 2], strength: f32) -> [f32; 3] {
+    let upright = (1.0 - tilt[0] * tilt[0] - tilt[1] * tilt[1])
+        .max(0.0)
+        .sqrt();
+    [
+        surface[0] * upright + tilt[0] * strength * surface[2],
+        surface[1] * upright + tilt[1] * strength * surface[2],
+        surface[2] * upright,
+    ]
+}
+
+/// How much of the specular (and the rim) a detail texel's `cavity` (its blue channel: 1 the
+/// open surface, 0 the bottom of a pore) leaves, a material's `:detail-cavity` being `amount`
+/// (ADR-797). 1 for an open texel or an amount of 0.
+pub fn detail_specular(cavity: f32, amount: f32) -> f32 {
+    (1.0 - amount * (1.0 - cavity)).clamp(0.0, 1.0)
+}
+
 /// The light leaving a surface point toward the eye, linear and before exposure: `base` its
 /// linear colour, `normal` its unit normal facing the viewer's side, `view` the unit
 /// direction from it to the eye, `world` where it is, `occlusion` how much of the ambient
 /// reaches it (its occlusion map's times the scene's [`ambient_occlusion`], 1 for all of it),
 /// `visibility` how much of each light (by index) its shadow lets through — 1 for a light it
 /// holds no entry for — `strand` a `:hair` surface's unit strand direction (unused by the
-/// others), and `curvature` how sharply the mesh curves there, 1 over its radius in the mesh's
-/// units ([`Mesh::curvature`]; read by a `:skin` surface only).
+/// others), `curvature` how sharply the mesh curves there, 1 over its radius in the mesh's
+/// units ([`Mesh::curvature`]; read by a `:skin` surface only), and `specular_kept` how much
+/// of the specular and the rim its detail tile's cavity leaves there ([`detail_specular`]; 1
+/// without one, and not read by a `:hair` or `:strands` surface's highlights).
 ///
 /// A `:skin` surface's diffuse light is [`skin_diffuse`]'s in place of Lambert's (ADR-794).
 /// A shadow multiplies the Lambert part of it and fades out of the rest — the light the
@@ -1297,6 +1373,7 @@ pub fn shade(
     visibility: &[f32],
     strand: [f32; 3],
     curvature: f32,
+    specular_kept: f32,
 ) -> [f32; 3] {
     let ambient = ambient(scene, normal);
     let skin = (material.surface == Surface::Skin)
@@ -1338,8 +1415,12 @@ pub fn shade(
             }
             continue;
         }
-        let specular =
-            fresnel(f0, dot(view, half)) * specular_lobes(material, dot(normal, half)) * lambert;
+        // a pore reflects less than the open surface round it (ADR-797); the diffuse is not
+        // touched
+        let specular = fresnel(f0, dot(view, half))
+            * specular_lobes(material, dot(normal, half))
+            * lambert
+            * specular_kept;
         let scattered = skin.map(|(table, curved)| skin_diffuse(table, facing, curved));
         for channel in 0..3 {
             let diffuse = match scattered {
@@ -1350,7 +1431,7 @@ pub fn shade(
                 light.color[channel] * arriving * (base[channel] * diffuse + specular * seen);
         }
     }
-    let rim = material.rim * (1.0 - dot(normal, view).max(0.0)).powi(3);
+    let rim = material.rim * specular_kept * (1.0 - dot(normal, view).max(0.0)).powi(3);
     for channel in 0..3 {
         out[channel] += rim * scene.sky[channel];
     }
@@ -2378,13 +2459,16 @@ fn sample_lod(texture: &TextureRef, u: f32, v: f32, lod: f32) -> [f32; 4] {
     }
 }
 
-/// The mip level a triangle samples `texture` at: half the base-2 logarithm of how many of
-/// its texels fall on one of the picture's pixels (`supersample` canvas pixels a side), 0
-/// when it is magnified. One level for the whole triangle (the GPU target's sampler picks one
-/// a 2×2 block of pixels; on a mesh's small triangles they agree).
+/// The mip level a triangle samples `texture` at, the texture repeated `repeats` times across
+/// the UV square (`[1, 1]` but for a detail tile, which is read at its own scaled coordinates):
+/// half the base-2 logarithm of how many of its texels fall on one of the picture's pixels
+/// (`supersample` canvas pixels a side), 0 when it is magnified. One level for the whole
+/// triangle (the GPU target's sampler picks one a 2×2 block of pixels; on a mesh's small
+/// triangles they agree).
 fn triangle_lod(
     corners: [&ClipVertex; 3],
     texture: &TextureRef,
+    repeats: [f32; 2],
     width: usize,
     height: usize,
     supersample: f32,
@@ -2401,8 +2485,8 @@ fn triangle_lod(
     };
     let texel = |vertex: &ClipVertex| {
         [
-            vertex.uv[0] * texture.w as f32,
-            vertex.uv[1] * texture.h as f32,
+            vertex.uv[0] * repeats[0] * texture.w as f32,
+            vertex.uv[1] * repeats[1] * texture.h as f32,
         ]
     };
     let area = |points: [[f32; 2]; 3]| {
@@ -2549,6 +2633,10 @@ struct DrawContext<'a> {
     base_texture: Option<TextureRef<'a>>,
     normal_texture: Option<TextureRef<'a>>,
     occlusion_texture: Option<TextureRef<'a>>,
+    /// The material's detail tile (ADR-797), for its cavity; none for a hair surface.
+    detail_texture: Option<TextureRef<'a>>,
+    /// Whether the detail tile's normal tilts the surface's: only on a mesh with tangents.
+    detail_tilts: bool,
     /// How many canvas pixels a side make one of the picture's: a soft shadow's noise is the
     /// picture pixel's, as the GPU's is.
     supersample: usize,
@@ -2693,10 +2781,36 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
     let (width, height) = (canvas.width, canvas.height);
     // the mip level each texture is read at, for the whole triangle
     let base_lod = context.base_texture.as_ref().map_or(0.0, |texture| {
-        triangle_lod(corners, texture, width, height, context.supersample as f32)
+        triangle_lod(
+            corners,
+            texture,
+            [1.0, 1.0],
+            width,
+            height,
+            context.supersample as f32,
+        )
     });
     let normal_lod = context.normal_texture.as_ref().map_or(0.0, |texture| {
-        triangle_lod(corners, texture, width, height, context.supersample as f32)
+        triangle_lod(
+            corners,
+            texture,
+            [1.0, 1.0],
+            width,
+            height,
+            context.supersample as f32,
+        )
+    });
+    // the detail tile's level follows its own, scaled coordinates: it fades into its average
+    // (flat, and the tile's mean cavity) as its repeats shrink under a pixel
+    let detail_lod = context.detail_texture.as_ref().map_or(0.0, |texture| {
+        triangle_lod(
+            corners,
+            texture,
+            material.detail_scale,
+            width,
+            height,
+            context.supersample as f32,
+        )
     });
     scan_triangle(
         width,
@@ -2775,17 +2889,45 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
             // the shadow lookups move the receiver along the surface's own normal, not the
             // normal map's
             let surface_normal = normal;
-            if let Some(map) = context.normal_texture.as_ref() {
+            let mapped = context.normal_texture.as_ref().map(|map| {
+                let texel = sample_lod(map, uv[0], uv[1], normal_lod);
+                [
+                    texel[0] * 2.0 - 1.0,
+                    texel[1] * 2.0 - 1.0,
+                    texel[2] * 2.0 - 1.0,
+                ]
+            });
+            // the detail tile (ADR-797), read at its own repeats: its normal laid over the
+            // normal map's (or the bare surface's) unless it is flat there, its cavity kept for
+            // the specular
+            let detail = context.detail_texture.as_ref().map(|tile| {
+                sample_lod(
+                    tile,
+                    uv[0] * material.detail_scale[0],
+                    uv[1] * material.detail_scale[1],
+                    detail_lod,
+                )
+            });
+            let tilt = detail
+                .filter(|_| context.detail_tilts)
+                .map(detail_tilt)
+                .filter(|tilt| tilt[0] != 0.0 || tilt[1] != 0.0);
+            let local = match tilt {
+                Some(tilt) => Some(detail_normal(
+                    mapped.unwrap_or([0.0, 0.0, 1.0]),
+                    tilt,
+                    material.detail_strength,
+                )),
+                None => mapped,
+            };
+            let specular_kept = detail.map_or(1.0, |texel| {
+                detail_specular(texel[2], material.detail_cavity)
+            });
+            if let Some(local) = local {
                 let tangent = normalize(blend3(|vertex| {
                     [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]]
                 }));
                 let bitangent = cross(normal, tangent);
-                let texel = sample_lod(map, uv[0], uv[1], normal_lod);
-                let local = [
-                    texel[0] * 2.0 - 1.0,
-                    texel[1] * 2.0 - 1.0,
-                    texel[2] * 2.0 - 1.0,
-                ];
                 normal = normalize([
                     tangent[0] * local[0] + sign * bitangent[0] * local[1] + normal[0] * local[2],
                     tangent[1] * local[0] + sign * bitangent[1] * local[1] + normal[1] * local[2],
@@ -2858,6 +3000,7 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     corners[0].curvature * weights[0]
                         + corners[1].curvature * weights[1]
                         + corners[2].curvature * weights[2],
+                    specular_kept,
                 ),
                 scene.exposure,
             );
@@ -3145,6 +3288,8 @@ pub fn rasterize<'t>(
                 None
             },
             occlusion_texture: material.occlusion.and_then(textures),
+            detail_texture: material.detail_texture().and_then(textures),
+            detail_tilts: item.mesh.tangents.is_some(),
             supersample,
             shadows: &shadows,
             shadow_maps: &shadow_maps,
@@ -3430,6 +3575,7 @@ mod tests {
             &[],
             [0.0; 3],
             curvature,
+            1.0,
         )
     }
 
@@ -3897,6 +4043,7 @@ mod tests {
                 &[],
                 strand,
                 0.0,
+                1.0,
             )[0]
         };
         let across = shine([1.0, 0.0, 0.0]);
@@ -3950,6 +4097,7 @@ mod tests {
             &[],
             [0.0; 3],
             0.0,
+            1.0,
         );
         assert!(lit.iter().all(|channel| channel.is_finite()));
     }
@@ -3978,6 +4126,7 @@ mod tests {
             &[],
             [0.0; 3],
             0.0,
+            1.0,
         )[0]
     }
 
@@ -4621,6 +4770,7 @@ mod tests {
                 &[],
                 [0.0; 3],
                 0.0,
+                1.0,
             );
             let by_sh = shade(
                 &sh,
@@ -4633,6 +4783,7 @@ mod tests {
                 &[],
                 [0.0; 3],
                 0.0,
+                1.0,
             );
             for channel in 0..3 {
                 assert!(
@@ -4672,6 +4823,7 @@ mod tests {
             &[],
             [0.0; 3],
             0.0,
+            1.0,
         )[0]
     }
 
@@ -4867,6 +5019,507 @@ mod tests {
             }
         }
         assert!(band > 50, "the wrap band is lit to compare: {band} pixels");
+    }
+
+    // --- the detail tile (ADR-797) --------------------------------------------------------------
+
+    /// A quad filling the picture at depth 0.5, facing the viewer at −z: `normal` at every
+    /// vertex, its tangent +x (so its bitangent is −y) when `tangents`, its UVs 0 … 1 from
+    /// the bottom left. Picture column `c` is u `(c + 0.5) / 16`, row `r` is v
+    /// `1 − (r + 0.5) / 16`.
+    fn facing_quad(normal: [f32; 3], tangents: bool) -> Arc<Mesh> {
+        let normals: Vec<f32> = (0..4).flat_map(|_| normal).collect();
+        let tangent: Vec<f32> = (0..4).flat_map(|_| [1.0, 0.0, 0.0, 1.0]).collect();
+        Arc::new(
+            Mesh::from_parts(MeshParts {
+                positions: bytes_of(&[
+                    -1.0, -1.0, 0.5, 1.0, -1.0, 0.5, 1.0, 1.0, 0.5, -1.0, 1.0, 0.5,
+                ]),
+                normals: bytes_of(&normals),
+                uvs: bytes_of(&[0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]),
+                tangents: if tangents {
+                    bytes_of(&tangent)
+                } else {
+                    Vec::new()
+                },
+                indices: [0u16, 1, 2, 0, 2, 3]
+                    .iter()
+                    .flat_map(|index| index.to_le_bytes())
+                    .collect(),
+                ..MeshParts::default()
+            })
+            .expect("a quad"),
+        )
+    }
+
+    /// `material` on `mesh`, lit head on by one white light and a faint ambient, seen from −z.
+    fn detail_scene(material: Material) -> Scene {
+        let mut seen = scene(Draw {
+            material: Material {
+                double_sided: true,
+                ..material
+            },
+            ..draw()
+        });
+        seen.lights = vec![Light::directional([0.0, 0.0, 1.0], [1.0; 3])];
+        seen
+    }
+
+    /// The detail tile's handle in these tests, and a normal map's.
+    const TILE: u32 = 21;
+    const NORMAL_MAP: u32 = 22;
+
+    /// `seen` painted, texture [`TILE`] being `tile` and [`NORMAL_MAP`] a 2×2 map of four
+    /// different normals.
+    fn paint_detailed(seen: &Scene, mesh: &Arc<Mesh>, tile: &TextureRef) -> Vec<u8> {
+        let bumps: [u8; 16] = [
+            150, 128, 250, 255, 128, 160, 248, 255, 100, 128, 247, 255, 128, 110, 252, 255,
+        ];
+        rasterize(seen, &|_| Some(mesh.clone()), &|handle| match handle {
+            TILE => Some(TextureRef {
+                w: tile.w,
+                h: tile.h,
+                rgba: tile.rgba,
+                levels: tile.levels,
+            }),
+            NORMAL_MAP => Some(TextureRef {
+                w: 2,
+                h: 2,
+                rgba: &bumps,
+                levels: &[],
+            }),
+            _ => None,
+        })
+        .2
+    }
+
+    /// A tile of one texel.
+    fn one_texel(rgba: &[u8; 4]) -> TextureRef<'_> {
+        TextureRef {
+            w: 1,
+            h: 1,
+            rgba,
+            levels: &[],
+        }
+    }
+
+    /// The most any byte of two pictures differs by.
+    fn furthest_apart(left: &[u8], right: &[u8]) -> i32 {
+        assert_eq!(left.len(), right.len());
+        left.iter()
+            .zip(right)
+            .map(|(one, other)| (i32::from(*one) - i32::from(*other)).abs())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// How far two pictures are apart in all, a byte at a time.
+    fn apart_in_all(left: &[u8], right: &[u8]) -> i64 {
+        left.iter()
+            .zip(right)
+            .map(|(one, other)| i64::from((i32::from(*one) - i32::from(*other)).abs()))
+            .sum()
+    }
+
+    #[test]
+    fn a_flat_detail_tile_changes_nothing_at_all() {
+        // the byte 128 is no tilt and 255 an open surface, exactly: read through the sampler
+        // it is `DETAIL_FLAT` to the bit, so the tilt is 0 and the specular is kept whole
+        let flat = [128u8, 128, 255, 255];
+        let texel = sample_lod(&one_texel(&flat), 0.3, 0.7, 0.0);
+        assert_eq!(detail_tilt(texel), [0.0, 0.0]);
+        assert_eq!(detail_specular(texel[2], 1.0), 1.0);
+        // a tile that does not tilt gives the surface's own normal back, bit for bit
+        let bumped = [0.31f32, -0.12, 0.943];
+        assert_eq!(detail_normal(bumped, [0.0, 0.0], 3.0), bumped);
+        // so a picture is the same bytes with it as without: over a normal map, over a bare
+        // surface, and on a mesh without tangents; whatever its scale and strength
+        let detailed = |material: Material| Material {
+            detail: Some(TILE),
+            detail_scale: [7.0, 3.0],
+            detail_strength: 3.0,
+            ..material
+        };
+        let glossy = Material {
+            surface: Surface::Skin,
+            color: [0.4, 0.3, 0.25, 1.0],
+            roughness: 0.3,
+            rim: 0.5,
+            ..Material::default()
+        };
+        let mapped = Material {
+            normal: Some(NORMAL_MAP),
+            ..glossy.clone()
+        };
+        for (material, tangents) in [(mapped, true), (glossy.clone(), true), (glossy, false)] {
+            let mesh = facing_quad([0.0, 0.0, -1.0], tangents);
+            let tile = one_texel(&flat);
+            let without = paint_detailed(&detail_scene(material.clone()), &mesh, &tile);
+            let with = paint_detailed(&detail_scene(detailed(material)), &mesh, &tile);
+            assert!(without.iter().any(|byte| *byte != 0), "something is drawn");
+            assert_eq!(with, without, "tangents: {tangents}");
+        }
+    }
+
+    #[test]
+    fn a_detail_normal_adds_its_slope_to_the_surfaces_scaled_by_its_strength() {
+        // over a flat surface it is the detail itself, its angle θ becoming atan(s·tan θ)
+        let angle = 0.3f32;
+        for strength in [0.0f32, 0.5, 1.0, 2.0, 4.0] {
+            let tilted = normalize(detail_normal([0.0, 0.0, 1.0], [angle.sin(), 0.0], strength));
+            let expected = (strength * angle.tan()).atan();
+            let measured = tilted[0].atan2(tilted[2]);
+            assert!(
+                (measured - expected).abs() < 1e-5,
+                "strength {strength}: {measured} against {expected}"
+            );
+            assert_eq!(tilted[1], 0.0);
+        }
+        // over a tilted surface the slopes add: 0.2 across and 0.1 up, plus the detail's
+        let surface = normalize([0.2, 0.1, 1.0]);
+        let detail = normalize([-0.3, 0.4, 1.0]);
+        let both = detail_normal(surface, [detail[0], detail[1]], 1.0);
+        let slopes = [both[0] / both[2], both[1] / both[2]];
+        assert!(
+            (slopes[0] + 0.1).abs() < 1e-5 && (slopes[1] - 0.5).abs() < 1e-5,
+            "{slopes:?}"
+        );
+        // a texel past the unit circle (the bytes allow it) is a normal lying flat, not a NaN
+        let flat_out = detail_normal([0.0, 0.0, 1.0], [-1.004, 0.3], 1.0);
+        assert!(flat_out.iter().all(|part| part.is_finite()) && flat_out[2] == 0.0);
+    }
+
+    #[test]
+    fn a_tilted_detail_tile_shades_as_a_mesh_tilted_by_the_same_angle() {
+        // one texel tilting 64 bytes along the tangent: sin θ = 2 · 64 / 255. The quad faces
+        // −z with its tangent +x, so its shaded normal is (sin θ', 0, −cos θ'), θ' the angle
+        // the strength makes of θ; a quad without the tile but with that normal at its
+        // vertices is the same picture
+        let tilting = [192u8, 128, 255, 255];
+        let sine = 2.0 * 64.0 / 255.0f32;
+        let angle = sine.asin();
+        // lit from 45° toward +x, so the light it takes grows with the tilt at once
+        let lit = |material: Material| {
+            let mut seen = detail_scene(Material {
+                color: [0.25, 0.25, 0.25, 1.0],
+                ..material
+            });
+            seen.lights = vec![Light::directional([-1.0, 0.0, 1.0], [1.0; 3])];
+            seen
+        };
+        let plain = paint_detailed(
+            &lit(Material::default()),
+            &facing_quad([0.0, 0.0, -1.0], true),
+            &one_texel(&tilting),
+        );
+        for strength in [1.0f32, 2.0, 0.5] {
+            let expected = (strength * angle.tan()).atan();
+            let detailed = paint_detailed(
+                &lit(Material {
+                    detail: Some(TILE),
+                    detail_scale: [5.0, 5.0],
+                    detail_strength: strength,
+                    ..Material::default()
+                }),
+                &facing_quad([0.0, 0.0, -1.0], true),
+                &one_texel(&tilting),
+            );
+            let tilted = paint_detailed(
+                &lit(Material::default()),
+                &facing_quad([expected.sin(), 0.0, -expected.cos()], false),
+                &one_texel(&tilting),
+            );
+            assert!(
+                furthest_apart(&detailed, &tilted) <= 1,
+                "strength {strength}: {} apart",
+                furthest_apart(&detailed, &tilted)
+            );
+            assert!(
+                furthest_apart(&detailed, &plain) > 4,
+                "strength {strength}: the tilt shows"
+            );
+        }
+        // without tangents there is no frame to tilt in: the tile's normal is skipped
+        let bare = facing_quad([0.0, 0.0, -1.0], false);
+        let skipped = paint_detailed(
+            &lit(Material {
+                detail: Some(TILE),
+                ..Material::default()
+            }),
+            &bare,
+            &one_texel(&tilting),
+        );
+        assert_eq!(skipped, plain);
+    }
+
+    #[test]
+    fn a_cavity_takes_the_specular_and_the_rim_and_leaves_the_diffuse() {
+        // by the number: an open texel keeps it all, a closed one none, `:detail-cavity`
+        // saying how much of that is taken
+        assert_eq!(detail_specular(1.0, 1.0), 1.0);
+        assert_eq!(detail_specular(0.0, 1.0), 0.0);
+        assert_eq!(detail_specular(0.0, 0.0), 1.0);
+        assert!((detail_specular(0.25, 0.5) - 0.625).abs() < 1e-6);
+        // in `shade`: nothing kept is the same light as a material that reflects nothing
+        let shiny = Material {
+            color: [0.2, 0.2, 0.2, 1.0],
+            roughness: 0.4,
+            rim: 0.5,
+            ..Material::default()
+        };
+        let matte = Material {
+            specular: 0.0,
+            rim: 0.0,
+            ..shiny.clone()
+        };
+        let lit = detail_scene(shiny.clone());
+        let normal = [0.0, 0.0, -1.0];
+        let view = normalize([0.3, 0.0, -1.0]);
+        let shaded = |material: &Material, kept: f32| {
+            shade(
+                &lit,
+                material,
+                [0.2; 3],
+                normal,
+                view,
+                [0.0; 3],
+                1.0,
+                &[],
+                [0.0; 3],
+                0.0,
+                kept,
+            )
+        };
+        assert_eq!(shaded(&shiny, 0.0), shaded(&matte, 1.0));
+        assert!(shaded(&shiny, 1.0)[0] > shaded(&shiny, 0.5)[0]);
+        assert!(shaded(&shiny, 0.5)[0] > shaded(&shiny, 0.0)[0]);
+        // painted, with or without tangents: a tile of closed pores is the matte material's
+        // picture exactly (its diffuse untouched), and with `:detail-cavity` 0 the shiny one's
+        let closed = [128u8, 128, 0, 255];
+        for tangents in [true, false] {
+            let mesh = facing_quad(normal, tangents);
+            let paint = |material: Material| {
+                paint_detailed(&detail_scene(material), &mesh, &one_texel(&closed))
+            };
+            let pored = paint(Material {
+                detail: Some(TILE),
+                ..shiny.clone()
+            });
+            let ignored = paint(Material {
+                detail: Some(TILE),
+                detail_cavity: 0.0,
+                ..shiny.clone()
+            });
+            assert_eq!(pored, paint(matte.clone()), "tangents: {tangents}");
+            assert_eq!(ignored, paint(shiny.clone()), "tangents: {tangents}");
+            assert!(furthest_apart(&pored, &ignored) > 4, "the specular shows");
+        }
+    }
+
+    #[test]
+    fn a_detail_scale_repeats_the_tile() {
+        // a 2×2 tile, flat at (0, 0) and (1, 1) and tilting hard at the other two; a tilted
+        // texel takes less of the head-on light, so it is darker
+        let flat = [128u8, 128, 255, 255];
+        let steep = [238u8, 128, 255, 255];
+        let rgba: Vec<u8> = [flat, steep, steep, flat].concat();
+        let tile = TextureRef {
+            w: 2,
+            h: 2,
+            rgba: &rgba,
+            levels: &[],
+        };
+        let mesh = facing_quad([0.0, 0.0, -1.0], true);
+        let painted = |scale: [f32; 2]| {
+            paint_detailed(
+                &detail_scene(Material {
+                    color: [0.25, 0.25, 0.25, 1.0],
+                    specular: 0.0,
+                    detail: Some(TILE),
+                    detail_scale: scale,
+                    ..Material::default()
+                }),
+                &mesh,
+                &tile,
+            )
+        };
+        let red =
+            |picture: &[u8], column: usize, row: usize| i32::from(picture[(row * 16 + column) * 4]);
+        // what is flat is this much brighter than what tilts
+        let brighter = |picture: &[u8], flat_at: (usize, usize), steep_at: (usize, usize)| {
+            let gap = red(picture, flat_at.0, flat_at.1) - red(picture, steep_at.0, steep_at.1);
+            assert!(gap > 8, "{flat_at:?} over {steep_at:?}: {gap}");
+        };
+        // once across: the picture's bottom left and top right quarters are the flat texels
+        // (row 12 is v 0.22, row 4 is v 0.72)
+        let once = painted([1.0, 1.0]);
+        brighter(&once, (3, 12), (11, 12));
+        brighter(&once, (11, 4), (3, 4));
+        // twice along u only: four columns of texels across, still two rows
+        let twice_across = painted([2.0, 1.0]);
+        brighter(&twice_across, (1, 12), (5, 12));
+        brighter(&twice_across, (9, 12), (13, 12));
+        brighter(&twice_across, (5, 4), (1, 4));
+        // twice each way: the tile's four texels in each quarter of the picture (row 14 is v
+        // 0.09, row 10 is v 0.34)
+        let twice = painted([2.0, 2.0]);
+        brighter(&twice, (1, 14), (5, 14));
+        brighter(&twice, (9, 14), (13, 14));
+        brighter(&twice, (5, 10), (1, 10));
+        brighter(&twice, (9, 6), (9, 10));
+    }
+
+    #[test]
+    fn a_detail_tile_is_read_at_the_level_its_own_repeats_ask_for() {
+        // a 64-texel texture over a quad 16 pixels wide is four texels a pixel: level 2; every
+        // doubling of its repeats along one axis is half a level more, along both a whole one
+        let blank = vec![255u8; 64 * 64 * 4];
+        let levels = mip_chain(&blank, 64, 64, None);
+        let texture = TextureRef {
+            w: 64,
+            h: 64,
+            rgba: &blank,
+            levels: &levels,
+        };
+        let corner = |x: f32, y: f32, u: f32, v: f32| ClipVertex {
+            clip: [x, y, 0.5, 1.0],
+            world: [x, y, 0.5],
+            normal: [0.0, 0.0, -1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            uv: [u, v],
+            curvature: 0.0,
+        };
+        let corners = [
+            corner(-1.0, -1.0, 0.0, 0.0),
+            corner(1.0, -1.0, 1.0, 0.0),
+            corner(1.0, 1.0, 1.0, 1.0),
+        ];
+        let level = |repeats: [f32; 2]| {
+            triangle_lod(
+                [&corners[0], &corners[1], &corners[2]],
+                &texture,
+                repeats,
+                16,
+                16,
+                1.0,
+            )
+        };
+        assert!(
+            (level([1.0, 1.0]) - 2.0).abs() < 1e-4,
+            "{}",
+            level([1.0, 1.0])
+        );
+        assert!(
+            (level([4.0, 4.0]) - 4.0).abs() < 1e-4,
+            "{}",
+            level([4.0, 4.0])
+        );
+        assert!(
+            (level([4.0, 1.0]) - 3.0).abs() < 1e-4,
+            "{}",
+            level([4.0, 1.0])
+        );
+        assert_eq!(level([0.125, 0.125]), 0.0, "magnified: its own size");
+    }
+
+    #[test]
+    fn a_detail_tile_far_away_fades_into_the_surface_without_it() {
+        // an 8×8 tile whose left half tilts one way and its right half the other, as much,
+        // half its pores closed: its mip chain averages it down to one texel that does not
+        // tilt (the byte 128 exactly, not renormalised, not treated as colour) and is half open
+        let side = 8usize;
+        let rgba: Vec<u8> = (0..side * side)
+            .flat_map(|index| {
+                let leftward = index % side < side / 2;
+                [
+                    if leftward { 228 } else { 28 },
+                    128,
+                    if leftward { 0 } else { 255 },
+                    255,
+                ]
+            })
+            .collect();
+        let levels = mip_chain(&rgba, side as u32, side as u32, None);
+        assert_eq!(levels.len(), 3);
+        assert_eq!(levels[2].rgba, vec![128, 128, 128, 255]);
+        assert_eq!(
+            &levels[0].rgba[..4],
+            &[228, 128, 0, 255],
+            "a level is plain averages"
+        );
+        let tile = TextureRef {
+            w: side as u32,
+            h: side as u32,
+            rgba: &rgba,
+            levels: &levels,
+        };
+        let mesh = facing_quad([0.0, 0.0, -1.0], true);
+        let shiny = Material {
+            color: [0.25, 0.25, 0.25, 1.0],
+            roughness: 0.4,
+            ..Material::default()
+        };
+        let painted = |repeats: f32, cavity: f32| {
+            paint_detailed(
+                &detail_scene(Material {
+                    detail: Some(TILE),
+                    detail_scale: [repeats; 2],
+                    detail_cavity: cavity,
+                    ..shiny.clone()
+                }),
+                &mesh,
+                &tile,
+            )
+        };
+        let without = paint_detailed(&detail_scene(shiny.clone()), &mesh, &tile);
+        // the quad is 16 pixels wide: `repeats` of the 8-texel tile are `repeats / 2` texels a
+        // pixel, level log2(repeats / 2). Up close (level 0) the tile shows; between its last
+        // two levels (2.5) it shows less; from its last level (3) on it is gone, bit for bit
+        let near = apart_in_all(&painted(1.0, 0.0), &without);
+        let fading = apart_in_all(&painted(2.0 * 2.5f32.exp2(), 0.0), &without);
+        assert!(near > fading && fading > 0, "near {near}, fading {fading}");
+        assert!(furthest_apart(&painted(16.0, 0.0), &without) <= 1);
+        assert_eq!(painted(64.0, 0.0), without);
+        // its cavity fades to the tile's mean, not to nothing: a surface of pores reflects
+        // less than one without at any distance
+        let half_open = [128u8, 128, 128, 255];
+        let mean = paint_detailed(
+            &detail_scene(Material {
+                detail: Some(TILE),
+                ..shiny.clone()
+            }),
+            &mesh,
+            &one_texel(&half_open),
+        );
+        assert_eq!(painted(64.0, 1.0), mean);
+        assert!(furthest_apart(&mean, &without) > 2, "the mean cavity shows");
+    }
+
+    #[test]
+    fn hair_reads_no_detail_tile() {
+        // a `:hair` or `:strands` surface's tangents are its strands, and its light its own
+        for surface in [Surface::Hair, Surface::Strands] {
+            let material = Material {
+                surface,
+                detail: Some(TILE),
+                ..Material::default()
+            };
+            assert_eq!(material.detail_texture(), None);
+        }
+        for surface in [
+            Surface::Skin,
+            Surface::Standard,
+            Surface::Cutout,
+            Surface::Blend,
+        ] {
+            let material = Material {
+                surface,
+                detail: Some(TILE),
+                ..Material::default()
+            };
+            assert_eq!(material.detail_texture(), Some(TILE));
+        }
+        assert_eq!(Material::default().detail_texture(), None);
     }
 
     /// What morphing costs at a real figure's size (womanblend's body: 70,737 vertices, 37 face

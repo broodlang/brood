@@ -151,6 +151,73 @@ fn the_mesh_shader_validates() {
     );
     assert_eq!(scenes::VERTEX_FLOATS, 21, "a vertex carries its curvature");
     assert!(MESH_SRC.contains("@location(6) curvature: f32"));
+    // ADR-797: `draw_uniform` packs exactly the struct the shader declares, the detail tile's
+    // settings its last four floats; the shader's flat texel is the CPU painter's
+    use crate::host::gui::mesh::{DETAIL_FLAT, Draw, Material};
+    let draw = Draw {
+        mesh: 1,
+        model: [0.0; 16],
+        palette: None,
+        morphs: Vec::new(),
+        material: Material {
+            detail: Some(3),
+            detail_scale: [60.0, 30.0],
+            detail_strength: 0.5,
+            detail_cavity: 0.25,
+            ..Material::default()
+        },
+    };
+    let packed = scenes::draw_uniform(&draw, [0; 4], [0; 4]);
+    assert_eq!(
+        packed.len() as u64,
+        draw_declared,
+        "DrawU is {draw_declared} bytes, draw_uniform packs {}",
+        packed.len()
+    );
+    let detail: Vec<f32> = packed[packed.len() - 16..]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| f32::from_le_bytes(*word))
+        .collect();
+    assert_eq!(detail, [60.0, 30.0, 0.5, 0.25]);
+    assert!(MESH_SRC.contains("detail: vec4<f32>,"));
+    assert!(MESH_SRC.contains("const DETAIL_FLAT = 128.0 / 255.0;"));
+    assert_eq!(DETAIL_FLAT, 128.0 / 255.0);
+    assert!(MESH_SRC.contains("@group(3) @binding(4) var detail_texture: texture_2d<f32>;"));
+}
+
+#[test]
+fn a_draws_texture_bits_say_which_textures_it_has_and_how_each_was_uploaded() {
+    // ADR-797: the shader reads these bits by number (`fs_mesh`): 1 and 2 the base texture and
+    // whether it is premultiplied, 4 and 8 the normal map, 16 and 32 the occlusion map, 64 and
+    // 128 the detail tile, 256 that the tile's normal tilts (the mesh has tangents)
+    use scenes::texture_bits;
+    assert_eq!(texture_bits([None; 4], true), 0);
+    assert_eq!(texture_bits([Some(false), None, None, None], false), 1);
+    assert_eq!(texture_bits([Some(true), None, None, None], false), 3);
+    assert_eq!(texture_bits([None, Some(true), None, None], true), 12);
+    assert_eq!(texture_bits([None, None, Some(false), None], true), 16);
+    assert_eq!(
+        texture_bits([None, None, None, Some(true)], true),
+        64 | 128 | 256
+    );
+    assert_eq!(
+        texture_bits([None, None, None, Some(false)], true),
+        64 | 256
+    );
+    // without tangents the tile's cavity is still read, its normal not
+    assert_eq!(
+        texture_bits([None, None, None, Some(true)], false),
+        64 | 128
+    );
+    assert_eq!(texture_bits([Some(true); 4], true), 511);
+    for bit in ["4u", "8u", "16u", "32u", "64u", "128u", "256u"] {
+        assert!(
+            MESH_SRC.contains(&format!("(draw.flags.y & {bit}) != 0u")),
+            "the shader reads bit {bit}"
+        );
+    }
 }
 
 #[test]

@@ -83,6 +83,16 @@ travels under the skin (default 1: human skin on a mesh in metres; 0: none), and
 an error raised by `gui/draw`; `:wrap` is gone and ignored. Skin no longer turns red-brown at
 grazing angles.
 
+**Added: a detail tile for materials (ADR-797).** A material's `:detail` is a small texture of
+fine relief (pores, a weave, a grain) read `:detail-scale` times across the UV square, for what
+a map baked over a whole body is too coarse to hold: red and green a tangent-space normal's x
+and y (the byte 128 is no tilt), blue the cavity (1 open, 0 in a pore), alpha opaque, linear.
+Its normal is laid over the `:normal` map's (or the bare surface) as a second height field,
+its slope times `:detail-strength`; its cavity damps the specular and the rim by
+`:detail-cavity`, never the diffuse. Uploaded `{:filter :smooth}` it fades into its average with
+distance. Any surface but `:hair` and `:strands`; a malformed key is an error raised by
+`gui/draw`. A material without `:detail` draws exactly as before.
+
 ## v0.59.0 — shadow like other languages, named fn, smooth textures, 3D meshes
 
 **Added: smooth textures (ADR-783).** `(gui/texture id image {:filter :smooth})` — and the same

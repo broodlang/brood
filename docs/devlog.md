@@ -2820,3 +2820,34 @@ curvature; red past the terminator at a finger's 8 mm radius 0.0195 against blue
 band on a thigh), the curvature of a sphere (1/r exactly) and of a seamed strip, and her legs and
 face on the GPU before and after. Run here: build, fmt, clippy, check-desktop; the tests are
 written and compile but were NOT run (desktop rule) — CI's.
+
+2026-11-24. **A detail tile for materials: a tiled micro-normal whose cavity damps the specular
+(ADR-797).** womanblend's figure bakes one normal map for her whole body at half a millimetre a
+texel, too coarse for pores, so close up her skin read smooth as plastic. A material's `:detail`
+is now a small tile read `:detail-scale` times across the UVs: red and green a tangent-space
+normal's x and y (the byte 128 is no tilt, so a flat tile is exactly nothing), blue the cavity.
+Its normal is laid over the normal map's by the partial-derivative blend (two height fields
+added: slopes add), its slope times `:detail-strength`; its cavity multiplies the specular and
+the rim by `1 − :detail-cavity × (1 − cavity)` and leaves the diffuse alone. It is sampled at
+its own scaled coordinates, so its mip level follows them in both painters (`triangle_lod`
+takes the repeats; the GPU's derivatives are the scaled UVs') and it fades into its average
+with distance: flat, and the tile's mean cavity. A fifth texture in the material group through
+the sampler that was already repeating; `DrawU` is 192 of 256 bytes; the three new keys and the
+handle are parsed strictly. Not read by `:hair` or `:strands`. `draw_uniform` and
+`texture_bits` came out of `MeshGpu::render` as functions so a test holds them to the shader.
+Checked: the arithmetic by a standalone calculation (a flat byte through the sampler is no tilt
+to the bit; a flat tile over a bumped normal is that normal bit for bit; θ becomes
+atan(strength × tan θ) to 1e-7; slopes add; `log2` of the level ratios exact; the byte gaps the
+painted tests assert), and on womanblend on the GPU (so the shader validated on a real device):
+her face at 0.3 m and her legs at 1.3 m, before and after, and split by term. Her tile
+(`blender/export/skin/detail.png`, cells about 50 of its 1024 texels) at `:detail-scale 60` is
+barely there at strength 1 and reads as fine pores on the nose and cheeks at
+`:detail-strength 2.0`; scale 40 at 1.5 is bolder (cells 2 mm, a little orange-peel); scale
+120 is under a pixel at that distance and has faded out, as it should. At 1.3 m nothing
+glitters and the normal's effect is gone; the specular keeps the tile's mean cavity (0.83), a
+slightly less oily sheen. Found on the way: womanblend's tongue material still has the old
+`:scatter [r g b]`, which ADR-794 refuses, so the game draws nothing on a build from main until
+it is a number (shots were taken with a temporary acceptance of it, removed again); and after
+that refusal the process segfaults on the `brood-gui` thread at exit instead of just raising.
+Run here: build, fmt, clippy, check-desktop's static gates; the tests are written and compile
+but were NOT run (desktop rule) — CI's.
