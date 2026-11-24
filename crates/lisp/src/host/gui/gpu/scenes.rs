@@ -423,6 +423,9 @@ impl MeshGpu {
                 address_mode_v: wgpu::AddressMode::Repeat,
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
+                // trilinear through a smooth texture's mip chain (`mesh::mip_chain`), as the
+                // CPU painter's `sample_lod`
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
                 ..Default::default()
             }),
             meshes: HashMap::new(),
@@ -696,6 +699,7 @@ impl MeshGpu {
                     Surface::Standard => 1,
                     Surface::Cutout => 2,
                     Surface::Blend => 3,
+                    Surface::Hair => 4,
                 };
                 let premultiplied = |texture: Option<&GpuTexture>| {
                     texture.is_some_and(|texture| texture.filter == TextureFilter::Smooth)

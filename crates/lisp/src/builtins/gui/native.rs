@@ -1608,6 +1608,7 @@ fn scene_spec(
                 "skin" => Surface::Skin,
                 "cutout" => Surface::Cutout,
                 "blend" => Surface::Blend,
+                "hair" => Surface::Hair,
                 _ => Surface::Standard,
             };
         }

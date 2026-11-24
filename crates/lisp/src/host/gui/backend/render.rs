@@ -319,6 +319,27 @@ pub(super) struct CpuTexture {
     pub(super) h: u32,
     pub(super) rgba: Vec<u8>,
     pub(super) filter: TextureFilter,
+    /// A smooth texture's mip chain, which a scene samples it through (`mesh::mip_chain`);
+    /// none for a nearest one.
+    pub(super) mips: Vec<crate::host::gui::mesh::MipLevel>,
+}
+
+impl CpuTexture {
+    /// `rgba` (`w`×`h` straight-alpha bytes) kept for the CPU painter, with its mip chain when
+    /// it is smooth.
+    pub(super) fn new(w: u32, h: u32, rgba: Vec<u8>, filter: TextureFilter) -> CpuTexture {
+        let mips = match filter {
+            TextureFilter::Smooth => crate::host::gui::mesh::mip_chain(&rgba, w, h),
+            TextureFilter::Nearest => Vec::new(),
+        };
+        CpuTexture {
+            w,
+            h,
+            rgba,
+            filter,
+            mips,
+        }
+    }
 }
 
 impl Renderer {
@@ -366,16 +387,12 @@ impl Renderer {
                             w: t.w,
                             h: t.h,
                             rgba: &t.rgba,
+                            levels: &t.mips,
                         })
                 });
             self.scene_pictures.push((
                 scene.clone(),
-                CpuTexture {
-                    w,
-                    h,
-                    rgba,
-                    filter: TextureFilter::Nearest,
-                },
+                CpuTexture::new(w, h, rgba, TextureFilter::Nearest),
             ));
         }
     }

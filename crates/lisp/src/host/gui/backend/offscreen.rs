@@ -327,7 +327,7 @@ impl Painter {
                     window
                         .renderer
                         .textures
-                        .insert(tex, CpuTexture { w, h, rgba, filter });
+                        .insert(tex, CpuTexture::new(w, h, rgba, filter));
                     window.renderer.forget_scene_pictures();
                 }
             }

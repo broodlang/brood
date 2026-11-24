@@ -54,6 +54,16 @@ pub const OCCLUSION_TAPS: usize = 16;
 /// The largest side, in texels, of the camera's depth view the ambient occlusion reads: it
 /// only needs the scene's shape, not its pixels.
 pub const MAX_OCCLUSION_SIDE: u32 = 2048;
+/// How far a `:hair` surface's two highlights are shifted along its normal, as a share of the
+/// strand direction (the first toward the root, the second toward the tip), and how much
+/// broader the second is (its exponent this share of the first's).
+pub const HAIR_SHIFT_PRIMARY: f32 = -0.08;
+pub const HAIR_SHIFT_SECONDARY: f32 = 0.12;
+pub const HAIR_SECONDARY_SHARPNESS: f32 = 0.25;
+/// The coverage each of a 2×2 block of CPU samples needs to be drawn by a `:hair` surface (an
+/// ordered dither, row by row; the GPU target's samples 0 … 3 in the same places).
+pub const HAIR_COVERAGE_STEPS: [[f32; 2]; 2] = [[0.125, 0.625], [0.875, 0.375]];
+
 /// The reach of the ambient occlusion, in metres, when `:ambient-occlusion` names none: the
 /// size of the folds it darkens (a mouth's corner, a crease beside the nose).
 pub const DEFAULT_OCCLUSION_RADIUS: f32 = 0.03;
@@ -474,6 +484,16 @@ pub enum Surface {
     /// Standard, blended over what is behind it by its alpha, after every other surface and
     /// without writing depth (hair cards).
     Blend,
+    /// Hair: lit along its strands (the direction its mesh's bitangent runs, which a hair card's
+    /// UV v follows from tip to root), with two highlights across them, a sharp white one
+    /// shifted toward the root and a softer one tinted by the hair toward the tip
+    /// (Kajiya-Kay, as Scheuermann shifts it), over a diffuse that light partly passes
+    /// through. Its alpha is coverage: past half its `cutoff` a texel covers part of the
+    /// pixel, all of it at one and a half `cutoff`s — that many of the GPU target's 4 samples
+    /// (its sample mask) or the CPU painter's 2×2 sub-samples, each a step of
+    /// `HAIR_COVERAGE_STEPS` — so fine strands thin out instead of stair-stepping; it is opaque
+    /// where it covers, writing depth, drawn with the solid surfaces.
+    Hair,
 }
 
 /// A draw's material: the fixed shading model's parameters.
@@ -835,7 +855,8 @@ pub fn light_arrival(light: &Light, world: [f32; 3]) -> ([f32; 3], f32) {
 /// linear colour, `normal` its unit normal facing the viewer's side, `view` the unit
 /// direction from it to the eye, `world` where it is, `visibility` how much of each light (by
 /// index) its shadow lets through — 1 for a light it holds no entry for — and `occlusion` how
-/// much of the ambient light reaches it ([`ambient_occlusion`]; 1 for all of it).
+/// much of the ambient light reaches it ([`ambient_occlusion`]; 1 for all of it); `strand`, a
+/// `:hair` surface's unit strand direction (unused by the others).
 #[allow(clippy::too_many_arguments)]
 pub fn shade(
     scene: &Scene,
@@ -846,6 +867,7 @@ pub fn shade(
     world: [f32; 3],
     visibility: &[f32],
     occlusion: f32,
+    strand: [f32; 3],
 ) -> [f32; 3] {
     let up = normal[1] * 0.5 + 0.5;
     let mut out = [0.0f32; 3];
@@ -866,6 +888,24 @@ pub fn shade(
             to_light[1] + view[1],
             to_light[2] + view[2],
         ]);
+        if material.surface == Surface::Hair {
+            // across the strand, shifted along the normal: sin of its angle to the half vector,
+            // sharpened; on the lit side only, the diffuse wrapped (light passes through hair)
+            let highlight = |shift: f32, sharpness: f32| {
+                let shifted = normalize([0, 1, 2].map(|axis| strand[axis] + normal[axis] * shift));
+                let along = dot(shifted, half);
+                (1.0 - along * along).max(0.0).sqrt().powf(sharpness)
+            };
+            let primary = highlight(HAIR_SHIFT_PRIMARY, exponent);
+            let secondary = highlight(HAIR_SHIFT_SECONDARY, exponent * HAIR_SECONDARY_SHARPNESS);
+            let lit_side = (facing + 0.25).clamp(0.0, 1.0);
+            let diffuse = (0.25 + 0.75 * facing).clamp(0.0, 1.0);
+            for channel in 0..3 {
+                let shine = material.specular * lit_side * (primary + secondary * base[channel]);
+                out[channel] += light.color[channel] * arriving * (base[channel] * diffuse + shine);
+            }
+            continue;
+        }
         let specular =
             material.specular * normalisation * dot(normal, half).max(0.0).powf(exponent) * lambert;
         for channel in 0..3 {
@@ -1561,6 +1601,67 @@ pub struct TextureRef<'a> {
     pub w: u32,
     pub h: u32,
     pub rgba: &'a [u8],
+    /// Its mip chain ([`mip_chain`]): empty for a texture sampled at its own size only.
+    pub levels: &'a [MipLevel],
+}
+
+/// One level of a texture's mip chain below its own size: half the size of the level above
+/// (rounded down, at least 1), straight-alpha RGBA bytes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MipLevel {
+    pub w: u32,
+    pub h: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// The mip chain of a smooth texture (`w`×`h` straight-alpha `rgba`), every level below its own
+/// down to 1×1: each texel the average of the (up to) four under it, weighted by their alpha —
+/// premultiplied, so a transparent texel's colour does not bleed into a strand's edge — so a
+/// texture seen small (fine hair, far away) reads as its average, not as the few texels that
+/// happen to land on a pixel (aliasing: crimp and glitter). Alpha averages too: what a
+/// `:hair` surface's coverage reads. Both painters sample these levels (the GPU target
+/// uploads them; ADR-786).
+pub fn mip_chain(rgba: &[u8], w: u32, h: u32) -> Vec<MipLevel> {
+    let mut levels: Vec<MipLevel> = Vec::new();
+    let (mut width, mut height) = (w as usize, h as usize);
+    if rgba.len() < width * height * 4 {
+        return levels;
+    }
+    while width > 1 || height > 1 {
+        let (next_width, next_height) = ((width / 2).max(1), (height / 2).max(1));
+        let above = levels.last().map_or(rgba, |level| level.rgba.as_slice());
+        let mut out = vec![0u8; next_width * next_height * 4];
+        for row in 0..next_height {
+            for column in 0..next_width {
+                let mut sum = [0.0f32; 4];
+                for (step_row, step_column) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                    let source_row = (row * 2 + step_row).min(height - 1);
+                    let source_column = (column * 2 + step_column).min(width - 1);
+                    let start = (source_row * width + source_column) * 4;
+                    let alpha = f32::from(above[start + 3]) / 255.0;
+                    for channel in 0..3 {
+                        sum[channel] += f32::from(above[start + channel]) * alpha;
+                    }
+                    sum[3] += alpha;
+                }
+                let start = (row * next_width + column) * 4;
+                if sum[3] > 1e-6 {
+                    for channel in 0..3 {
+                        out[start + channel] =
+                            (sum[channel] / sum[3]).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+                out[start + 3] = (sum[3] / 4.0 * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        levels.push(MipLevel {
+            w: next_width as u32,
+            h: next_height as u32,
+            rgba: out,
+        });
+        (width, height) = (next_width, next_height);
+    }
+    levels
 }
 
 /// A texel bilinearly filtered at `(u, v)` (repeating), each channel 0 … 1, still encoded.
@@ -1605,6 +1706,96 @@ fn sample(texture: &TextureRef, u: f32, v: f32) -> [f32; 4] {
         }
     }
     out
+}
+
+/// A texel trilinearly filtered at `(u, v)`: bilinear in the two levels of `texture`'s mip
+/// chain about `lod` (0 its own size, 1 the first level below, …), mixed premultiplied — as
+/// the GPU target's mesh sampler filters. Straight alpha out, still encoded.
+fn sample_lod(texture: &TextureRef, u: f32, v: f32, lod: f32) -> [f32; 4] {
+    let lod = lod.clamp(0.0, texture.levels.len() as f32);
+    let level = |index: usize| {
+        let texel = if index == 0 {
+            sample(texture, u, v)
+        } else {
+            let below = &texture.levels[index - 1];
+            sample(
+                &TextureRef {
+                    w: below.w,
+                    h: below.h,
+                    rgba: &below.rgba,
+                    levels: &[],
+                },
+                u,
+                v,
+            )
+        };
+        [
+            texel[0] * texel[3],
+            texel[1] * texel[3],
+            texel[2] * texel[3],
+            texel[3],
+        ]
+    };
+    let lower = lod.floor() as usize;
+    let fraction = lod - lower as f32;
+    let near = level(lower);
+    let mixed = if fraction > 0.0 && lower < texture.levels.len() {
+        let far = level(lower + 1);
+        [0, 1, 2, 3].map(|channel| near[channel] + (far[channel] - near[channel]) * fraction)
+    } else {
+        near
+    };
+    if mixed[3] > 1e-6 {
+        [
+            mixed[0] / mixed[3],
+            mixed[1] / mixed[3],
+            mixed[2] / mixed[3],
+            mixed[3],
+        ]
+    } else {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+}
+
+/// The mip level a triangle samples `texture` at: half the base-2 logarithm of how many of
+/// its texels fall on one of the picture's pixels (`supersample` canvas pixels a side), 0
+/// when it is magnified. One level for the whole triangle (the GPU target's sampler picks one
+/// a 2×2 block of pixels; on a mesh's small triangles they agree).
+fn triangle_lod(
+    corners: [&ClipVertex; 3],
+    texture: &TextureRef,
+    width: usize,
+    height: usize,
+    supersample: f32,
+) -> f32 {
+    if texture.levels.is_empty() {
+        return 0.0;
+    }
+    let pixel = |vertex: &ClipVertex| {
+        let inverse_w = 1.0 / vertex.clip[3];
+        [
+            (vertex.clip[0] * inverse_w * 0.5 + 0.5) * width as f32,
+            (0.5 - vertex.clip[1] * inverse_w * 0.5) * height as f32,
+        ]
+    };
+    let texel = |vertex: &ClipVertex| {
+        [
+            vertex.uv[0] * texture.w as f32,
+            vertex.uv[1] * texture.h as f32,
+        ]
+    };
+    let area = |points: [[f32; 2]; 3]| {
+        ((points[1][0] - points[0][0]) * (points[2][1] - points[0][1])
+            - (points[2][0] - points[0][0]) * (points[1][1] - points[0][1]))
+            .abs()
+            * 0.5
+    };
+    let screen = area(corners.map(pixel)) / (supersample * supersample);
+    let texels = area(corners.map(texel));
+    if screen <= 1e-9 || texels <= 1e-9 {
+        return 0.0;
+    }
+    (0.5 * (texels / screen).log2()).max(0.0)
 }
 
 fn transform(matrix: &[f32; 16], point: [f32; 3], w: f32) -> [f32; 4] {
@@ -1735,6 +1926,8 @@ struct DrawContext<'a> {
     normal_texture: Option<TextureRef<'a>>,
     shadows: &'a ShadowPlan,
     shadow_maps: &'a [Vec<f32>],
+    /// Canvas pixels a side to one of the picture's (the texture level a triangle reads).
+    supersample: f32,
 }
 
 /// The pixels of a `width`×`height` picture whose centres `corners` (already clipped in front
@@ -1872,6 +2065,13 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
     let scene = context.scene;
     let lights = scene.lights.len().min(MAX_LIGHTS);
     let (width, height) = (canvas.width, canvas.height);
+    // the mip level each texture is read at, for the whole triangle
+    let base_lod = context.base_texture.as_ref().map_or(0.0, |texture| {
+        triangle_lod(corners, texture, width, height, context.supersample)
+    });
+    let normal_lod = context.normal_texture.as_ref().map_or(0.0, |texture| {
+        triangle_lod(corners, texture, width, height, context.supersample)
+    });
     scan_triangle(
         width,
         height,
@@ -1892,10 +2092,9 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                 })
             };
             let uv = blend_uv(corners, weights);
-            let texel = context
-                .base_texture
-                .as_ref()
-                .map_or([1.0; 4], |texture| sample(texture, uv[0], uv[1]));
+            let texel = context.base_texture.as_ref().map_or([1.0; 4], |texture| {
+                sample_lod(texture, uv[0], uv[1], base_lod)
+            });
             let mut alpha = texel[3] * material.color[3];
             match material.surface {
                 Surface::Cutout => {
@@ -1908,6 +2107,16 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     if alpha <= 0.002 {
                         return;
                     }
+                }
+                // coverage, past half the cutoff: drawn at this sample when it reaches its step of
+                // the 2×2 dither, then opaque (the GPU target's alpha-to-coverage)
+                Surface::Hair => {
+                    let coverage = ((alpha - 0.5 * material.cutoff) / material.cutoff.max(1e-6))
+                        .clamp(0.0, 1.0);
+                    if coverage <= HAIR_COVERAGE_STEPS[row % 2][column % 2] {
+                        return;
+                    }
+                    alpha = 1.0;
                 }
                 Surface::Skin | Surface::Standard => alpha = 1.0,
             }
@@ -1929,7 +2138,7 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]]
                 }));
                 let bitangent = cross(normal, tangent);
-                let texel = sample(map, uv[0], uv[1]);
+                let texel = sample_lod(map, uv[0], uv[1], normal_lod);
                 let local = [
                     texel[0] * 2.0 - 1.0,
                     texel[1] * 2.0 - 1.0,
@@ -1954,6 +2163,20 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     );
                 }
             }
+            // a hair's strand: the bitangent, as its UV v runs
+            let strand = if material.surface == Surface::Hair {
+                let tangent = normalize(blend3(|vertex| {
+                    [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]]
+                }));
+                let bitangent = cross(surface_normal, tangent);
+                normalize([
+                    bitangent[0] * sign,
+                    bitangent[1] * sign,
+                    bitangent[2] * sign,
+                ])
+            } else {
+                [0.0; 3]
+            };
             let occlusion = ambient_occlusion(
                 scene,
                 context.shadows,
@@ -1973,6 +2196,7 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     world,
                     &visibility,
                     occlusion,
+                    strand,
                 ),
                 scene.exposure,
             );
@@ -2057,8 +2281,8 @@ fn each_clipped_triangle(
 }
 
 /// The depth map of shadow `view`: every draw of `posed` that casts a shadow, rasterised as
-/// the light sees it, both faces, a `:cutout` or `:blend` surface only where its alpha reaches
-/// its `cutoff` — `resolution`² depths, row 0 the top, 1 where nothing is.
+/// the light sees it, both faces, a `:cutout`, `:blend` or `:hair` surface only where its alpha
+/// reaches its `cutoff` — `resolution`² depths, row 0 the top, 1 where nothing is.
 fn render_shadow_map<'t>(
     view: &ShadowView,
     posed: &[Posed],
@@ -2071,7 +2295,10 @@ fn render_shadow_map<'t>(
         if !material.cast_shadow {
             continue;
         }
-        let alpha_tested = matches!(material.surface, Surface::Cutout | Surface::Blend);
+        let alpha_tested = matches!(
+            material.surface,
+            Surface::Cutout | Surface::Blend | Surface::Hair
+        );
         let base_texture = if alpha_tested {
             material.base.and_then(textures)
         } else {
@@ -2183,6 +2410,7 @@ pub fn rasterize<'t>(
             },
             shadows: &shadows,
             shadow_maps: &shadow_maps,
+            supersample: supersample as f32,
         };
         each_clipped_triangle(&item.mesh, &item.vertices, |corners| {
             fill_triangle(&mut canvas, &context, corners)
@@ -2459,6 +2687,7 @@ mod tests {
             [0.0; 3],
             &[],
             1.0,
+            [0.0; 3],
         );
         let wrapped = shade(
             &scene,
@@ -2469,12 +2698,152 @@ mod tests {
             [0.0; 3],
             &[],
             1.0,
+            [0.0; 3],
         );
         assert!(wrapped[0] > plain[0] + 0.2, "red wraps round");
         assert!(
             wrapped[0] - plain[0] > wrapped[2] - plain[2],
             "more red than blue"
         );
+    }
+
+    #[test]
+    fn a_mip_level_averages_by_coverage_and_lets_no_transparent_colour_in() {
+        // red opaque, a transparent green, blue opaque, white half covered
+        let rgba = [
+            255, 0, 0, 255, 0, 255, 0, 0, //
+            0, 0, 255, 255, 255, 255, 255, 127,
+        ];
+        let levels = mip_chain(&rgba, 2, 2);
+        assert_eq!(levels.len(), 1, "2×2 down to 1×1");
+        let texel = &levels[0].rgba;
+        // the colour weighed by alpha (1, 0, 1, about 0.5 of 2.5): red and blue 1.5 / 2.5, green
+        // 0.5 / 2.5 (none from the transparent texel); alpha the plain average
+        assert_eq!(texel.as_slice(), &[153, 51, 153, 159]);
+        assert_eq!(mip_chain(&[0; 4 * 5 * 3], 5, 3).len(), 2, "5×3 → 2×1 → 1×1");
+    }
+
+    #[test]
+    fn a_fine_texture_seen_small_reads_as_its_average() {
+        // a 1-texel black and white checker, 61 texels across a quad drawn over a 16-pixel
+        // picture: nearly four texels to a pixel each way, read from its mip levels 1 and 2,
+        // where every texel is the checker's grey (without them it would alias into bands)
+        let side = 61usize;
+        let rgba: Vec<u8> = (0..side * side)
+            .flat_map(|index| {
+                let value = if (index / side + index % side).is_multiple_of(2) {
+                    255
+                } else {
+                    0
+                };
+                [value, value, value, 255]
+            })
+            .collect();
+        let levels = mip_chain(&rgba, side as u32, side as u32);
+        let mut parts = MeshParts {
+            positions: bytes_of(&[
+                -1.0, -1.0, 0.5, 1.0, -1.0, 0.5, 1.0, 1.0, 0.5, -1.0, 1.0, 0.5,
+            ]),
+            uvs: bytes_of(&[0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]),
+            ..MeshParts::default()
+        };
+        parts.indices = [0u16, 1, 2, 0, 2, 3]
+            .iter()
+            .flat_map(|index| index.to_le_bytes())
+            .collect();
+        let mesh = Arc::new(Mesh::from_parts(parts).unwrap());
+        let mut seen = scene(Draw {
+            material: Material {
+                base: Some(3),
+                double_sided: true,
+                ..Material::default()
+            },
+            ..draw()
+        });
+        seen.lights = Vec::new();
+        seen.sky = [1.0; 3];
+        seen.ground = [1.0; 3];
+        let picture = rasterize(&seen, &|_| Some(mesh.clone()), &|handle| {
+            (handle == 3).then_some(TextureRef {
+                w: side as u32,
+                h: side as u32,
+                rgba: &rgba,
+                levels: &levels,
+            })
+        })
+        .2;
+        let reds = |picture: &[u8]| -> Vec<i32> {
+            (2..14)
+                .map(|column| i32::from(picture[(8 * 16 + column) * 4]))
+                .collect()
+        };
+        let row = reds(&picture);
+        let spread = row.iter().max().unwrap() - row.iter().min().unwrap();
+        assert!(spread <= 2, "an even grey across the picture: {row:?}");
+        assert!(
+            row.iter().all(|red| (60..200).contains(red)),
+            "grey, neither the checker's black nor its white: {row:?}"
+        );
+    }
+
+    #[test]
+    fn hair_shines_across_its_strands_and_not_along_them() {
+        let lit = scene(draw());
+        let hair = Material {
+            surface: Surface::Hair,
+            roughness: 0.3,
+            specular: 1.0,
+            ..Material::default()
+        };
+        // lit and seen straight on (half vector +z): a strand across it (along x) shines, one
+        // pointing along it does not
+        let normal = [0.0, 0.0, 1.0];
+        let shine = |strand: [f32; 3]| {
+            shade(
+                &lit,
+                &hair,
+                [0.2; 3],
+                normal,
+                normal,
+                [0.0; 3],
+                &[],
+                1.0,
+                strand,
+            )[0]
+        };
+        let across = shine([1.0, 0.0, 0.0]);
+        let along = shine(normalize([0.0, 0.08, 1.0]));
+        assert!(
+            across > along + 0.3,
+            "across its strands {across}, along them {along}"
+        );
+    }
+
+    #[test]
+    fn hair_covers_as_much_of_a_pixel_as_its_alpha() {
+        // a hair card whose alpha is the cutoff: coverage one half, so two of each pixel's
+        // 2×2 sub-samples are drawn and the picture is half covered
+        let mut half = scene(Draw {
+            material: Material {
+                surface: Surface::Hair,
+                cutoff: 0.5,
+                color: [1.0, 1.0, 1.0, 0.5],
+                ..Material::default()
+            },
+            ..draw()
+        });
+        half.background = [0.0; 4];
+        let mesh = Arc::new(triangle());
+        let (_, _, rgba) = rasterize(&half, &|_| Some(mesh.clone()), &|_| None);
+        let alpha = alpha_at(&rgba, 8, 9);
+        assert!(
+            (alpha as i32 - 128).abs() <= 1,
+            "half the samples covered: alpha {alpha}"
+        );
+        // past one and a half cutoffs, all of it
+        half.draws[0].material.color[3] = 0.8;
+        let (_, _, rgba) = rasterize(&half, &|_| Some(mesh.clone()), &|_| None);
+        assert_eq!(alpha_at(&rgba, 8, 9), 255, "fully covered");
     }
 
     #[test]
@@ -2491,6 +2860,7 @@ mod tests {
             [0.0; 3],
             &[],
             1.0,
+            [0.0; 3],
         );
         assert!(lit.iter().all(|channel| channel.is_finite()));
     }
@@ -2508,7 +2878,17 @@ mod tests {
             specular: 0.0,
             ..Material::default()
         };
-        shade(&lit, &material, [1.0; 3], normal, normal, world, &[], 1.0)[0]
+        shade(
+            &lit,
+            &material,
+            [1.0; 3],
+            normal,
+            normal,
+            world,
+            &[],
+            1.0,
+            [0.0; 3],
+        )[0]
     }
 
     #[test]
@@ -2928,6 +3308,7 @@ mod tests {
                     w: 4,
                     h: 1,
                     rgba: &texture,
+                    levels: &[],
                 })
             };
             let paint_with = |scene: &Scene| {

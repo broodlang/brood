@@ -2682,3 +2682,14 @@ cameras alike). Radius, strength and view ride in the scene uniform's spare four
 card 10 cm over a floor darkens the floor beside its edge and leaves open floor and its own top
 untouched to the byte (CPU), and the GPU draws it as the CPU does (`backend/gpu_scene`). Run here:
 fmt, clippy (`--all-features`); the tests are CI's (desktop rule).
+
+2026-11-24 (ADR-788 follow-up). **Mip chains for smooth textures, and a `:hair` surface.** Strand
+cards crimped and glittered at mid distance (womanblend), smooth up close: no texture had mips,
+so a fine texture seen small read as whichever texels landed on a pixel. Every `:smooth` texture
+now carries a chain (`mip_chain`, alpha-weighted), sampled trilinearly by both painters (the CPU
+one at a level per triangle, `triangle_lod`); sprites still read level 0. `:surface :hair`
+lights strands along the bitangent (Kajiya-Kay with Scheuermann's two shifted highlights) and
+turns alpha into coverage: a sample mask on the GPU, the same steps as a 2×2 dither on the CPU.
+Guards: mip averaging, a fine checker seen small reading as an even grey, the highlight across
+and not along a strand, half coverage drawing half a pixel, and the GPU drawing hair as the CPU
+does. Run here: fmt, clippy (`--all-features`); the tests are CI's (desktop rule).

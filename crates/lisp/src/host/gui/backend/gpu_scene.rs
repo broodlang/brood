@@ -423,3 +423,82 @@ fn ambient_occlusion_draws_on_the_gpu_as_on_the_cpu() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn hair_covers_and_shines_on_the_gpu_as_on_the_cpu() {
+    // seen from above: a 1 m hair card over nothing, half covered (alpha at its cutoff) and
+    // fully covered, lit and seen straight down, its strands running along z (UV v): what
+    // reaches the picture over black, both painters
+    let side = 128u32;
+    let card = Arc::new(square(0.0, 0.5));
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    scene.view_proj = [
+        0.25, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1, 0.0, 0.0, -0.25, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0,
+    ];
+    scene.eye = [0.0, 10.0, 0.0];
+    scene.lights = vec![Light::directional([0.0, -1.0, 0.0], [1.0, 1.0, 1.0])];
+    let hair = |opacity: f32| Draw {
+        mesh: 1,
+        model: [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+        palette: None,
+        morphs: vec![],
+        material: Material {
+            surface: Surface::Hair,
+            double_sided: true,
+            cutoff: 0.5,
+            roughness: 0.4,
+            specular: 0.5,
+            color: [0.8, 0.6, 0.3, opacity],
+            ..Material::default()
+        },
+    };
+    let meshes = |handle: u32| (handle == 1).then(|| card.clone());
+    let centre = ((64 * side + 64) * 4) as usize;
+    let mut cases = Vec::new();
+    for opacity in [0.5f32, 1.0] {
+        scene.draws = vec![hair(opacity)];
+        let (_, _, cpu) = rasterize(&scene, &meshes, &|_| None);
+        // straight alpha over black, as the GPU frame shows it
+        let red = i32::from(cpu[centre]) * i32::from(cpu[centre + 3]) / 255;
+        cases.push((opacity, scene.clone(), red));
+    }
+    assert!(
+        cases[0].2 * 2 < cases[1].2 + 8 && cases[0].2 * 2 > cases[1].2 - 8,
+        "half covered is half as bright over black: {} against {}",
+        cases[0].2,
+        cases[1].2
+    );
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        for (opacity, scene, cpu_red) in &cases {
+            let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+                continue;
+            };
+            gpu.upload_mesh(1, &card);
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            renderer.set_bg(Some([0, 0, 0]));
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            let pixels = gpu.read_pixels();
+            let gpu_red = i32::from(pixels[((64 * side + 64) * 3) as usize]);
+            eprintln!("{name}: hair at opacity {opacity}: cpu {cpu_red} gpu {gpu_red}");
+            if (cpu_red - gpu_red).abs() > 12 {
+                failures.push(format!(
+                    "{name}: opacity {opacity}: GPU {gpu_red} against CPU {cpu_red}"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

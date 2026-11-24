@@ -1007,7 +1007,13 @@ fn ambient_occlusion(world: vec3<f32>, normal: vec3<f32>) -> f32 {
     return clamp(1.0 - scene.ground.w * occluded / 16.0, 0.0, 1.0);
 }
 
-fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32) -> vec3<f32> {
+// a `:hair` highlight (`mesh::shade`): across the strand shifted along the normal, sharpened
+fn hair_highlight(strand: vec3<f32>, normal: vec3<f32>, half_vector: vec3<f32>, shift: f32, sharpness: f32) -> f32 {
+    let along = dot(safe_normalize(strand + normal * shift), half_vector);
+    return pow(sqrt(max(1.0 - along * along, 0.0)), sharpness);
+}
+
+fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, strand: vec3<f32>) -> vec3<f32> {
     let up = normal.y * 0.5 + 0.5;
     var out = base * occlusion * mix(scene.ground.rgb, scene.sky.rgb, up);
     let exponent = shininess(draw.material.x);
@@ -1024,6 +1030,15 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         let facing = dot(normal, to_light);
         let lambert = max(facing, 0.0);
         let half_vector = safe_normalize(to_light + view);
+        if (draw.flags.x == 4u) {
+            let primary = hair_highlight(strand, normal, half_vector, -0.08, exponent);
+            let secondary = hair_highlight(strand, normal, half_vector, 0.12, exponent * 0.25);
+            let lit_side = clamp(facing + 0.25, 0.0, 1.0);
+            let hair_diffuse = clamp(0.25 + 0.75 * facing, 0.0, 1.0);
+            let shine = draw.material.y * lit_side * (vec3<f32>(primary) + secondary * base);
+            out = out + light.color.rgb * arriving * (base * hair_diffuse + shine);
+            continue;
+        }
         let specular = draw.material.y * normalisation * pow(max(dot(normal, half_vector), 0.0), exponent) * lambert;
         var diffuse = vec3<f32>(lambert);
         if (draw.flags.x == 0u) {
@@ -1043,8 +1058,15 @@ fn tone(color: vec3<f32>, exposure: f32) -> vec3<f32> {
     return linear_to_srgb(mapped);
 }
 
+struct MeshFragment {
+    @location(0) color: vec4<f32>,
+    // the samples it covers: all of them, but a `:hair` surface's coverage of its 4 (each
+    // sample a step of `mesh::HAIR_COVERAGE_STEPS`, as the CPU painter's 2×2 sub-samples)
+    @builtin(sample_mask) mask: u32,
+};
+
 @fragment
-fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragment {
     // both textures sampled before any branch (uniform control flow); a missing one is a
     // white or flat-normal pixel bound in its place
     let base_texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
@@ -1063,6 +1085,15 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> @location
     } else {
         alpha = 1.0;
     }
+    var mask = 0xFFFFFFFFu;
+    if (draw.flags.x == 4u) {
+        let coverage = clamp((texel.a * draw.color.a - 0.5 * draw.material.w) / max(draw.material.w, 1e-6), 0.0, 1.0);
+        mask = select(0u, 1u, coverage > 0.125) | select(0u, 2u, coverage > 0.625)
+            | select(0u, 4u, coverage > 0.875) | select(0u, 8u, coverage > 0.375);
+        if (mask == 0u) {
+            discard;
+        }
+    }
     let base = srgb_to_linear(texel.rgb) * draw.color.rgb;
     var normal = safe_normalize(fragment.normal);
     if (!front) {
@@ -1079,8 +1110,10 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> @location
     }
     let view = safe_normalize(scene.eye.xyz - fragment.world);
     let occlusion = ambient_occlusion(fragment.world, surface_normal);
-    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion), scene.params.x);
-    return vec4<f32>(lit * alpha, alpha);
+    // a hair's strand: the bitangent, as its UV v runs
+    let strand = safe_normalize(cross(surface_normal, safe_normalize(fragment.tangent.xyz)) * select(1.0, -1.0, fragment.tangent.w < 0.0));
+    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, strand), scene.params.x);
+    return MeshFragment(vec4<f32>(lit * alpha, alpha), mask);
 }
 
 struct ShadowOut {
@@ -1097,13 +1130,13 @@ fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> Shado
     return out;
 }
 
-// a `:cutout` or `:blend` surface casts only where its alpha reaches its cutoff, as the CPU's
-// `render_shadow_map` tests it
+// a `:cutout`, `:blend` or `:hair` surface casts only where its alpha (read at the texture's
+// own size, not a mip level) reaches its cutoff, as the CPU's `render_shadow_map` tests it
 @fragment
 fn fs_shadow(fragment: ShadowOut) {
-    let base_texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
+    let base_texel = straight(textureSampleLevel(base_texture, texture_sampler, fragment.uv, 0.0), (draw.flags.y & 2u) != 0u);
     let alpha = select(1.0, base_texel.a, (draw.flags.y & 1u) != 0u) * draw.color.a;
-    if ((draw.flags.x == 2u || draw.flags.x == 3u) && alpha < draw.material.w) {
+    if ((draw.flags.x == 2u || draw.flags.x == 3u || draw.flags.x == 4u) && alpha < draw.material.w) {
         discard;
     }
 }
