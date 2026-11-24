@@ -37,14 +37,13 @@ named function around it.")
 
 (defn- ticks-in (stacks) (fold stacks 0 (fn (sum entry) (+ sum (:count entry)))))
 
-(defn start (& more)
+(defn start (&optional (options {}))
   "Arm the profiler and return the session `profile/stop` reads: every process is sampled,
 or only `:pid`'s, at `:hz` samples a second (default 997, at most 10000). Starting again
 discards the profile in progress — there is one profiler per runtime.
 
     (map? (profile/start {:hz 199}))   ;~> true; read it with (profile/stop session)"
-  (let (options (or (first more) {})
-        hz (math/min (math/max (or (:hz options) default-hz) 1) 10000)
+  (let (hz (math/min (math/max (or (:hz options) default-hz) 1) 10000)
         pid (:pid options))
     (if (or (nil? pid) (= pid :all))
       (dev/profile-start hz)
@@ -52,7 +51,7 @@ discards the profile in progress — there is one profiler per runtime.
     {:hz hz :pid pid :started-ns (os/now-ns)}))
 
 (defn stop (session)
-  "Disarm the profiler and return the profile of the `session` `profile/start` returned: `{:hz
+  "Disarm the profiler and return the profile of the `session` `profile/start` returned: `{:hz :pid
 :wall-ms :ticks :cpu-ms :stacks}` (see the module doc).
 
     (:hz (profile/stop (profile/start {:hz 199})))   ;~> 199"
@@ -66,25 +65,24 @@ discards the profile in progress — there is one profiler per runtime.
      :cpu-ms (/ (* 1000.0 ticks) hz)
      :stacks stacks}))
 
-(defn run (thunk & more)
+(defn run (thunk &optional (options {}))
   "Run `(thunk)` under the profiler and return its profile, with the thunk's value under
 `:result`. Samples the calling process alone unless `:pid` says otherwise (`:all` for every
 process); `:hz` as `profile/start`. An error in the thunk disarms the profiler and
 propagates.
 
     (:result (profile/run (fn () 42)))   ;~> 42"
-  (let (options (or (first more) {})
-        session (start (assoc options :pid (if (contains? options :pid) (:pid options) (self))))
+  (let (session (start (merge {:pid (self)} options))
         result (try (thunk) (catch error (do (dev/profile-stop) (throw error)))))
     (assoc (stop session) :result result)))
 
-(defn sample (ms & more)
+(defn sample (ms &optional (options {}))
   "Profile whatever runs in the next `ms` milliseconds while the caller sleeps — every
 process, or `:pid`'s alone — and return the profile. For a program that is already
 running: call it from a REPL attached to it, or from a process the program spawns.
 
     (map? (profile/sample 10))   ;~> true"
-  (let (session (start (or (first more) {})))
+  (let (session (start options))
     (proc/sleep ms)
     (stop session)))
 
@@ -133,14 +131,13 @@ counts once toward its total.
                          (:name row)))))
       "\n")))
 
-(defn report (profile & more)
+(defn report (profile &optional (options {}))
   "The profile as text: a summary line, then the top functions by self time and by total
 time (`:top`, default 20). Read self time to find the code that is slow itself, total time
 to find the call that is slow because of what it calls.
 
     (string/starts-with? (profile/report {:hz 1000 :wall-ms 5.0 :ticks 4 :cpu-ms 4.0 :stacks [{:stack [\"leaf\" \"main\"] :count 4}]}) \"profile: 4.0 ms\")   ;=> true"
-  (let (options (or (first more) {})
-        top (or (:top options) 20)
+  (let (top (or (:top options) 20)
         ticks (:ticks profile)
         rows (functions profile)
         by-self (take (seq/sort-by rows (fn (row) [(- (:self-ticks row)) (:name row)])) top)
