@@ -62,7 +62,7 @@
   (%runtime-collect))
 
 (defn profile-start (& more)
-  "Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram. `(profile-start hz pid)` samples ONLY that local process — every process that runs takes a sample per tick, so without it a busy program's profile is the sum of all of them, and the process you care about (a UI loop beside its language servers and workers) is a few percent of its own profile. Sampling walks each process's reified call stack (named frames) at its next VM frame boundary after every tick — no signals, near-zero cost when off (one relaxed load per frame boundary). A JIT-resident loop is attributed when it yields at its reduction-budget preempt (~once a quantum); the legacy tree-walker isn't sampled. Stop and read with (profile-stop).
+  "Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram. `(profile-start hz pid)` samples ONLY that local process — every process that runs takes a sample per tick, so without it a busy program's profile is the sum of all of them, and the process you care about (a UI loop beside its language servers and workers) is a few percent of its own profile. A running process samples its whole call stack — interpreted frames, native (JIT) activations and the drivers around a nested one — at its next frame boundary or native reduction poll after each tick, charged with the ticks since its last sample (ADR-789). No signals; off, one relaxed load per frame boundary. The legacy tree-walker is not sampled. Stop and read with (profile-stop). This is the raw mechanism: `profile/run`, `profile/report` and `profile/folded` turn it into per-function times.
 
     (dev/profile-start 199)   ;~> armed at 199 Hz; read it with `(dev/profile-stop)`"
   (cond
@@ -71,24 +71,10 @@
     else (%profile-start (first more) (second more))))
 
 (defn profile-stop ()
-  "Disarm the sampling profiler and return the histogram: a list of {:stack (fn-names... innermost-first) :count n} maps, most-sampled first. Empty list if never armed. A sample whose frames were all anonymous appears with :stack (\"<anonymous>\").
+  "Disarm the sampling profiler and return the histogram: a list of {:stack (fn-names... innermost-first) :count ticks} maps, most-sampled first — a tick is 1/hz s of one process's running time. Empty list if never armed. A sample whose frames were all anonymous appears with :stack (\"<anonymous>\").
 
     (dev/profile-stop)   ;~> ({:stack (\"inner\" \"outer\") :count 42} …)"
   (%profile-stop))
-
-(defn profile->folded (histogram)
-  "A `profile-stop` histogram as folded stacks — one line per stack, root first, frames joined
-by `;`, then a space and its sample count — the format flamegraph.pl, inferno and speedscope
-read (`nest profile` writes it to a file).
-
-    (dev/profile->folded [{:stack [\"inner\" \"outer\"] :count 42}])   ;=> \"outer;inner 42\\n\""
-  (string/join (map histogram
-                 (fn (entry)
-                   (str (string/join (reverse (into [] (:stack entry))) ";")
-                     " "
-                     (:count entry)
-                     "\n")))
-    ""))
 
 (defn sched-stats ()
   "A snapshot map of the scheduler's cumulative counters: {:spawned :exited :preempts :steals :migrations :workers :peak-threads}. :spawned - :exited is the live-process figure; :preempts counts reduction-budget quantum exhaustions; :steals/:migrations count work-stealing activity. The scheduler half of the observability timing tier (pairs with gc-stats' :pause-* keys).

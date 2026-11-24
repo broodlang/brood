@@ -871,6 +871,10 @@ const DEV_MODULES: &[EmbeddedModule] = &[
     // dispatch-, env-, or alloc-bound?" does not depend on recalling them. DEV: it serves
     // *developing* a program, and a shipped app has no use for it.
     embedded_module!("perf", "std/tool/perf.blsp"),
+    // The sampling profiler's policy (ADR-789): `(profile/run thunk)`, `(profile/report p)`,
+    // folded stacks — per-function self and total time over `dev/profile-start`/`-stop`. DEV,
+    // as `perf` is: it serves developing a program.
+    embedded_module!("profile", "std/tool/profile.blsp"),
     // The read-eval-print loop itself, written in Brood (`(require 'repl)`):
     // policy over the `read-line`/`reflect/eval-string`/`pr-str` primitives. The Rust
     // binaries (`brood`, `nest repl`) just bootstrap into `(repl-run)`. A shipped

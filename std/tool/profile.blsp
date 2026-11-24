@@ -1,0 +1,176 @@
+;; std/tool/profile.blsp — the sampling CPU profiler's policy (ADR-789): run a region under
+;; it, and read what it caught as per-function times, a readable report, or folded stacks.
+;;
+;; The mechanism is the kernel's (`dev/profile-start`, `dev/profile-stop`,
+;; `crates/lisp/src/diagnostics/profile.rs`): a running process samples its whole call stack
+;; — interpreted frames, native (JIT) activations, and the frames of the drivers around a
+;; nested one — once per tick, charged with the ticks since its last sample. This module
+;; turns those stacks into the answer to "where did the time go": self and total time per
+;; function, by qualified name.
+
+(defmodule profile
+  "Find what is slow in a running program, by function, without changing it.
+
+- `(profile/run thunk)` — run `(thunk)` under the sampling profiler; its profile, with the
+  thunk's value under `:result`.
+- `(profile/start)` … `(profile/stop session)` — the same around any region, or across
+  frames of a running loop.
+- `(profile/sample ms)` — profile whatever runs for the next `ms` milliseconds (from a REPL
+  or another process, `:pid` naming the one to watch).
+- `(profile/report profile)` — the top functions by self and by total time, as text.
+- `(profile/functions profile)` — the same as data; `(profile/folded profile)` — folded
+  stacks for flamegraph.pl, inferno or speedscope.
+
+A profile is a map: `:hz`, `:wall-ms` (how long it ran), `:ticks` (samples, weighted),
+`:cpu-ms` (the running time they stand for) and `:stacks`, a list of `{:stack (names…
+innermost first) :count ticks}`. A tick is 1/hz s of one process's running time, so with
+several processes sampled `:cpu-ms` can exceed `:wall-ms`. Time a process spends waiting
+(in `receive`, or queued behind others) is not charged. A builtin's time goes to the
+function that called it; an anonymous `fn` names nothing, so its time goes to the nearest
+named function around it.")
+
+;; The default rate: about a millisecond a sample, and prime so the ticks never fall into
+;; step with a 60 Hz frame or a millisecond timer.
+(def default-hz 997)
+
+(defn- tick-ms (profile) (/ 1000.0 (:hz profile)))
+
+(defn- ticks-in (stacks) (fold stacks 0 (fn (sum entry) (+ sum (:count entry)))))
+
+(defn start (& more)
+  "Arm the profiler and return the session `profile/stop` reads: every process is sampled,
+or only `:pid`'s, at `:hz` samples a second (default 997, at most 10000). Starting again
+discards the profile in progress — there is one profiler per runtime.
+
+    (map? (profile/start {:hz 199}))   ;~> true; read it with (profile/stop session)"
+  (let (options (or (first more) {})
+        hz (math/min (math/max (or (:hz options) default-hz) 1) 10000)
+        pid (:pid options))
+    (if (or (nil? pid) (= pid :all))
+      (dev/profile-start hz)
+      (dev/profile-start hz pid))
+    {:hz hz :pid pid :started-ns (os/now-ns)}))
+
+(defn stop (session)
+  "Disarm the profiler and return the profile of the `session` `profile/start` returned: `{:hz
+:wall-ms :ticks :cpu-ms :stacks}` (see the module doc).
+
+    (:hz (profile/stop (profile/start {:hz 199})))   ;~> 199"
+  (let (stacks (dev/profile-stop)
+        ticks (ticks-in stacks)
+        hz (:hz session))
+    {:hz hz
+     :pid (:pid session)
+     :wall-ms (/ (->float (- (os/now-ns) (:started-ns session))) 1000000.0)
+     :ticks ticks
+     :cpu-ms (/ (* 1000.0 ticks) hz)
+     :stacks stacks}))
+
+(defn run (thunk & more)
+  "Run `(thunk)` under the profiler and return its profile, with the thunk's value under
+`:result`. Samples the calling process alone unless `:pid` says otherwise (`:all` for every
+process); `:hz` as `profile/start`. An error in the thunk disarms the profiler and
+propagates.
+
+    (:result (profile/run (fn () 42)))   ;~> 42"
+  (let (options (or (first more) {})
+        session (start (assoc options :pid (if (contains? options :pid) (:pid options) (self))))
+        result (try (thunk) (catch error (do (dev/profile-stop) (throw error)))))
+    (assoc (stop session) :result result)))
+
+(defn sample (ms & more)
+  "Profile whatever runs in the next `ms` milliseconds while the caller sleeps — every
+process, or `:pid`'s alone — and return the profile. For a program that is already
+running: call it from a REPL attached to it, or from a process the program spawns.
+
+    (map? (profile/sample 10))   ;~> true"
+  (let (session (start (or (first more) {})))
+    (proc/sleep ms)
+    (stop session)))
+
+(defn- tally (rows name key ticks)
+  ;; add `ticks` to `name`'s `key` (:self or :total)
+  (let (row (or (get rows name) {:self 0 :total 0}))
+    (assoc rows name (assoc row key (+ (get row key) ticks)))))
+
+(defn functions (profile)
+  "Each function the profile saw, most total time first: `{:name :self-ms :total-ms
+:self-ticks :total-ticks}`. Self time is spent in the function itself (and the builtins it
+called); total time adds everything it called. A function on a stack twice — recursion —
+counts once toward its total.
+
+    (profile/functions {:hz 1000 :stacks [{:stack [\"leaf\" \"main\"] :count 3} {:stack [\"main\"] :count 1}]})   ;=> [{:name \"main\" :self-ms 1.0 :total-ms 4.0 :self-ticks 1 :total-ticks 4} {:name \"leaf\" :self-ms 3.0 :total-ms 3.0 :self-ticks 3 :total-ticks 3}]"
+  (let (ms (tick-ms profile)
+        rows (fold (:stacks profile)
+               {}
+               (fn (rows entry)
+                 (let (ticks (:count entry)
+                       stack (:stack entry))
+                   (fold (seq/distinct stack)
+                     (tally rows (first stack) :self ticks)
+                     (fn (rows name) (tally rows name :total ticks)))))))
+    (into []
+      (map (seq/sort-by (into [] rows) (fn ([name row]) [(- (:total row)) (- (:self row)) name]))
+        (fn ([name row])
+          {:name name
+           :self-ms (* ms (:self row))
+           :total-ms (* ms (:total row))
+           :self-ticks (:self row)
+           :total-ticks (:total row)})))))
+
+(defn- percent (part whole) (if (= whole 0) 0.0 (/ (* 100.0 part) whole)))
+
+(defn- table (rows ticks first-key second-key heading)
+  ;; one ranked section: the first column is what the rows are ranked by
+  (let (first-ticks (if (= first-key :self-ms) :self-ticks :total-ticks))
+    (string/join (cons heading
+                   (map rows
+                     (fn (row)
+                       (string/format "%10.1f %6.1f%% %10.1f  %s"
+                         (get row first-key)
+                         (percent (get row first-ticks) ticks)
+                         (get row second-key)
+                         (:name row)))))
+      "\n")))
+
+(defn report (profile & more)
+  "The profile as text: a summary line, then the top functions by self time and by total
+time (`:top`, default 20). Read self time to find the code that is slow itself, total time
+to find the call that is slow because of what it calls.
+
+    (string/starts-with? (profile/report {:hz 1000 :wall-ms 5.0 :ticks 4 :cpu-ms 4.0 :stacks [{:stack [\"leaf\" \"main\"] :count 4}]}) \"profile: 4.0 ms\")   ;=> true"
+  (let (options (or (first more) {})
+        top (or (:top options) 20)
+        ticks (:ticks profile)
+        rows (functions profile)
+        by-self (take (seq/sort-by rows (fn (row) [(- (:self-ticks row)) (:name row)])) top)
+        by-total (take rows top))
+    (str (string/format "profile: %.1f ms of running time in %.1f ms, %d samples at %d Hz, %d stacks"
+           (:cpu-ms profile)
+           (:wall-ms profile)
+           ticks
+           (:hz profile)
+           (count (:stacks profile)))
+      "\n\n"
+      (table by-self
+        ticks :self-ms :total-ms
+        "by self time — the function itself\n   self ms   self %   total ms  function")
+      "\n\n"
+      (table by-total
+        ticks :total-ms :self-ms
+        "by total time — the function and what it calls\n  total ms  total %    self ms  function")
+      "\n")))
+
+(defn folded (profile)
+  "The profile as folded stacks — one line per stack, root first, frames joined by `;`, then a
+space and its ticks — the format flamegraph.pl, inferno and speedscope read (`nest profile`
+writes it to a file).
+
+    (profile/folded {:stacks [{:stack [\"inner\" \"outer\"] :count 42}]})   ;=> \"outer;inner 42\\n\""
+  (string/join (map (:stacks profile)
+                 (fn (entry)
+                   (str (string/join (reverse (into [] (:stack entry))) ";")
+                     " "
+                     (:count entry)
+                     "\n")))
+    ""))

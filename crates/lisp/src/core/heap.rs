@@ -1308,6 +1308,10 @@ pub struct Heap {
     /// can name the *caller* arm (the one holding the stale handle), not just the callee.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_dbg_fn: u32,
+    /// The sampling profiler's per-process state: the profile and the tick this process last
+    /// sampled at (`diagnostics::profile::Mark`, ADR-789). On the heap so it moves with the
+    /// process between worker threads.
+    pub(crate) profile_mark: crate::diagnostics::profile::Mark,
     /// An error parked by a JIT runtime callback (the C ABI can't return a `Value` *and* an
     /// error); the arm returns the error outcome and [`vm_run_bc`] takes this to propagate.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
@@ -2037,6 +2041,7 @@ impl Heap {
             jit_stack_limit: 0,
             jit_force_vm: false,
             jit_dbg_fn: u32::MAX,
+            profile_mark: crate::diagnostics::profile::Mark::default(),
             jit_pending_error: None,
             vm_handlers: Vec::new(),
             jit_call_budget: 0,

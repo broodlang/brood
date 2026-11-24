@@ -83,7 +83,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `diagnostics/coverage.rs` — Line-coverage recording — the second tier of ADR-148.
   - `diagnostics/debug_flags.rs` — The `BROOD_*` diagnostic-flag catalogue — what `brood --debug-flags` prints.
   - `diagnostics/perf.rs` — VM work-attribution counters — the `perf-stats` feature (see `docs/benchmarking.md`).
-  - `diagnostics/profile.rs` — Sampling CPU profiler over the VM's reified frame stacks — the "no Brood-level CPU profile" half of the observability timing tier (ROADMAP survey gap #4; .NET has dotnet-trace).
+  - `diagnostics/profile.rs` — Sampling CPU profiler over the reified call stacks of the VM and the native tier: the mechanism under `std/tool/profile.blsp` (ADR-789; first shipped in the observability timing tier, ROADMAP survey gap #4).
 - `dist.rs` — Distributed nodes: connect two Brood runtimes and route messages between them.
   - `dist/admission.rs` — Bounding unauthenticated peers before a handshake completes: the whole-handshake [`Deadline`] a trickling peer cannot restart, the [`HandshakeSlot`] permit that caps handshakes in flight, and the rate-limited warning when connections are shed at that cap.
   - `dist/couplings.rs` — Monitors and links across nodes: the control frames that set up and tear down a process monitor or link whose other end lives on a peer (ADR-067), and node monitors (`monitor-node`) with their `[:nodedown name]` message.
@@ -311,6 +311,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `tool/package-publish.blsp` (`package-publish`) — The registry verbs behind `nest search`, `nest publish`, `nest release` and `nest key-gen`: search the hive registry, build and post a release (signed when a key exists), bump the manifest's version and tag it.
 - `tool/perf.blsp` (`perf`) — One-call performance triage: `(perf/report)` answers *where the time goes*.
 - `tool/proctree.blsp` (`proctree`) — Order a flat `proc/info` list as a parent→child forest.
+- `tool/profile.blsp` (`profile`) — Find what is slow in a running program, by function, without changing it.
 - `tool/project.blsp` (`project`) — The project model behind `nest` (ADR-020), written in Brood: the manifest and its dependencies, finding the root, discovering sources and tests, `setup`, and the user-config loader.
 - `tool/project-check.blsp` (`project-check`) — The `nest check` driver: which files to check, the per-file result cache (ADR-129), the parallel fold over file chunks, the whole-project lints (duplicate globals, unused module-private defns) and the two migration aids, `--fix-renames` (ADR-304) and `--suggest-sigs`.
 - `tool/project-image.blsp` (`project-image`) — The project startup image (ADR-218 for a project): fingerprint the project's sources, write every module's bindings to one sectioned image, and materialise them on the next run instead of re-evaluating source.

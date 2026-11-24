@@ -235,8 +235,8 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
              :positional ["spec" nil]
              :arity 1
              :run (fn (options) (run-attach options))}
-   "profile" {:about "Run a `.blsp` FILE under the sampling CPU profiler (`dev/profile-start`) and write the samples as folded stacks — the format flamegraph.pl, inferno and speedscope read — to `--out` (default FILE.folded). The file is loaded, then `--function` (default its `main`) is called; `--hz` sets the rate (default 199)."
-              :flags {"--out" "PATH" "--hz" "N" "--function" "NAME"}
+   "profile" {:about "Run a `.blsp` FILE under the sampling CPU profiler (`profile/start`, ADR-789): print the top functions by self and total time (`--top`, default 20) and write the samples as folded stacks — the format flamegraph.pl, inferno and speedscope read — to `--out` (default FILE.folded). The file is loaded, then `--function` (default its `main`) is called; `--hz` sets the rate (default 997)."
+              :flags {"--out" "PATH" "--hz" "N" "--function" "NAME" "--top" "N"}
               :positional ["file" nil]
               :arity 1
               :run (fn (options) (run-profile options))}
@@ -1218,17 +1218,19 @@ so a matching local setup needs no flag."
           0))))
 
 (defn- run-profile (options)
-  ;; load FILE, call its entry under the profiler, write the folded stacks
+  ;; load FILE, call its entry under the profiler, print the report, write the folded stacks
   (let (file (first (get options :positionals))
         flags (get options :flags)
-        hz (string/->number (or (get flags "--hz") "199"))
+        hz (string/->number (or (get flags "--hz") (str profile/default-hz)))
+        top (string/->number (or (get flags "--top") "20"))
         out (or (get flags "--out") (str file ".folded")))
     (cond
       (not (and (string? file) (file/exists? file)))
         (do (io/puts (str "nest profile: no such file: " file) :to *err*) 2)
       (not (int? hz)) (do (io/puts "nest profile: --hz wants a number" :to *err*) 2)
+      (not (int? top)) (do (io/puts "nest profile: --top wants a number" :to *err*) 2)
       else
-        (let (_ (dev/profile-start hz)
+        (let (session (profile/start {:hz hz})
               outcome (try
                         (do
                           (reflect/load file)
@@ -1240,15 +1242,10 @@ so a matching local setup needs no flag."
                             (let (main (reflect/bound-value entry)) (when (fn? main) (main))))
                           :ok)
                         (catch e (failure (error-message e))))
-              histogram (dev/profile-stop))
-          (file/spit out (dev/profile->folded histogram))
-          (io/puts (str "nest profile: "
-                     (count histogram)
-                     " stacks, "
-                     (fold histogram 0 (fn (n entry) (+ n (:count entry))))
-                     " samples -> "
-                     out)
-            :to *err*)
+              profile (profile/stop session))
+          (file/spit out (profile/folded profile))
+          (io/puts (profile/report profile {:top top}) :to *err*)
+          (io/puts (str "nest profile: " (count (:stacks profile)) " stacks -> " out) :to *err*)
           (if (failure? outcome) (do (io/puts (error-message outcome) :to *err*) 1) 0)))))
 
 (defn- profile-module (file)

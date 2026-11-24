@@ -891,6 +891,14 @@ pub(crate) fn vm_run_bc(
             crate::process::set_capture_top_level(previous);
         },
     );
+    // The sampling profiler's place for this driver among those open on the thread (ADR-789):
+    // a sample taken inside a nested driver is completed with the frames of the drivers
+    // outside it as control comes back to each. A top-level entry starts the process's
+    // charge afresh, so the time it spent parked or queued is not charged to its frames.
+    let mut profile_mark = crate::diagnostics::profile::driver_enter();
+    if top_level && crate::diagnostics::profile::armed() {
+        crate::diagnostics::profile::restart(&mut heap.profile_mark);
+    }
     // Loop-top **preempt/kill capture** is done only by the *top-level* body driver
     // (`run_process_body`) of a capture-mode green process (ADR-100 §8). A nested
     // `vm_apply` run (a `map`/`try`/`binding` native callback) is NOT top-level: it
@@ -1026,10 +1034,6 @@ pub(crate) fn vm_run_bc(
     let native_ceiling = tier_ceiling() >= Tier::Native;
     #[cfg(not(feature = "jit"))]
     let _ = fresh; // silence unused warning when the JIT is off
-
-    // Sampling profiler (observability timing tier): the epoch this driver last
-    // sampled at. Loop-local — a resume simply re-samples on its next epoch tick.
-    let mut profiled_epoch: u64 = 0;
 
     // Set by a `Done` that handed its value back to a caller frame: the caller resumes
     // mid-body, so the loop-top safepoint has nothing to do that the CALL did not already
@@ -1187,25 +1191,6 @@ pub(crate) fn vm_run_bc(
             if std::mem::take(&mut returned_to_caller) {
                 break 'safepoint;
             }
-            // Profiler sample: when armed and the ticker's epoch moved, record this
-            // driver's named-frame stack (cur + pending callers, innermost first).
-            // Off (the default): one relaxed bool load per frame boundary.
-            if crate::diagnostics::profile::armed() {
-                let ep = crate::diagnostics::profile::epoch();
-                if ep != profiled_epoch {
-                    profiled_epoch = ep;
-                    let mut stack: Vec<value::Symbol> = Vec::with_capacity(frames.len() + 1);
-                    if let Some(n) = cur_arm.fn_name {
-                        stack.push(n);
-                    }
-                    for f in frames.iter().rev() {
-                        if let Some(n) = f.arm.fn_name {
-                            stack.push(n);
-                        }
-                    }
-                    crate::diagnostics::profile::record(&stack);
-                }
-            }
             // Per-iteration safepoint / preemption / deadline — relocates every frame's
             // slots and env in place (all on `Heap::roots`/`env_roots`). Mirrors the
             // `Node` trampoline's loop top.
@@ -1295,6 +1280,10 @@ pub(crate) fn vm_run_bc(
         // Either run the arm natively (if it's flagged for a tier check) or interpret it.
         // Both yield a `Result<ChunkExit, _>` handled uniformly below. A tail-position
         // interrupt region that ended returns its answer from this frame (ADR-491).
+        // `ran_native`: the current frame's arm ran as a native activation this turn, which
+        // the profiler's boundary below must know (its samples already name that arm).
+        #[cfg_attr(not(feature = "jit"), allow(unused_mut))]
+        let mut ran_native = false;
         let exit = if std::mem::take(&mut return_top) {
             let n = heap.roots_len();
             Ok(ChunkExit::Done(heap.root_at(n - 1)))
@@ -1357,6 +1346,7 @@ pub(crate) fn vm_run_bc(
                     // Destination for a Done result: this entry hands one back, so it
                     // owns a stack local (see `crate::jit::JitArmFn`).
                     let mut jit_ret = Value::Nil;
+                    ran_native = true;
                     // ADR-401: the top-level driver's native entry is unwindable — its
                     // callees' preempts can come back as frames to rebuild.
                     let jit_outcome = jit_tier_in_frame(
@@ -1516,6 +1506,19 @@ pub(crate) fn vm_run_bc(
                 )
             }
         };
+        // Profiler sample (ADR-789), at the boundary where the frame that just ran is still
+        // current: what ran since the last boundary is charged to it, and the samples held
+        // for the nested drivers and native activations it called get its frames. Off (the
+        // default): one relaxed load per boundary.
+        if crate::diagnostics::profile::armed() {
+            crate::diagnostics::profile::driver_boundary(
+                &mut profile_mark,
+                &mut heap.profile_mark,
+                cur_arm.fn_name,
+                frames.iter().rev().map(|frame| frame.arm.fn_name),
+                ran_native,
+            );
+        }
         match exit {
             Ok(ChunkExit::Done(v)) => {
                 // The result checks this frame owes (ADR-748), innermost first: a value the
