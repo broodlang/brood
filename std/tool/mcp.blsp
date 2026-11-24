@@ -207,9 +207,14 @@ itself as the trust boundary."
       (throw "write: :content must be a string"))
     (attempt (fn ()
                (let (abs (project-path rel)
-                     _dir (file/mkdir (path/dirname abs))
-                     _w (file/spit abs content))
-                 (write-result rel abs)))
+                     refusal (unbalanced-write rel
+                               (when (file/exists? abs) (file/slurp abs))
+                               content))
+                 (or refusal
+                   (do
+                     (file/mkdir (path/dirname abs))
+                     (file/spit abs content)
+                     (write-result rel abs)))))
       (fn (shape) {:ok false :error shape}))))
 
 (defn edit-tool (args)
@@ -245,9 +250,111 @@ image stays in sync with disk.
                           :error (str "edit: :old occurs "
                                    hits " times in " rel " — make it unique")}
                        else
-                         (let (_w (file/spit abs (string/replace text old new)))
-                           (write-result rel abs)))))))
+                         (let (edited (string/replace text old new))
+                           (or (unbalanced-write rel text edited)
+                             (do (file/spit abs edited) (write-result rel abs)))))))))
       (fn (shape) {:ok false :error shape}))))
+
+;; ---- whole-form editing ----------------------------------------------------
+;; `edit` and `write` refuse to leave a `.blsp` that read cleanly unreadable, and the form
+;; tools never need to: they take whole top-level forms (`form-edit`), checked to read as
+;; exactly one form before anything is written.
+
+(defn- unbalanced-write (rel old-text new-text)
+  "The refusal to write `new-text` over the `.blsp` at `rel` (`old-text` its contents, nil
+when new) when it read before and `new-text` does not — `{:ok false :error :line :col
+:hint}` with the position in the NEW text — else nil. A file that did not read before is
+written: the write may be its repair. Any other file is never refused."
+  (when (string/ends-with? rel ".blsp")
+    (form-edit/guard-write rel old-text new-text)))
+
+(defn- with-source (args tool body)
+  "`(body rel abs text)` over the existing project file `:path` names, through the
+`write`/`edit` sandbox; `{:ok false :error}` when it is missing or the path is refused."
+  (let (rel (get args :path))
+    (attempt (fn ()
+               (let (abs (project-path rel))
+                 (if (file/regular? abs)
+                   (body rel abs (file/slurp abs))
+                   {:ok false :error (str tool ": no such file: " rel)})))
+      (fn (shape) {:ok false :error shape}))))
+
+(defn- written-form (rel abs result)
+  "Write a successful form edit's text to `abs`, then load and check it as `write` does,
+adding the lines the new form covers; a refusal comes back untouched, nothing written."
+  (if (get result :ok)
+    (do
+      (file/spit abs (get result :text))
+      (merge (write-result rel abs)
+        (if (get result :line) {:line (get result :line) :end-line (get result :end-line)} {})))
+    result))
+
+(defn- string-arg (args key tool)
+  (let (value (get args key))
+    (when (not (string? value))
+      (throw (str tool ": " key " must be a string")))
+    value))
+
+(defn list-forms-tool (args)
+  "`list-forms` — the top-level forms of a project `.blsp` file as `{:ok true :forms
+[{:kind :name :line :end-line} …]}`, so an agent finds a definition without reading the
+whole file; `:syntax-error` too when the file does not read (the spans are then the
+tolerant CST's guess).
+
+    (mcp/list-forms-tool {:path \"src/app.blsp\"})   ;~> {:ok true :forms [{:kind \"defn\" :name \"parse\" :line 12 :end-line 30} …]}"
+  (string-arg args :path "list-forms")
+  (with-source args
+    "list-forms"
+    (fn (rel _abs text)
+      (let (complaint (form-edit/read-error text))
+        (merge {:ok true :forms (form-edit/list-forms text)}
+          (if complaint {:syntax-error (form-edit/describe-error rel complaint)} {}))))))
+
+(defn read-form-tool (args)
+  "`read-form` — the exact source of the top-level form defining `:name` (`parse`, or
+`defn parse` to pick the kind) in a project `.blsp` file: `{:ok true :text :line
+:end-line}`, or `{:ok false :error}` listing the file's definitions.
+
+    (mcp/read-form-tool {:path \"src/app.blsp\" :name \"parse\"})   ;~> {:ok true :text \"(defn parse (s) …)\" :line 12 :end-line 30}"
+  (let (name (string-arg args :name "read-form"))
+    (string-arg args :path "read-form")
+    (with-source args "read-form" (fn (_rel _abs text) (form-edit/read-form text name)))))
+
+(defn replace-form-tool (args)
+  "`replace-form` — replace the whole top-level form defining `:name` with `:text`, which
+must read as exactly one balanced form (else refused, the file untouched). The form is
+formatted, then the file is loaded and checked like `edit`: `{:ok true :path :line
+:end-line :diagnostics :shadows}` or `{:ok false :error}`.
+
+    (mcp/replace-form-tool {:path \"src/app.blsp\" :name \"parse\" :text \"(defn parse (s opts) …)\"})   ;~> {:ok true :path \"src/app.blsp\" :line 12 :end-line 31 :diagnostics […] …}"
+  (let (name (string-arg args :name "replace-form") text (string-arg args :text "replace-form"))
+    (string-arg args :path "replace-form")
+    (with-source args
+      "replace-form"
+      (fn (rel abs source) (written-form rel abs (form-edit/replace-form source name text))))))
+
+(defn insert-form-tool (args)
+  "`insert-form` — add `:text` (exactly one form, formatted) as a new top-level form after
+the form defining `:after`, or at `\"start\"` (after the `defmodule`) or `\"end\"`; loads
+and checks like `edit`.
+
+    (mcp/insert-form-tool {:path \"src/app.blsp\" :after \"parse\" :text \"(defn helper (x) x)\"})   ;~> {:ok true :path \"src/app.blsp\" :line 32 :end-line 32 …}"
+  (let (text (string-arg args :text "insert-form") after (string-arg args :after "insert-form"))
+    (string-arg args :path "insert-form")
+    (with-source args
+      "insert-form"
+      (fn (rel abs source) (written-form rel abs (form-edit/insert-form source text after))))))
+
+(defn delete-form-tool (args)
+  "`delete-form` — remove the whole top-level form defining `:name`; loads and checks like
+`edit`.
+
+    (mcp/delete-form-tool {:path \"src/app.blsp\" :name \"old-helper\"})   ;~> {:ok true :path \"src/app.blsp\" :diagnostics […] …}"
+  (let (name (string-arg args :name "delete-form"))
+    (string-arg args :path "delete-form")
+    (with-source args
+      "delete-form"
+      (fn (rel abs source) (written-form rel abs (form-edit/delete-form source name))))))
 
 (defn lookup-tool (args)
   "`lookup` — describe a global name. Returns `{:name :arglist :doc :type
@@ -612,7 +719,7 @@ typically `(defn mcp-tools () (cons {…} (mcp/tools)))` — which the dispatche
 its place, re-reading it on every fetch, so a `def` takes effect on the next call
 (ADR-013).
 
-Twenty-four tools work today (in a project context — `write`/`edit` need a root):
+Twenty-nine tools work today (in a project context — `write`/`edit` need a root):
 the eight v0 tools, the ability/type introspection trio `abilities` / `ability`
 (describe an ability's ops, sealed members, `:requires`, impls) / `check-source`
 (type-check a snippet string), `callers` (cross-file
@@ -643,7 +750,7 @@ Brood pattern, `std/tool/explain.blsp`)."
               :required ["file"]}
      :handler load-tool}
     {:name "write"
-     :description "Create or overwrite a project file (the way to write code through nest mcp, not the raw filesystem). :path is project-relative and sandboxed under the project root — absolute paths, '~', and '..' are rejected. A .blsp file is loaded into the session and checked, so the result carries :diagnostics + :shadows like `load`. Returns {:ok true :path :diagnostics :shadows} or {:ok false :error}."
+     :description "Create or overwrite a project file (the way to write code through nest mcp, not the raw filesystem). :path is project-relative and sandboxed under the project root — absolute paths, '~', and '..' are rejected. A .blsp file is loaded into the session and checked, so the result carries :diagnostics + :shadows like `load`. Writing .blsp text that does not read over a file that did (or as a new file) is refused, nothing written, with the reader's message. Returns {:ok true :path :diagnostics :shadows} or {:ok false :error}."
      :schema {:type "object"
               :properties {:path {:type "string"
                                   :description "Project-relative file path (no leading '/' or '~', no '..')"}
@@ -651,7 +758,7 @@ Brood pattern, `std/tool/explain.blsp`)."
               :required ["path" "content"]}
      :handler write-tool}
     {:name "edit"
-     :description "Exact-string replacement in a project file (sandboxed like `write`). :old must occur exactly once in the file and is replaced by :new. A .blsp file is reloaded and checked (result carries :diagnostics/:shadows). Returns {:ok true :path ...} or {:ok false :error}."
+     :description "Exact-string replacement in a project file (sandboxed like `write`). :old must occur exactly once in the file and is replaced by :new. For a .blsp file prefer `replace-form` / `insert-form`, which work on whole forms; an edit that would leave a .blsp that read unreadable is refused, nothing written, with the reader's message. A .blsp file is reloaded and checked (result carries :diagnostics/:shadows). Returns {:ok true :path ...} or {:ok false :error}."
      :schema {:type "object"
               :properties {:path {:type "string"
                                   :description "Project-relative file path (no leading '/' or '~', no '..')"}
@@ -660,6 +767,47 @@ Brood pattern, `std/tool/explain.blsp`)."
                            :new {:type "string" :description "Replacement text"}}
               :required ["path" "old" "new"]}
      :handler edit-tool}
+    {:name "list-forms"
+     :description "List a .blsp file's top-level forms — {:ok true :forms [{:kind \"defn\" :name \"parse\" :line 12 :end-line 30} ...]} — to find a definition without reading the whole file. Start here, then `read-form` the one you need."
+     :schema {:type "object"
+              :properties {:path {:type "string" :description "Project-relative .blsp file path"}}
+              :required ["path"]}
+     :handler list-forms-tool}
+    {:name "read-form"
+     :description "Read the exact source of the top-level form that defines :name (a defn, def, defmacro, defrecord, deftype, sig, … — `parse`, or `defn parse` to pick the kind when a sig shares the name). Returns {:ok true :text :line :end-line}, or {:ok false :error} listing the file's definitions. Read a form before you `replace-form` it."
+     :schema {:type "object"
+              :properties {:path {:type "string" :description "Project-relative .blsp file path"}
+                           :name {:type "string"
+                                  :description "The defined name, e.g. \"parse\" or \"defn parse\""}}
+              :required ["path" "name"]}
+     :handler read-form-tool}
+    {:name "replace-form"
+     :description "PREFER THIS OVER `edit` FOR CHANGING A FUNCTION OR ANY DEFINITION in a .blsp file: it replaces the whole top-level form defining :name (exactly as `read-form` shows it, a check-allow wrapper included) with :text, so it cannot unbalance the brackets. :text must read as exactly ONE balanced form, or nothing is written and the reader's message says where it breaks. The form is formatted, the file reloaded and checked: {:ok true :path :line :end-line :diagnostics :shadows} or {:ok false :error}."
+     :schema {:type "object"
+              :properties {:path {:type "string" :description "Project-relative .blsp file path"}
+                           :name {:type "string"
+                                  :description "The defined name of the form to replace, e.g. \"parse\""}
+                           :text {:type "string"
+                                  :description "The complete new top-level form, balanced"}}
+              :required ["path" "name" "text"]}
+     :handler replace-form-tool}
+    {:name "insert-form"
+     :description "Add a new top-level form to a .blsp file: :text (exactly one balanced form, formatted) goes after the form defining :after, or at \"start\" (after the defmodule) or \"end\". Use it to add a function instead of `edit`. Reloads and checks like `edit`."
+     :schema {:type "object"
+              :properties {:path {:type "string" :description "Project-relative .blsp file path"}
+                           :text {:type "string" :description "The complete new top-level form"}
+                           :after {:type "string"
+                                   :description "The defined name to insert after, or \"start\" / \"end\""}}
+              :required ["path" "text" "after"]}
+     :handler insert-form-tool}
+    {:name "delete-form"
+     :description "Remove the whole top-level form that defines :name from a .blsp file (as `read-form` shows it). Reloads and checks like `edit`."
+     :schema {:type "object"
+              :properties {:path {:type "string" :description "Project-relative .blsp file path"}
+                           :name {:type "string"
+                                  :description "The defined name of the form to remove"}}
+              :required ["path" "name"]}
+     :handler delete-form-tool}
     {:name "lookup"
      :description "Look up a global name: returns its arglist, docstring, type signature (the checker's arrow string, e.g. \"(int -> int)\"), and source location (file/line/col)."
      :schema {:type "object"

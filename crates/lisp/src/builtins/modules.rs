@@ -804,6 +804,9 @@ const TOOLCHAIN_MODULES: &[EmbeddedModule] = &[
     // Identifier-aware whole-token rewrites over a project's .blsp sources — drives
     // `nest rename` for an ecosystem-wide rename that a plain sed would corrupt. Opt-in.
     embedded_module!("codemod", "std/tool/codemod.blsp"),
+    // Edit a source by whole top-level forms named by what they define — `nest form` and
+    // the `nest mcp` form tools, so an agent's edit cannot unbalance the brackets. Opt-in.
+    embedded_module!("form-edit", "std/tool/form-edit.blsp"),
     // `nest deps`: a project's module graph read as contexts — references into another
     // context's detail, contexts that reach each other (ADR-752). Opt-in.
     embedded_module!("module-graph", "std/tool/module-graph.blsp"),

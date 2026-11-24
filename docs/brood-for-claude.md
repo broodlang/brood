@@ -5,6 +5,22 @@ the patterns that aren't shared with other Lisps. For depth see
 `docs/language.md`, `docs/spec.md`, `docs/pattern-matching.md`,
 `docs/concurrency.md`.
 
+## Editing Brood: whole forms, never bracket surgery
+
+A string-replace edit inside a function is how brackets drift: one `)` too many or too few
+and the file no longer reads. So:
+
+- **Change a function with `replace-form`** (MCP) or **`nest form replace FILE NAME`**
+  (shell, the new form on stdin). It replaces the whole top-level form that defines `NAME`;
+  the new text must read as exactly one balanced form or nothing is written.
+- **See it first** with `list-forms` / `read-form` (`nest form list FILE`, `nest form read
+  FILE NAME`). Add with `insert-form` (`--after NAME|start|end`), remove with `delete-form`.
+- **Never sed or perl Brood source.** After any other hand edit run **`nest check-syntax
+  FILE`**; the `.claude/settings.json` hook that `nest new` / `nest update-tooling` install
+  runs it after every Edit/Write and hands a broken file's message back to you.
+- A read error says where the bracket belongs: `` `(let` opened at 2:3 is still open when
+  line 5 starts `(defn b` at column 1 — a `)` is missing before line 5 ``.
+
 ## What Brood is (and isn't)
 
 A small, dynamic Lisp implemented in Rust.

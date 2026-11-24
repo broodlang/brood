@@ -68,6 +68,17 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
             ;; caller and leave the rest.
             :no-positional-with ["--fix-renames"]
             :run (fn (options) (run-check options))}
+   "check-syntax" {:about "Read each `.blsp` FILE with the reader alone — fast, no project load — and print the first read error of each that does not read, saying where a missing or extra bracket belongs; exit 1 when any fails, silent and 0 when all read. `--claude-hook` reads a Claude Code hook payload on stdin instead and checks the `.blsp` file the tool touched: a read error goes to stderr with exit 2, which Claude Code hands back to the model."
+                   :flags {"--claude-hook" :bool}
+                   :positional ["file" "blsp-file"]
+                   :many true
+                   :run (fn (options) (run-check-syntax options))}
+   "form" {:about "Edit a `.blsp` file by whole top-level forms named by what they define (`parse`, or `defn parse`), so brackets cannot drift: `list FILE`, `read FILE NAME`, `replace FILE NAME` (the new form on stdin), `insert FILE --after NAME|start|end` (the new form on stdin), `delete FILE NAME`. A new form must read as exactly one form, and is formatted; a refusal writes nothing and exits 1."
+           :flags {"--after" "NAME"}
+           :positional ["action" ["list" "read" "replace" "insert" "delete"]]
+           :names ["action" "file" "name"]
+           :arity [2 3]
+           :run (fn (options) (run-form options))}
    "test" {:about "Run the project's tests (every `tests/**/*_test.blsp`), or specific test files — `FILE`, or `FILE:LINE` for the one test at that line. `--watch` stays up and reruns on every save: the named files, or the test files a change reaches. A SOURCE file's `form ;=> result` docstring examples are `nest doctest`'s (ADR-716)."
            :flags {"--only" {:value "SELECTOR" :repeat true :complete "selector"}
                    "--exclude" {:value "SELECTOR" :repeat true :complete "selector"}
@@ -124,7 +135,7 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
           :positional ["name" nil]
           :arity 1
           :run (fn (options) (run-new options))}
-   "update-tooling" {:about "Refresh the AI-assistant tooling `nest new` drops into a project — `docs/brood-for-claude.md` and the `.claude/skills/writing-brood` skill — from THIS binary. Run it after upgrading Brood; code, manifest and `CLAUDE.md` are left untouched."
+   "update-tooling" {:about "Refresh the AI-assistant tooling `nest new` drops into a project — `docs/brood-for-claude.md` and the `.claude/skills/writing-brood` skill — from THIS binary, and merge the `brood` MCP server into `.mcp.json` and the `nest check-syntax` hook into `.claude/settings.json` (other servers and settings kept; running it twice changes nothing). Run it after upgrading Brood; code, manifest and `CLAUDE.md` are left untouched."
                      :flags {}
                      :run (fn (options) (run-update-tooling options))}
    "update-brood" {:about "Update the installed `brood`, `nest` and `brood-lsp` to the latest GitHub release (what `install.sh` installs), checked against its SHA-256 and written into the directory this `nest` runs from. `--check` only reports; `--version TAG` installs that release; `--dir DIR` installs somewhere else."
@@ -724,6 +735,120 @@ Returns the failure count."
       (empty? files)
         (do (project/load-config) (require-one 'test) (checker-exit-code (project-check/check)))
       else (do (require-one 'test) (checker-exit-code (project-check/check-files files))))))
+
+;; `nest check-syntax` and `nest form` --------------------------------------------------
+;; The reader alone, and edits by whole top-level form (`form-edit`): what an agent runs
+;; after a hand edit, and instead of one, so a file is never left with drifted brackets.
+
+(def- *reform-hint*
+  "The file no longer reads: the edit unbalanced its brackets. Re-read the whole form (`nest form read FILE NAME`, or the brood MCP server's `read-form`) and replace it whole (`nest form replace FILE NAME`, or `replace-form`) instead of patching brackets.")
+
+(defn syntax-report (path:string -> (or nil string))
+  "nil when the source at `path` reads; else the reader's first complaint as
+`path:LINE:COL: message`, then the line it points at with a caret under the column.
+
+    (nest/syntax-report \"std/tool/nest.blsp\")   ;=> nil"
+  (let (text (file/slurp path) complaint (form-edit/read-error text))
+    (when complaint
+      (let (excerpt (form-edit/source-excerpt text complaint))
+        (str (form-edit/describe-error path complaint) (if (= excerpt "") "" (str "\n" excerpt)))))))
+
+(defn claude-hook-check (payload:string -> vector)
+  "`[exit-code message]` for a Claude Code hook `payload` (JSON with
+`tool_input.file_path`, as Edit, Write and MultiEdit send): `[2 report]` when the tool left
+a `.blsp` file that does not read — exit 2 hands the report to the model — else `[0 nil]`,
+for any other file, a payload without one, or one that is not JSON.
+
+    (nest/claude-hook-check \"{\\\"tool_input\\\": {\\\"file_path\\\": \\\"notes.md\\\"}}\")   ;=> [0 nil]"
+  (let (decoded (check-allow :discarded-catch (try (json/decode payload) (catch _ nil)))
+        input (when (map? decoded) (get decoded :tool_input))
+        named (when (map? input) (or (get input :file_path) (get input :path)))
+        cwd (when (map? decoded) (get decoded :cwd))
+        path (cond
+               (not (string? named)) nil
+               (or (path/absolute? named) (not (string? cwd))) named
+               else (path/join cwd named)))
+    (if (and (string? path) (string/ends-with? path ".blsp") (file/regular? path))
+      (let (report (syntax-report path))
+        (if report [2 (str report "\n" *reform-hint*)] [0 nil]))
+      [0 nil])))
+
+(defn- run-check-syntax (options)
+  (if (get (get options :flags) "--claude-hook")
+    (let ([code message] (claude-hook-check (stdin-text)))
+      (when message (eputs message))
+      code)
+    (let (files (get options :positionals))
+      (cond
+        (empty? files) (do (eputs "nest check-syntax: name the .blsp files to read") 2)
+        (not (readable-files? "check-syntax" files)) 2
+        else
+          (let (reports (seq/keep files syntax-report))
+            (doseq (report reports) (io/puts report))
+            (if (empty? reports) 0 1))))))
+
+(defn- form-refused (action result)
+  ;; a refusal said on stderr, with its hint; exit 1
+  (eputs "nest form " action ": " (get result :error))
+  (when (get result :hint) (eputs "  " (get result :hint)))
+  1)
+
+(defn- form-written (action file name result)
+  ;; write an edit's text over `file` and say what changed where; exit 0
+  (file/replace file (get result :text))
+  (io/puts (str action
+             (if name (str " `" name "`") "")
+             " in "
+             file
+             (if (get result :line)
+               (str " (lines " (get result :line) "-" (get result :end-line) ")")
+               "")))
+  0)
+
+(defn- run-form (options)
+  (let (positionals (vec (get options :positionals))
+        action (nth positionals 0)
+        file (nth positionals 1)
+        name (nth positionals 2 nil)
+        after (get (get options :flags) "--after"))
+    (cond
+      (not (readable-files? (str "form " action) [file])) 2
+      (and (includes? ["read" "replace" "delete"] action) (nil? name))
+        (do (eputs "nest form " action ": name the form — nest form " action " FILE NAME") 2)
+      (and (= action "insert") (not (string? after)))
+        (do (eputs "nest form insert: say where — --after NAME, --after start or --after end") 2)
+      else
+        (let (text (file/slurp file))
+          ;; the project's formatter settings, when there is a project
+          (when (and (includes? ["replace" "insert"] action) (project/find-root (file/cwd)))
+            (project/load-config))
+          (case action
+            "list"
+              (do
+                (doseq (entry (form-edit/list-forms text))
+                  (io/puts (str (get entry :line)
+                             "-"
+                             (get entry :end-line)
+                             " "
+                             (get entry :kind)
+                             (if (get entry :name) (str " " (get entry :name)) ""))))
+                0)
+            "read"
+              (let (result (form-edit/read-form text name))
+                (if (get result :ok)
+                  (do (io/puts (get result :text)) 0)
+                  (form-refused action result)))
+            "delete"
+              (let (result (form-edit/delete-form text name))
+                (if (get result :ok)
+                  (form-written "deleted" file name result)
+                  (form-refused action result)))
+            (let (result (if (= action "replace")
+                           (form-edit/replace-form text name (stdin-text))
+                           (form-edit/insert-form text (stdin-text) after)))
+              (if (get result :ok)
+                (form-written (if (= action "replace") "replaced" "inserted") file name result)
+                (form-refused action result))))))))
 
 ;; `nest test` ------------------------------------------------------------------------
 

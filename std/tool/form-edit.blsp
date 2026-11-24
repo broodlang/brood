@@ -1,0 +1,344 @@
+;; form-edit — edit a Brood source by whole top-level forms, named by what they define.
+;;
+;; The edits an agent gets wrong are string replacements inside a function: one `)` too
+;; many or too few, and the file is written broken. Here the unit is the whole top-level
+;; form. A replacement must read as exactly one balanced form before anything is written,
+;; so the brackets of the rest of the file cannot drift. Pure over source text: the
+;; `nest form` CLI and the `nest mcp` tools of the same names read and write the files.
+(defmodule form-edit
+  "Edit Brood source by whole top-level forms named by what they define: `list-forms`,
+`read-form`, `replace-form`, `insert-form`, `delete-form`, and `read-error` (the reader's
+complaint about a text). A replacement must read as exactly one form, so an edit cannot
+unbalance the file's brackets. Backs `nest form` and the `nest mcp` form tools.")
+
+(def- *rebalance-hint*
+  "the edit unbalanced the brackets; re-read the form with read-form and replace it whole with replace-form")
+
+;; ---- reading ----------------------------------------------------------------
+
+(defn read-error (text:string -> (or nil map))
+  "The reader's complaint about `text` as `{:message :line :col}`, or nil when all of it
+reads.
+
+    (form-edit/read-error \"(a b)\")   ;=> nil
+    (get (form-edit/read-error \"(a\\n  [1 2)\") :line)   ;=> 2"
+  (check-allow :discarded-catch
+    (try
+      (do (reflect/read-all text) nil)
+      (catch caught
+        (if (map? caught)
+          {:message (get caught :message "does not read")
+           :line (get caught :line)
+           :col (get caught :col)}
+          {:message (pr-str caught) :line nil :col nil})))))
+
+(defn describe-error (label:string complaint:map -> string)
+  "A read complaint as one line, `label:LINE:COL: message`.
+
+    (form-edit/describe-error \"a.blsp\" {:message \"unexpected ')'\" :line 2 :col 7})   ;=> \"a.blsp:2:7: unexpected ')'\""
+  (str label
+    (if (get complaint :line) (str ":" (get complaint :line) ":" (get complaint :col)) "")
+    ": "
+    (get complaint :message)))
+
+(defn source-excerpt (text:string complaint:map -> string)
+  "The line of `text` a read complaint points at, with a caret under its column, indented
+four spaces — empty when the complaint has no position.
+
+    (form-edit/source-excerpt \"(a\\n  [1 2)\" {:line 2 :col 7})   ;=> \"      [1 2)\\n          ^\""
+  (let (line (get complaint :line) col (get complaint :col))
+    (if (and (int? line) (int? col))
+      (str "    "
+        (nth (string/split text "\n") (dec line) "")
+        "\n    "
+        (string/repeat " " (dec col))
+        "^")
+      "")))
+
+;; ---- the forms of a text ----------------------------------------------------
+
+(defn- newline-offsets (text)
+  ;; the character offset of every line break in `text`, ascending
+  (letrec (walk (fn (from found)
+                  (let (at (index-of text "\n" from))
+                    (if (< at 0) found (walk (inc at) (conj found at))))))
+    (walk 0 [])))
+
+(defn- line-of (newlines offset)
+  ;; the 1-based line of character `offset`: one more than the line breaks before it
+  (letrec (search (fn (low high)
+                    (if (>= low high)
+                      (inc low)
+                      (let (middle (math/quot (+ low high) 2))
+                        (if (< (nth newlines middle 0) offset)
+                          (search (inc middle) high)
+                          (search low middle))))))
+    (search 0 (count newlines))))
+
+(defn- significant (node)
+  ;; the form children of a container node: no whitespace, no comments
+  (seq/filter (or (get node :kids) []) sexp/form?))
+
+(defn- node-name (node)
+  ;; what a name-position node names: a symbol's text, a string's contents
+  (case (get node :kind)
+    :symbol (get node :text)
+    :str (let (text (get node :text)) (string/substring text 1 (dec (count text))))
+    nil))
+
+(defn- definitions (node)
+  "The `[kind name]` pairs a top-level form defines: `(defn parse …)` is `[\"defn\"
+\"parse\"]`, a `(check-allow … FORM…)` wrapper is seen through to each form inside, a form
+whose second element is no symbol or string has a nil name, and a non-list has its node kind."
+  (let (kids (significant node) head (first kids))
+    (cond
+      (not (= (get node :kind) :list)) [[(->string (get node :kind)) nil]]
+      (nil? head) [["list" nil]]
+      (not (= (get head :kind) :symbol)) [["list" nil]]
+      (= (get head :text) "check-allow")
+        (let (inner (into []
+                      (mapcat (drop kids 1)
+                        (fn (kid) (if (= (get kid :kind) :list) (definitions kid) [])))))
+          (if (empty? inner) [["check-allow" nil]] inner))
+      else [[(get head :text) (when (second kids) (node-name (second kids)))]])))
+
+(defn- entries (text)
+  ;; every top-level form of `text` with its definitions, span and lines
+  (let (newlines (newline-offsets text))
+    (mapcat (sexp/top-level-forms text)
+      (fn (node)
+        (map (definitions node)
+          (fn ([kind name])
+            {:kind kind
+             :name name
+             :start (get node :start)
+             :end (get node :end)
+             :line (line-of newlines (get node :start))
+             :end-line (line-of newlines (dec (get node :end)))}))))))
+
+(defn list-forms (text:string -> vector)
+  "The top-level forms of `text`, in order, as `{:kind :name :line :end-line}` — what each
+defines (`kind` is the head, `defn`; `name` the defined name, nil when there is none).
+
+    (form-edit/list-forms \"(defn f (x) x)\\n(sig g (int -> int))\")   ;=> [{:kind \"defn\" :name \"f\" :line 1 :end-line 1} {:kind \"sig\" :name \"g\" :line 2 :end-line 2}]"
+  (into [] (map (entries text) (fn (entry) (dissoc entry :start :end)))))
+
+(defn- name-matches? (entry wanted)
+  ;; `wanted` is the defined name itself, or that name qualified (`mod/name`)
+  (let (name (get entry :name))
+    (and (string? name)
+      (or (= name wanted)
+        (= (last (string/split name "/")) wanted)
+        (= name (last (string/split wanted "/")))))))
+
+(defn- outline (text)
+  ;; the definitions of `text` as one line each, for a message
+  (string/join (map (seq/filter (list-forms text) (fn (entry) (get entry :name)))
+                 (fn (entry)
+                   (str "  "
+                     (get entry :line)
+                     "-"
+                     (get entry :end-line)
+                     " "
+                     (get entry :kind)
+                     " "
+                     (get entry :name))))
+    "\n"))
+
+(defn- find-entry (text wanted)
+  "The one entry `wanted` names — `parse`, or `defn parse` to pick the kind — or a refusal
+listing the definitions. A bare name defined by a `sig` and a `defn` means the definition."
+  (let (all (entries text)
+        whole (string/trim wanted)
+        space (index-of whole " ")
+        ;; the whole text as a name first (`describe "parser tests"`), then `KIND NAME`
+        [kind name] (if (or (< space 0) (any? all (fn (entry) (name-matches? entry whole))))
+                      [nil whole]
+                      [(string/substring whole 0 space)
+                        (string/trim (string/substring whole space (count whole)))])
+        named (seq/filter all (fn (entry) (name-matches? entry name)))
+        of-kind (if kind
+                  (seq/filter named (fn (entry) (= (get entry :kind) kind)))
+                  (let (definers (seq/reject named
+                                   (fn (entry) (includes? ["sig" "sig!"] (get entry :kind)))))
+                    (if (empty? definers) named definers)))
+        ;; one form can define a name twice over only through a bundled check-allow
+        spans (seq/distinct (map of-kind (fn (entry) [(get entry :start) (get entry :end)]))))
+    (cond
+      (= (count spans) 1) {:ok true :entry (first of-kind)}
+      (empty? spans)
+        {:ok false
+         :error (str "no top-level form defines `"
+                  wanted
+                  "`; the definitions are:\n"
+                  (outline text))}
+      else
+        {:ok false
+         :error (str "`"
+                  wanted
+                  "` names "
+                  (count spans)
+                  " top-level forms (lines "
+                  (string/join (map of-kind (fn (entry) (str (get entry :line)))) ", ")
+                  ") — pick one with its kind, `defn "
+                  name
+                  "`; the definitions are:\n"
+                  (outline text))})))
+
+(defn read-form (text:string wanted:string -> map)
+  "The exact source of the top-level form that defines `wanted` (`parse`, or `defn parse`)
+as `{:ok true :text :line :end-line}`, or `{:ok false :error}` listing the definitions.
+
+    (get (form-edit/read-form \"(def a 1)\\n(defn f (x)\\n  x)\" \"f\") :text)   ;=> \"(defn f (x)\\n  x)\""
+  (let (found (find-entry text wanted))
+    (if (get found :ok)
+      (let (entry (get found :entry))
+        {:ok true
+         :text (string/substring text (get entry :start) (get entry :end))
+         :line (get entry :line)
+         :end-line (get entry :end-line)})
+      found)))
+
+;; ---- writing ----------------------------------------------------------------
+
+(defn- formatted (replacement)
+  ;; the project formatter's layout of one form; the text as given if it cannot format
+  (check-allow :discarded-catch
+    (try
+      (string/trim (format/source replacement))
+      (catch _ (string/trim replacement)))))
+
+(defn- one-form (replacement)
+  "`replacement` checked to read as exactly one form, formatted as the project formats
+code: `{:ok true :text}`, or a refusal carrying the reader's complaint about it."
+  (let (complaint (read-error replacement))
+    (cond
+      complaint
+        {:ok false
+         :error (describe-error "the new form" complaint)
+         :line (get complaint :line)
+         :col (get complaint :col)
+         :hint "the text does not read: each `(`, `[` and `{` needs its closer — send the whole form, balanced"}
+      (not (= (count (reflect/read-all replacement)) 1))
+        {:ok false
+         :error (str "the new text reads as "
+                  (count (reflect/read-all replacement))
+                  " forms; send exactly one top-level form (insert-form adds another)")}
+      else {:ok true :text (formatted replacement)})))
+
+(defn- refuse-unreadable (text)
+  ;; a refusal when `text` itself does not read: its forms cannot be told apart
+  (let (complaint (read-error text))
+    (when complaint
+      {:ok false
+       :error (str (describe-error "the file" complaint)
+                " — it must read before a form can be replaced; fix it with edit or write")})))
+
+(defn- settled (text)
+  ;; the edited file, refused if it somehow no longer reads
+  (let (complaint (read-error text))
+    (if complaint
+      {:ok false :error (describe-error "the edited file" complaint) :hint *rebalance-hint*}
+      {:ok true :text text})))
+
+(defn- span-of (result before form-text)
+  ;; a successful result with the lines the form at the end of `before` now covers
+  (if (get result :ok)
+    (let (line (inc (count (newline-offsets before))))
+      (assoc result :line line :end-line (+ line (count (newline-offsets form-text)))))
+    result))
+
+(defn replace-form (text:string wanted:string replacement:string -> map)
+  "`text` with the top-level form that defines `wanted` replaced whole by `replacement`,
+which must read as exactly one form; it is formatted. `{:ok true :text :line :end-line}`
+(the new form's lines), or `{:ok false :error}` and nothing changed.
+
+    (get (form-edit/replace-form \"(defn f (x) x)\\n(def b 2)\" \"f\" \"(defn f (x)   (inc x))\") :text)   ;=> \"(defn f (x) (inc x))\\n(def b 2)\""
+  (or (refuse-unreadable text)
+    (let (found (find-entry text wanted) form (one-form replacement))
+      (cond
+        (not (get found :ok)) found
+        (not (get form :ok)) form
+        else
+          (let (entry (get found :entry)
+                before (string/substring text 0 (get entry :start))
+                after (string/substring text (get entry :end) (count text))
+                result (settled (str before (get form :text) after)))
+            (span-of result before (get form :text)))))))
+
+(defn- line-end-after (text offset)
+  ;; past the end of the line `offset` is on when only spaces or a comment follow it there,
+  ;; else `offset`: a trailing `; why` stays with the form it follows
+  (let (line-break (index-of text "\n" offset)
+        stop (if (< line-break 0) (count text) line-break)
+        rest-of-line (string/trim (string/substring text offset stop)))
+    (if (or (= rest-of-line "") (string/starts-with? rest-of-line ";")) stop offset)))
+
+(defn insert-form (text:string form-text:string after:string -> map)
+  "`text` with `form-text` (exactly one form, formatted) added as a new top-level form:
+after the form defining `after`, or at `\"start\"` (after a leading `(defmodule …)`, else
+first) or `\"end\"`. `{:ok true :text :line :end-line}` or `{:ok false :error}`.
+
+    (get (form-edit/insert-form \"(defmodule m)\\n\\n(def b 2)\\n\" \"(def a 1)\" \"start\") :text)   ;=> \"(defmodule m)\\n\\n(def a 1)\\n\\n(def b 2)\\n\""
+  (or (refuse-unreadable text)
+    (let (form (one-form form-text)
+          leading (first (entries text))
+          anchor (cond
+                   (= after "end") {:ok true :at :end}
+                   (= after "start")
+                     (if (and leading (= (get leading :kind) "defmodule"))
+                       {:ok true :at (line-end-after text (get leading :end))}
+                       {:ok true :at :start})
+                   else
+                     (let (found (find-entry text after))
+                       (if (get found :ok)
+                         {:ok true :at (line-end-after text (get (get found :entry) :end))}
+                         found))))
+      (cond
+        (not (get form :ok)) form
+        (not (get anchor :ok)) anchor
+        else
+          (let (at (get anchor :at) new-text (get form :text))
+            (case at
+              :end
+                (let (before (str (string/trim-right text) (if (= (string/trim text) "") "" "\n\n")))
+                  (span-of (settled (str before new-text "\n")) before new-text))
+              :start (span-of (settled (str new-text "\n\n" (string/trim-left text))) "" new-text)
+              (let (before (str (string/substring text 0 at) "\n\n"))
+                (span-of (settled (str before new-text (string/substring text at (count text))))
+                  before new-text))))))))
+
+(defn delete-form (text:string wanted:string -> map)
+  "`text` without the top-level form that defines `wanted` (and the blank lines it leaves
+are squeezed to one): `{:ok true :text}` or `{:ok false :error}`.
+
+    (get (form-edit/delete-form \"(def a 1)\\n\\n(def b 2)\\n\\n(def c 3)\\n\" \"b\") :text)   ;=> \"(def a 1)\\n\\n(def c 3)\\n\""
+  (or (refuse-unreadable text)
+    (let (found (find-entry text wanted))
+      (if (not (get found :ok))
+        found
+        (let (entry (get found :entry)
+              before (string/trim-right (string/substring text 0 (get entry :start)))
+              after (string/trim-left (string/substring text
+                                        (line-end-after text (get entry :end))
+                                        (count text))))
+          (settled (cond
+                     (= after "") (if (= before "") "" (str before "\n"))
+                     (= before "") after
+                     else (str before "\n\n" after))))))))
+
+(defn guard-write (label:string old-text:any new-text:string -> (or nil map))
+  "A refusal to write `new-text` over a source that read (`old-text`, nil for a new file)
+when `new-text` does not read — `{:ok false :error :line :col :hint}`, the position in the
+NEW text — or nil when the write may go ahead. A file that did not read before is not
+guarded: the write may be the repair.
+
+    (form-edit/guard-write \"a.blsp\" \"(a)\" \"(a b)\")   ;=> nil
+    (get (form-edit/guard-write \"a.blsp\" \"(a)\" \"(a b\") :ok)   ;=> false"
+  (let (complaint (read-error new-text))
+    (when (and complaint (or (nil? old-text) (nil? (read-error old-text))))
+      {:ok false
+       :error (describe-error label complaint)
+       :line (get complaint :line)
+       :col (get complaint :col)
+       :hint *rebalance-hint*})))

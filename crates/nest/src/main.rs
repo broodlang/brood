@@ -235,6 +235,8 @@ const BLSP_SUBCOMMANDS: &[&str] = &[
     "grammar",
     "format",
     "check",
+    "check-syntax",
+    "form",
     "test",
     "run",
     "new",

@@ -73,3 +73,59 @@ fn update_tooling_works_from_a_subdirectory() {
         "the project ROOT's reference was not refreshed from a subdir"
     );
 }
+
+#[test]
+fn update_tooling_merges_the_mcp_server_and_the_syntax_hook_without_clobbering() {
+    // ADR-789: `.mcp.json` gains the `brood` server and `.claude/settings.json` the
+    // `nest check-syntax --claude-hook` hook, beside whatever the project already has, and a
+    // second run changes nothing.
+    let tmp = temp_dir("uptool");
+    let (out, ok) = nest(&tmp.path, &["new", "demo"]);
+    assert!(ok, "nest new failed: {out}");
+    let proj = tmp.path.join("demo");
+    let mcp = proj.join(".mcp.json");
+    let settings = proj.join(".claude/settings.json");
+    // `nest new` writes both.
+    assert!(std::fs::read_to_string(&mcp).unwrap().contains("\"brood\""));
+    assert!(
+        std::fs::read_to_string(&settings)
+            .unwrap()
+            .contains("nest check-syntax --claude-hook")
+    );
+
+    std::fs::write(
+        &mcp,
+        "{\"mcpServers\": {\"other\": {\"command\": \"x\"}}}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &settings,
+        "{\"permissions\": {\"allow\": [\"Bash(ls)\"]}, \"hooks\": {\"PostToolUse\": \
+         [{\"matcher\": \"Bash\", \"hooks\": [{\"type\": \"command\", \"command\": \"echo\"}]}]}}\n",
+    )
+    .unwrap();
+    let (out, ok) = nest(&proj, &["update-tooling"]);
+    assert!(ok, "nest update-tooling failed: {out}");
+    let merged_mcp = std::fs::read_to_string(&mcp).unwrap();
+    assert!(
+        merged_mcp.contains("\"other\"") && merged_mcp.contains("\"brood\""),
+        "{merged_mcp}"
+    );
+    let merged = std::fs::read_to_string(&settings).unwrap();
+    assert!(
+        merged.contains("Bash(ls)") && merged.contains("\"echo\""),
+        "{merged}"
+    );
+    assert_eq!(
+        merged.matches("nest check-syntax --claude-hook").count(),
+        1,
+        "{merged}"
+    );
+
+    let (out, ok) = nest(&proj, &["update-tooling"]);
+    assert!(ok, "second nest update-tooling failed: {out}");
+    assert!(out.contains(".mcp.json (unchanged)"), "{out}");
+    assert!(out.contains("settings.json (unchanged)"), "{out}");
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), merged);
+    assert_eq!(std::fs::read_to_string(&mcp).unwrap(), merged_mcp);
+}

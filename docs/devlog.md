@@ -2612,3 +2612,29 @@ CPU blend of 37 targets 0.27 ms (was 7.7 ms), the CPU painter's whole vertex pas
 across the picture; checked on both adapters here, red with the GPU's morph flag cleared), and
 the timings `morph_cost_at_her_size` and `gpu_morph_cost_at_her_size` (ignored, run by hand).
 Run here: fmt, clippy, the 267 `gui` unit tests including the device test; suites are CI's.
+
+2026-11-24 (ADR-789). **Editing Brood is safe for an LLM: bracket errors say where, and edits
+take whole forms.** The recurring agent failure is a string-replace edit inside a function that
+leaves a `)` too many or too few. The reader now names the other end: an unclosed delimiter
+re-scans the source (only on failure) and reads its indentation parinfer-style, so
+`missing.blsp:2:3: unclosed list (opened here)` became ``unclosed list: `(let` opened at 2:3 is
+still open when line 5 starts `(defn b` at column 1 — `))` are missing before line 5``; `[1 2)`'s
+bare `unexpected ')'` became `unexpected ')' — expected ']' to close the vector opened at 2:8`; an
+extra closer names the form it falls after (``nothing is open here: the form `(defn a` that
+started at 1:1 closed at 3:13``), or the margin form that closed early when indented forms follow
+it. Still `E0002` for unclosed input, so the REPL's continuation is unchanged; a map left open
+after a key is now incomplete input too. On top, in Brood: `form-edit` (`list-forms`,
+`read-form`, `replace-form`, `insert-form`, `delete-form` over `sexp`'s positioned CST, a form
+named by what it defines), served as `nest mcp` tools and as `nest form …`; `nest mcp`'s
+`write`/`edit` refuse to leave a `.blsp` that read unreadable; `nest check-syntax` (the reader
+alone, `--claude-hook` for a Claude Code PostToolUse payload, exit 2); and `nest new` /
+`nest update-tooling` merge the `brood` server into `.mcp.json` and the hook into
+`.claude/settings.json` without clobbering, idempotently. The skill, `brood-for-claude.md` and the
+`brood-task` prompt lead with "change a function with `replace-form`". The new message caught a
+typo of mine in `scaffold.blsp` while writing this (`unexpected ']' — expected ')' to close the
+list opened at 427:8`). Guards: `syntax::reader::tests` (seven), `tests/form_edit_test.blsp`, the
+form-tool block of `tests/mcp_test.blsp` (sabotaged: the edit guard disabled turns two red),
+`crates/nest/tests/form_command.rs`, `update_tooling.rs`. Run here: fmt, clippy, `nest format
+--check`, `nest check` and `--strict` over std/tests/examples, banned-names, `source_map`,
+`embedded_paths_tracked`, `doc_refs`, `error_format_parity`, the reader unit tests and the
+touched test files one by one; the suites are CI's (desktop rule).

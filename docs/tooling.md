@@ -71,6 +71,28 @@ loop's per-call annotation refines it to the innermost LOCAL form. The REPL
 path (`eval_str`) leaves `file` unset, but `pos` is still attached so
 multi-line input gets a `LINE:COL:` prefix on the diagnostic.
 
+### Bracket errors say where the bracket belongs (ADR-789)
+
+A delimiter error names the other end, so the fix is a lookup rather than a count:
+
+```
+a.blsp:2:3: parse error: unclosed list: `(let` opened at 2:3 is still open when line 5 starts `(defn b` at column 1 — `))` are missing before line 5
+a.blsp:2:12: parse error: unexpected ')' — expected ']' to close the vector opened at 2:8
+a.blsp:3:14: parse error: unexpected ')' — nothing is open here: the form `(defn a` that started at 1:1 closed at 3:13
+```
+
+- **Unclosed:** for each delimiter still open at the end, the first later line whose first
+  token starts at or left of the opener's column has left its body (parinfer's reading of
+  indentation). The earliest such line wins, the innermost opener on a tie; the closers
+  that line leaves open are listed. With no such line the innermost opener is named, as
+  `unclosed list (opened here)`. The error is still incomplete input (`E0002`), so a REPL
+  keeps reading a multi-line form. The re-scan runs only once reading has failed.
+- **Mismatched:** a closer of the wrong kind names the one expected and where its opener is.
+- **Extra:** a closer at top level names the form it falls after; when the forms before it
+  began indented, it names the form at the margin that closed early, whose body they were.
+
+`nest check-syntax FILE…` prints exactly these, reader only, with no project load.
+
 ### Auto-running the advisory checker
 
 `brood <file>`, `brood --test <file>`, `nest test`, and `nest run` all

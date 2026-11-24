@@ -6,6 +6,25 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Added: bracket errors say where the bracket belongs (ADR-789).** An unclosed delimiter names
+the later line its body was left at, read from the indentation: ``unclosed list: `(let` opened at
+2:3 is still open when line 5 starts `(defn b` at column 1 — `))` are missing before line 5``.
+A wrong closer names the expected one and its opener (`unexpected ')' — expected ']' to close the
+vector opened at 2:8`), and an extra closer at top level the form it falls after.
+
+**Added: edit Brood by whole top-level form (ADR-789).** `nest mcp` serves `list-forms`,
+`read-form`, `replace-form`, `insert-form` and `delete-form`, and `nest form list|read|replace|
+insert|delete` does the same from a shell (the new form on stdin). A form is named by what it
+defines (`parse`, or `defn parse`); a new form must read as exactly one form, is formatted, and a
+refusal writes nothing. **Changed:** `nest mcp`'s `write` and `edit` refuse to leave a `.blsp`
+that read unreadable, with the reader's message and its position in the new text.
+
+**Added: `nest check-syntax FILE…` (ADR-789).** The reader alone, no project load: silent and 0
+when every file reads, the first read error of each that does not and exit 1 otherwise.
+`--claude-hook` reads a Claude Code hook payload on stdin and exits 2 with the message on stderr.
+`nest new` and `nest update-tooling` now merge the `brood` server into `.mcp.json` and that hook
+into `.claude/settings.json`, keeping what is there; a second run changes nothing.
+
 **Changed: `nest test --watch` waits on the OS.** It watches each directory holding a source or
 test file (`file/watch`, ADR-782) and reruns when a save is reported, instead of reading every
 file's mtime five times a second; a slow look every 5 s is the backstop.

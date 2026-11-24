@@ -14,7 +14,9 @@ launch over an unbound symbol in the entry point's require-closure; `--no-check`
 `--watch`; `--check-boot` loads every module and resolves `:main` but runs nothing, KI-66),
 `doc`, `docs`, `doctest`, `format`, `repl`, `mcp` (an MCP server over the project, ADR-036),
 `observe`, `attach` (thin frontend for a `ui-run` daemon, ADR-090), `completions`/`complete`,
-`grammar` (editor grammars from `(special-forms)`, ADR-092), `rename`, `ws`, `stdimage`, the
+`grammar` (editor grammars from `(special-forms)`, ADR-092), `rename`, `check-syntax` (the
+reader alone over FILEs, or a Claude Code hook payload with `--claude-hook`, ADR-789), `form`
+(`list`/`read`/`replace`/`insert`/`delete` a whole top-level form by name, ADR-789), `ws`, `stdimage`, the
 package manager (`fetch`/`update`/`tree`/`add`/`remove`, ADR-037; `publish`/`search` against
 the hosted `hive` registry, ADR-147/211; `key`, ADR-212), `release` (bundling, ADR-038;
 boot-checks the binary it wrote and deletes it on failure; `--no-smoke` opts out), and

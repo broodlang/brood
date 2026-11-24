@@ -3347,7 +3347,10 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   (trivia); a control character inside a symbol is a parse error naming it. The
   shebang is a property of a whole source: `load`, `reflect/read-all` and
   `reflect/eval-string` skip it, `nest format` keeps it, and `reflect/read-string`
-  of one form reads `#!` as the dispatch error it is. A line break is `\n`, `\r\n`
+  of one form reads `#!` as the dispatch error it is. A bracket error says where the
+  bracket belongs: an unclosed delimiter names the later line that dedents out of it (a
+  `)` is missing before line 5), a wrong closer the one expected and its opener, an extra closer the top-level
+  form it falls after (ADR-789, `docs/tooling.md`). A line break is `\n`, `\r\n`
   or a lone `\r` — exactly what an editor counts, so a diagnostic's line is the
   editor's line; U+2028/U+2029 are ordinary whitespace, not line breaks. A
   `case`/`cond`/`match`/`receive` may have hundreds of arms: each lowers to one nested

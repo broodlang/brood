@@ -300,6 +300,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `tool/doctest.blsp` (`doctest`) — Run the examples in docstrings and report the ones that do not hold.
 - `tool/eval-server.blsp` (`eval-server`) — A line-protocol eval server for a dedicated runtime, plus the pure codec its client shares.
 - `tool/explain.blsp` (`explain`) — Teach-the-error and intent→idiom lookup for agents and the REPL: `(error "E0030")` explains an error code (or a caught error map); `(find-pattern "loop")` returns the idiomatic Brood pattern for a task.
+- `tool/form-edit.blsp` (`form-edit`) — Edit Brood source by whole top-level forms named by what they define: `list-forms`, `read-form`, `replace-form`, `insert-form`, `delete-form`, and `read-error` (the reader's complaint about a text).
 - `tool/grammar.blsp` (`grammar`) — Generate editor syntax grammars from `(reflect/special-forms)` — one source of truth, no drift across editors.
 - `tool/mcp.blsp` (`mcp`) — The `nest mcp` server: the Model Context Protocol over stdio (ADR-036, docs/mcp.md) — the JSON-RPC loop, its dispatch and error mapping, and the tool catalogue it serves.
 - `tool/module-graph.blsp` (`module-graph`) — `nest deps` — a project's module dependencies, read as CONTEXTS (ADR-752).

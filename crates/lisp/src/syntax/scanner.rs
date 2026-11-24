@@ -192,6 +192,12 @@ impl<'a> Scanner<'a> {
         Some(c)
     }
 
+    /// The whole source text, for a diagnostic that re-scans it (the reader's
+    /// unclosed-delimiter hint walks the text again only once reading has failed).
+    pub fn src(&self) -> &'a str {
+        self.src
+    }
+
     /// True if the unconsumed input begins with `prefix`. A cheap multi-char
     /// lookahead — used by the reader/CST to tell a `#b"…"` bytes literal from a
     /// `#`-prefixed symbol (`#`, like any non-delimiter, is an ordinary atom char).
