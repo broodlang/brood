@@ -214,7 +214,11 @@ fn a_save_is_heard_from_the_os_not_the_backstop() {
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::create_dir_all(dir.join("tests")).unwrap();
     write(dir, "project.blsp", "(project :name watchnotify)\n");
-    write(dir, "src/calc.blsp", "(defmodule calc)\n(defn add (a b) (+ a b))\n");
+    write(
+        dir,
+        "src/calc.blsp",
+        "(defmodule calc)\n(defn add (a b) (+ a b))\n",
+    );
     write(
         dir,
         "tests/calc_test.blsp",
@@ -228,7 +232,11 @@ fn a_save_is_heard_from_the_os_not_the_backstop() {
     std::thread::sleep(Duration::from_millis(300));
     let at = session.len();
     let saved = Instant::now();
-    write(dir, "src/calc.blsp", "(defmodule calc)\n(defn add (a b) (- a b))\n");
+    write(
+        dir,
+        "src/calc.blsp",
+        "(defmodule calc)\n(defn add (a b) (- a b))\n",
+    );
     session.wait_for(at, "calc.blsp changed");
     let heard = saved.elapsed();
     assert!(

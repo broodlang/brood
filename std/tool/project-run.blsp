@@ -433,9 +433,10 @@ alone.
   ;; until the OS reports a change in a watched directory, or the backstop look is due
   (receive
     ([:file-watch _ _ _] (watch-drain))
-    (after (if (any? (vals subscribed) (fn (handle) (not (nil? handle))))
-             *watch-backstop-ms*
-             *watch-poll-ms*)
+    (after
+      (if (any? (vals subscribed) (fn (handle) (not (nil? handle))))
+        *watch-backstop-ms*
+        *watch-poll-ms*)
       nil)))
 
 (defn- watch-loop (root named opts stamps &optional (subscribed {}))
