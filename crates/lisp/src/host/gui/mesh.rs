@@ -51,8 +51,10 @@ pub const MAX_SCENE_SIDE: u32 = 4096;
 /// The most vertices one mesh may have: 80 bytes each on the GPU target stays under the
 /// smallest buffer every device allows (256 MiB).
 pub const MAX_VERTICES: usize = 3 << 20;
-/// The most bytes of morph targets one mesh may carry: 32 bytes a vertex a target on the GPU
-/// target, under the smallest storage binding every device allows (128 MiB).
+/// The most bytes of morph targets one mesh may carry as uploaded: 24 bytes a vertex a target
+/// (position and normal offsets, every vertex, as a glTF buffer holds them), before they are
+/// kept sparse. Neither painter keeps them dense: the GPU target uploads one blended offset a
+/// vertex a frame. The cap bounds what one `gui/mesh` call may make the host unpack.
 pub const MAX_MORPH_BYTES: usize = 128 << 20;
 /// The most indices one mesh may have (4 bytes each on the GPU target, under 256 MiB).
 pub const MAX_INDICES: usize = 63 << 20;
@@ -405,7 +407,7 @@ impl Mesh {
         if let Some(bad) = indices.iter().find(|&&index| index as usize >= count) {
             return Err(format!("indices: {bad} names no vertex of {count}"));
         }
-        let morph_bytes = parts.morphs.len() * count * 32;
+        let morph_bytes = parts.morphs.len() * count * 24;
         if morph_bytes > MAX_MORPH_BYTES {
             return Err(format!(
                 "{} morph targets of {count} vertices need {morph_bytes} bytes, more than {MAX_MORPH_BYTES}",
@@ -2033,7 +2035,7 @@ mod tests {
         let vertices = 3 << 15;
         let too_many_morphs = MeshParts {
             positions: vec![0; vertices * 12],
-            morphs: vec![(Vec::new(), Vec::new()); MAX_MORPH_BYTES / (vertices * 32) + 1],
+            morphs: vec![(Vec::new(), Vec::new()); MAX_MORPH_BYTES / (vertices * 24) + 1],
             ..MeshParts::default()
         };
         assert!(
