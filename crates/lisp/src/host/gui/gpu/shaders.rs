@@ -792,8 +792,11 @@ struct StrandVertex {
 // `mesh::strand_vertex`: a strand's point on its ribbon's side `uv.x`, the ribbon `widths`
 // (root, tip; `uv.y` 1 at the root) wide but never under a pixel, turned to face the camera
 fn strand_vertex(centre: vec3<f32>, direction: vec3<f32>, uv: vec2<f32>, widths: vec2<f32>) -> StrandVertex {
-    let width = widths.y + (widths.x - widths.y) * clamp(uv.y, 0.0, 1.0);
     let view = safe_normalize(scene.eye.xyz - centre);
+    // seen end-on it narrows, never under `mesh::STRAND_END_ON` of its width
+    let along = dot(direction, view);
+    let width = (widths.y + (widths.x - widths.y) * clamp(uv.y, 0.0, 1.0))
+        * max(sqrt(max(1.0 - along * along, 0.0)), 0.3);
     let across = safe_normalize(cross(direction, view));
     let facing = safe_normalize(cross(across, direction));
     let near = scene.view_proj * vec4<f32>(centre, 1.0);

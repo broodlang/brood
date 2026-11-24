@@ -135,6 +135,9 @@ pub const HAIR_SECONDARY_SHARPNESS: f32 = 0.25;
 /// A `:strands` surface's width at the root and the tip by default, metres: a strand stands for
 /// a few hairs (a clump), so that at a few metres it covers part of a pixel rather than none.
 pub const DEFAULT_STRAND_WIDTH: [f32; 2] = [0.0005, 0.0002];
+/// The least of its width a `:strands` ribbon keeps when the strand runs straight at the eye
+/// ([`strand_vertex`]).
+pub const STRAND_END_ON: f32 = 0.3;
 pub const HAIR_COVERAGE_STEPS: [[f32; 2]; 2] = [[0.125, 0.625], [0.875, 0.375]];
 
 /// The reach of the ambient occlusion, in metres, when `:ambient-occlusion` names none: the
@@ -3034,7 +3037,11 @@ pub fn strand_sample_step(world: [f32; 3], sample: usize) -> f32 {
 /// `direction`. Never under one of the picture's pixels wide where the point stands: a thinner
 /// strand is drawn a pixel wide, its coverage the share it fills. Answers the vertex, its normal
 /// (a cylinder's, turned to that side) and the coverage. The shader's `strand_vertex` is the
-/// same.
+/// same. Seen end-on the ribbon narrows, by the sine of the angle between the strand and the
+/// line of sight but never under [`STRAND_END_ON`] of its width: a lock pointing at the eye
+/// shows its cross-section, and a full-width ribbon there is a plate whose side spins with every
+/// bend of the strand (wide strands, wisps of hair, broke into shingles where they ran at the
+/// camera).
 pub fn strand_vertex(
     scene: &Scene,
     centre: [f32; 3],
@@ -3043,6 +3050,8 @@ pub fn strand_vertex(
     width: f32,
 ) -> ([f32; 3], [f32; 3], f32) {
     let view = normalize(subtract(scene.eye, centre));
+    let along = dot(direction, view);
+    let width = width * (1.0 - along * along).max(0.0).sqrt().max(STRAND_END_ON);
     let across = normalize(cross(direction, view));
     let facing = normalize(cross(across, direction));
     // the metres a picture pixel spans across the strand here: where a centimetre lands
@@ -4016,6 +4025,25 @@ mod tests {
             (thin.2 - 0.2).abs() < 1e-4,
             "covering its share of it: {}",
             thin.2
+        );
+    }
+
+    #[test]
+    fn a_strand_seen_end_on_narrows_but_keeps_a_share_of_its_width() {
+        // seen from z = −10: a strand across the view keeps its width; one leaning 60° toward
+        // the eye keeps half (the sine of the 30° left between it and the line of sight); one
+        // 10° off the line of sight keeps STRAND_END_ON of it, not the 0.17 its sine would leave
+        let seen = scene(draw());
+        let half_width = |direction: [f32; 3]| {
+            strand_vertex(&seen, [0.0, 0.0, 0.5], normalize(direction), 1.0, 0.5).0[0].abs()
+        };
+        assert!((half_width([0.0, 1.0, 0.0]) - 0.25).abs() < 1e-5);
+        let leaning = half_width([0.0, 0.5, -0.866_025_4]);
+        assert!((leaning - 0.125).abs() < 1e-3, "half its width: {leaning}");
+        let end_on = half_width([0.0, 0.173_648_2, -0.984_807_7]);
+        assert!(
+            (end_on - 0.25 * STRAND_END_ON).abs() < 1e-3,
+            "its least share: {end_on}"
         );
     }
 
