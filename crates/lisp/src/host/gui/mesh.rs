@@ -48,6 +48,15 @@ pub const NEAR_LIGHT: f32 = 0.01;
 const CUBE_MARGIN: f32 = 3.0;
 /// The largest side of a scene's picture, in pixels.
 pub const MAX_SCENE_SIDE: u32 = 4096;
+/// The taps the ambient occlusion reads a fragment: fixed points over the hemisphere its surface
+/// faces (the same set in both painters, so their pictures agree).
+pub const OCCLUSION_TAPS: usize = 16;
+/// The largest side, in texels, of the camera's depth view the ambient occlusion reads: it
+/// only needs the scene's shape, not its pixels.
+pub const MAX_OCCLUSION_SIDE: u32 = 2048;
+/// The reach of the ambient occlusion, in metres, when `:ambient-occlusion` names none: the
+/// size of the folds it darkens (a mouth's corner, a crease beside the nose).
+pub const DEFAULT_OCCLUSION_RADIUS: f32 = 0.03;
 /// The most vertices one mesh may have: 80 bytes each on the GPU target stays under the
 /// smallest buffer every device allows (256 MiB).
 pub const MAX_VERTICES: usize = 3 << 20;
@@ -564,6 +573,17 @@ impl Default for Shadow {
     }
 }
 
+/// A scene's ambient occlusion: how much of the ambient light (`sky`, `ground`) reaches a
+/// surface past what is round it, read from the camera's depth of the scene's shadow-casting
+/// draws (screen-space: folds, creases, corners and contact, deepening as the shapes move).
+/// `radius` is how far round a point it looks, in metres; `strength` how dark a fully enclosed
+/// point gets, 0 … 1. Lights are not touched: they have their shadows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AmbientOcclusion {
+    pub radius: f32,
+    pub strength: f32,
+}
+
 /// A light (ADR-786, ADR-788). `direction` is the way its light TRAVELS (from the light into
 /// the scene) for a directional or spot light; `position` is where a point or spot light is;
 /// `color` is linear, intensity included — for a point or spot light the light arriving 1 m
@@ -658,6 +678,8 @@ pub struct Scene {
     /// The ambient light from above and from below (linear).
     pub sky: [f32; 3],
     pub ground: [f32; 3],
+    /// The ambient occlusion, if any (`:ambient-occlusion`).
+    pub ambient_occlusion: Option<AmbientOcclusion>,
     /// Scales the light before tone mapping.
     pub exposure: f32,
     /// What the rect shows where no mesh is: straight RGBA 0 … 1, transparent by default.
@@ -811,8 +833,10 @@ pub fn light_arrival(light: &Light, world: [f32; 3]) -> ([f32; 3], f32) {
 
 /// The light leaving a surface point toward the eye, linear and before exposure: `base` its
 /// linear colour, `normal` its unit normal facing the viewer's side, `view` the unit
-/// direction from it to the eye, `world` where it is, and `visibility` how much of each
-/// light (by index) its shadow lets through — 1 for a light it holds no entry for.
+/// direction from it to the eye, `world` where it is, `visibility` how much of each light (by
+/// index) its shadow lets through — 1 for a light it holds no entry for — and `occlusion` how
+/// much of the ambient light reaches it ([`ambient_occlusion`]; 1 for all of it).
+#[allow(clippy::too_many_arguments)]
 pub fn shade(
     scene: &Scene,
     material: &Material,
@@ -821,11 +845,13 @@ pub fn shade(
     view: [f32; 3],
     world: [f32; 3],
     visibility: &[f32],
+    occlusion: f32,
 ) -> [f32; 3] {
     let up = normal[1] * 0.5 + 0.5;
     let mut out = [0.0f32; 3];
     for channel in 0..3 {
         out[channel] = base[channel]
+            * occlusion
             * (scene.ground[channel] + (scene.sky[channel] - scene.ground[channel]) * up);
     }
     let exponent = shininess(material.roughness);
@@ -894,6 +920,9 @@ pub struct ShadowPlan {
     pub lights: [(u32, u32); MAX_LIGHTS],
     /// The side of the layers the GPU target keeps the views in: the largest view's.
     pub layer_side: u32,
+    /// Which view is the camera's depth for the ambient occlusion — none without it (or no
+    /// room left for it).
+    pub occlusion: Option<u32>,
 }
 
 /// Where `draw`'s vertices can be in the world this frame — morphed, skinned and moved — from
@@ -1168,6 +1197,7 @@ pub fn shadow_plan(scene: &Scene, world: Option<Bounds>) -> ShadowPlan {
         views: Vec::new(),
         lights: [(0, 0); MAX_LIGHTS],
         layer_side: 0,
+        occlusion: None,
     };
     let mut shadowed = 0;
     for (index, light) in scene.lights.iter().enumerate().take(MAX_LIGHTS) {
@@ -1190,6 +1220,23 @@ pub fn shadow_plan(scene: &Scene, world: Option<Bounds>) -> ShadowPlan {
         plan.lights[index] = (plan.views.len() as u32, views.len() as u32);
         plan.layer_side = layer_side;
         plan.views.extend(views);
+    }
+    // the ambient occlusion's view: the camera's own, square (its depth is read by where a
+    // point falls in the picture, not texel for pixel), as fine as the picture up to a limit
+    if scene.ambient_occlusion.is_some() && plan.views.len() < MAX_SHADOW_VIEWS {
+        let (width, height) = scene.pixel_size();
+        let side = width.max(height).clamp(MIN_SHADOW_SIDE, MAX_OCCLUSION_SIDE);
+        let layer_side = plan.layer_side.max(side);
+        let layers = (plan.views.len() + 1) as u64;
+        if layers * u64::from(layer_side) * u64::from(layer_side) <= MAX_SHADOW_TEXELS {
+            plan.occlusion = Some(plan.views.len() as u32);
+            plan.layer_side = layer_side;
+            plan.views.push(ShadowView {
+                view_proj: scene.view_proj,
+                resolution: side,
+                texel: 0.0,
+            });
+        }
     }
     plan
 }
@@ -1297,6 +1344,115 @@ pub fn shadow_visibility(
     } else {
         sample_shadow(view, plan.layer_side, depth_map, biased)
     }
+}
+
+/// The distance along the view of a point at clip depth `depth` (0 … 1) in the view
+/// `view_proj` projects: its clip w, for a perspective view (whose clip depth is `a + b / w`);
+/// for an orthographic one (w is 1 everywhere) the depth over its row's length, a distance up
+/// to a constant — all the ambient occlusion compares. The shader's `view_distance` is the
+/// same.
+pub fn view_distance(view_proj: &[f32; 16], depth: f32) -> f32 {
+    let depth_row = [view_proj[2], view_proj[6], view_proj[10], view_proj[14]];
+    let w_row = [view_proj[3], view_proj[7], view_proj[11], view_proj[15]];
+    let w_length = dot(
+        [w_row[0], w_row[1], w_row[2]],
+        [w_row[0], w_row[1], w_row[2]],
+    );
+    if w_length < 1e-12 {
+        let depth_length = dot(
+            [depth_row[0], depth_row[1], depth_row[2]],
+            [depth_row[0], depth_row[1], depth_row[2]],
+        )
+        .sqrt();
+        return depth / depth_length.max(1e-12);
+    }
+    let slope = dot(
+        [depth_row[0], depth_row[1], depth_row[2]],
+        [w_row[0], w_row[1], w_row[2]],
+    ) / w_length;
+    let offset = depth_row[3] - slope * w_row[3];
+    let gap = depth - slope;
+    if gap.abs() < 1e-12 {
+        return f32::MAX;
+    }
+    offset / gap
+}
+
+/// Tap `index` of the ambient occlusion, in the frame of the surface (x and y across it, z
+/// along its normal), as a share of the radius: a golden-angle spiral over the hemisphere,
+/// denser toward the normal (cosine-weighted, as the ambient light arrives), the taps reaching
+/// further as they go round, from a fifth of the radius to all of it. The shader's
+/// `occlusion_tap` is the same.
+pub fn occlusion_tap(index: usize) -> [f32; 3] {
+    let share = (index as f32 + 0.5) / OCCLUSION_TAPS as f32;
+    let angle = index as f32 * 2.399_963;
+    let across = share.sqrt();
+    let reach = 0.2 + 0.8 * share * share;
+    [
+        angle.cos() * across * reach,
+        angle.sin() * across * reach,
+        (1.0 - share).sqrt() * reach,
+    ]
+}
+
+/// How much of the ambient light reaches `world`, whose surface's unit normal is `normal`:
+/// 1 without ambient occlusion. Each tap of the hemisphere the surface faces is a point
+/// `radius` round it at most; a tap behind what the camera's depth view (`plan.occlusion`)
+/// holds there is enclosed, counted fully when that surface is within the radius of the
+/// point, less the further it is in front (a near object far in front of a wall does not
+/// darken the wall). The shader's `ambient_occlusion` is the same.
+pub fn ambient_occlusion(
+    scene: &Scene,
+    plan: &ShadowPlan,
+    maps: &[Vec<f32>],
+    world: [f32; 3],
+    normal: [f32; 3],
+) -> f32 {
+    let (Some(settings), Some(at)) = (scene.ambient_occlusion, plan.occlusion) else {
+        return 1.0;
+    };
+    let (Some(view), Some(depth_map)) = (plan.views.get(at as usize), maps.get(at as usize)) else {
+        return 1.0;
+    };
+    let radius = settings.radius;
+    let clip = transform(&view.view_proj, world, 1.0);
+    if radius <= 0.0 || clip[3] <= 1e-6 {
+        return 1.0;
+    }
+    let distance = view_distance(&view.view_proj, clip[2] / clip[3]);
+    let helper = if normal[1].abs() < 0.99 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let across = normalize(cross(helper, normal));
+    let along = cross(normal, across);
+    let side = view.resolution as usize;
+    let mut occluded = 0.0;
+    for index in 0..OCCLUSION_TAPS {
+        let tap = occlusion_tap(index);
+        let point = [0, 1, 2].map(|axis| {
+            world[axis]
+                + (across[axis] * tap[0] + along[axis] * tap[1] + normal[axis] * tap[2]) * radius
+        });
+        let clip = transform(&view.view_proj, point, 1.0);
+        if clip[3] <= 1e-6 {
+            continue;
+        }
+        let across_unit = clip[0] / clip[3] * 0.5 + 0.5;
+        let down_unit = 0.5 - clip[1] / clip[3] * 0.5;
+        if !(0.0..1.0).contains(&across_unit) || !(0.0..1.0).contains(&down_unit) {
+            continue;
+        }
+        let column = ((across_unit * side as f32) as usize).min(side - 1);
+        let row = ((down_unit * side as f32) as usize).min(side - 1);
+        let stored = view_distance(&view.view_proj, depth_map[row * side + column]);
+        let reached = view_distance(&view.view_proj, clip[2] / clip[3]);
+        if stored < reached - radius * 0.05 {
+            occluded += (radius / (distance - stored).abs().max(1e-6)).min(1.0);
+        }
+    }
+    (1.0 - settings.strength * occluded / OCCLUSION_TAPS as f32).clamp(0.0, 1.0)
 }
 
 /// The taps a soft shadow reads, each a bilinear comparison.
@@ -1798,10 +1954,26 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     );
                 }
             }
+            let occlusion = ambient_occlusion(
+                scene,
+                context.shadows,
+                context.shadow_maps,
+                world,
+                surface_normal,
+            );
             let eye = scene.eye;
             let view = normalize([eye[0] - world[0], eye[1] - world[1], eye[2] - world[2]]);
             let lit = tone(
-                shade(scene, material, base, normal, view, world, &visibility),
+                shade(
+                    scene,
+                    material,
+                    base,
+                    normal,
+                    view,
+                    world,
+                    &visibility,
+                    occlusion,
+                ),
                 scene.exposure,
             );
             let under = canvas.color[slot];
@@ -2108,6 +2280,7 @@ mod tests {
             sky: [0.1, 0.1, 0.1],
             ground: [0.1, 0.1, 0.1],
             exposure: 1.0,
+            ambient_occlusion: None,
             background: [0.0, 0.0, 0.0, 0.0],
             palettes: vec![],
             draws: vec![draw],
@@ -2285,6 +2458,7 @@ mod tests {
             [0.0, 0.0, -1.0],
             [0.0; 3],
             &[],
+            1.0,
         );
         let wrapped = shade(
             &scene,
@@ -2294,6 +2468,7 @@ mod tests {
             [0.0, 0.0, -1.0],
             [0.0; 3],
             &[],
+            1.0,
         );
         assert!(wrapped[0] > plain[0] + 0.2, "red wraps round");
         assert!(
@@ -2315,6 +2490,7 @@ mod tests {
             [0.0, 0.0, 1.0],
             [0.0; 3],
             &[],
+            1.0,
         );
         assert!(lit.iter().all(|channel| channel.is_finite()));
     }
@@ -2332,7 +2508,7 @@ mod tests {
             specular: 0.0,
             ..Material::default()
         };
-        shade(&lit, &material, [1.0; 3], normal, normal, world, &[])[0]
+        shade(&lit, &material, [1.0; 3], normal, normal, world, &[], 1.0)[0]
     }
 
     #[test]
@@ -2534,6 +2710,48 @@ mod tests {
         // the edge filtered over 0.3 m as the light sees it lies across 0.3 × √2 of floor at 45°,
         // and the slope bias (0.3 m toward the light) carries it ~0.2 m further
         no_acne(&soft, &without, -1.5..-0.5, 0.75);
+    }
+
+    #[test]
+    fn ambient_occlusion_darkens_the_floor_beside_a_low_card_and_nothing_open() {
+        // the floor lit by its ambient alone, a 1 m card lying 10 cm over its middle
+        let (mut scene, mut meshes) = floor_and_card(slanted());
+        meshes.insert(
+            2,
+            Arc::new(quad([
+                [-0.5, 0.1, 0.5],
+                [0.5, 0.1, 0.5],
+                [0.5, 0.1, -0.5],
+                [-0.5, 0.1, -0.5],
+            ])),
+        );
+        scene.lights = Vec::new();
+        scene.sky = [0.5; 3];
+        scene.ground = [0.5; 3];
+        let without = paint(&scene, &meshes);
+        scene.ambient_occlusion = Some(AmbientOcclusion {
+            radius: 0.3,
+            strength: 1.0,
+        });
+        let with = paint(&scene, &meshes);
+        let red = |picture: &[u8], x: f32| i32::from(red_at(picture, x, 0.0));
+        assert!(
+            red(&with, -0.55) + 15 < red(&without, -0.55),
+            "the floor tucked beside the card's edge darkens: {} against {}",
+            red(&with, -0.55),
+            red(&without, -0.55)
+        );
+        assert!(
+            red(&with, -0.55) < red(&with, -0.75),
+            "more the closer it is to the edge"
+        );
+        // open floor, a radius and more from the card, is the same as without: a flat surface
+        // does not occlude itself
+        for x in [-2.5f32, -1.5, 2.0] {
+            assert_eq!(red(&with, x), red(&without, x), "open floor at x {x}");
+        }
+        // the card's own top, open to the sky, is untouched too
+        assert_eq!(red(&with, 0.0), red(&without, 0.0), "the card's top");
     }
 
     /// Every floor pixel of `with_shadow` and `without` outside the card and its shadow (and a

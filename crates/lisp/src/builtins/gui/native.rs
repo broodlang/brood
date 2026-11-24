@@ -1500,7 +1500,8 @@ fn emitter_spec(
 /// numbers, a column-major view-projection with clip depth 0 … 1 — required), `:eye [x y z]`,
 /// `:lights` (up to `MAX_LIGHTS`, each directional, point or spot — [`light_spec`], ADR-788),
 /// `:sky` / `:ground [r g b]` (the ambient from above and below), `:exposure`, `:background
-/// [r g b a]` (0 … 1, transparent by default), `:palettes` (joint matrices, 16 numbers each: a
+/// [r g b a]` (0 … 1, transparent by default), `:ambient-occlusion {:radius m :strength s}`
+/// (or `true`: folds and corners darken the ambient light — off by default), `:palettes` (joint matrices, 16 numbers each: a
 /// vector of numbers or f32 bytes per skeleton) and `:draws [{:mesh h :model [16] :palette i
 /// :morphs [[target weight] …] :material {…}} …]`. Colours and light are linear. A key of the
 /// wrong shape keeps its default and a draw without a mesh handle is dropped — except the
@@ -1513,7 +1514,9 @@ fn scene_spec(
     spec: Value,
     num: &dyn Fn(Value) -> f32,
 ) -> Result<Option<crate::host::gui::mesh::Scene>, String> {
-    use crate::host::gui::mesh::{Draw, Material, Scene, Surface};
+    use crate::host::gui::mesh::{
+        AmbientOcclusion, DEFAULT_OCCLUSION_RADIUS, Draw, Material, Scene, Surface,
+    };
     let Value::Map(map) = spec else {
         return Ok(None);
     };
@@ -1706,6 +1709,25 @@ fn scene_spec(
     };
     let background = numbers(get(map, "background"), 4)
         .map_or([0.0; 4], |color| [color[0], color[1], color[2], color[3]]);
+    // `:ambient-occlusion {:radius metres :strength 0 … 1}` (or `true` for the defaults): the
+    // ambient light darkened in folds and corners (`mesh::ambient_occlusion`); off without it
+    let ambient_occlusion = match get(map, "ambient-occlusion") {
+        Some(Value::Bool(true)) => Some(AmbientOcclusion {
+            radius: DEFAULT_OCCLUSION_RADIUS,
+            strength: 1.0,
+        }),
+        Some(Value::Map(settings)) => {
+            let number = |key: &str, default: f32| match get(settings, key) {
+                Some(item) if is_number(item) && num(item).is_finite() => num(item),
+                _ => default,
+            };
+            Some(AmbientOcclusion {
+                radius: number("radius", DEFAULT_OCCLUSION_RADIUS).max(0.0),
+                strength: number("strength", 1.0).clamp(0.0, 1.0),
+            })
+        }
+        _ => None,
+    };
     Ok(Some(Scene {
         x: rect[0],
         y: rect[1],
@@ -1717,6 +1739,7 @@ fn scene_spec(
         sky: three(get(map, "sky"), [0.3, 0.32, 0.36]),
         ground: three(get(map, "ground"), [0.1, 0.08, 0.06]),
         exposure,
+        ambient_occlusion,
         background,
         palettes,
         draws,

@@ -772,10 +772,11 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; ones after in front, so a game lays a backdrop, a 3D figure and a HUD in one frame with no
 ;; mode to switch. The spec carries a camera (`:camera`, 16 numbers: a column-major
 ;; view-projection with clip depth 0 … 1, and `:eye`), up to eight `:lights` over a
-;; `:sky`/`:ground` ambient, an
-;; `:exposure`, a `:background` ([r g b a], transparent by default), the skeletons' joint
-;; `:palettes` (16 numbers a joint, or f32 bytes), and the `:draws` — each `{:mesh handle
-;; :model [16] :palette i :morphs [[target weight] …] :material {…}}`. A material is the fixed
+;; `:sky`/`:ground` ambient (darkened in folds and corners with `:ambient-occlusion {:radius m
+;; :strength s}`, or `true` for 3 cm at full strength), an `:exposure`, a `:background`
+;; ([r g b a], transparent by default), the skeletons' joint `:palettes` (16 numbers a joint,
+;; or f32 bytes), and the `:draws` — each `{:mesh handle :model [16] :palette i :morphs
+;; [[target weight] …] :material {…}}`. A material is the fixed
 ;; shading model's parameters: `:surface` (:skin, :standard, :cutout or :blend), `:base` and
 ;; `:normal` (texture handles), `:color`, `:roughness`, `:specular`, `:wrap` and `:scatter`
 ;; (light under the skin), `:rim`, `:cutoff`, `:double-sided`, `:cast-shadow` (true by

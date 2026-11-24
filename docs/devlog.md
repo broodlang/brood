@@ -2653,3 +2653,15 @@ lit floor shadowed itself by 4% (found by the acne check). The GPU target packs 
 the light colour's spare fourth. Guards: `a_soft_shadow_grades_its_edge_and_keeps_its_middle_dark_without_acne`
 (CPU) and `a_soft_shadow_draws_on_the_gpu_as_on_the_cpu` (both adapters here, within 11 of 255).
 Run here: fmt, clippy, the 268 `gui` unit tests; suites are CI's.
+
+2026-11-24 (ADR-788 follow-up). **Ambient occlusion: `:ambient-occlusion {:radius m :strength s}`.**
+The ambient light lit every point alike, so folds forming as a figure moves read flat (womanblend:
+the corners of her mouth and the seam between her lips in a smile, the creases beside her nose).
+The camera's own depth becomes one more view of the shadow plan, drawn by the shadow pass; each
+lit fragment tests 16 fixed hemisphere taps (`occlusion_tap`) against it and darkens its ambient
+term by what encloses it, weighted down for surfaces far in front (`ambient_occlusion`, the same on
+both painters; `view_distance` compares depths along the view for perspective and orthographic
+cameras alike). Radius, strength and view ride in the scene uniform's spare fourths. Guards: a
+card 10 cm over a floor darkens the floor beside its edge and leaves open floor and its own top
+untouched to the byte (CPU), and the GPU draws it as the CPU does (`backend/gpu_scene`). Run here:
+fmt, clippy (`--all-features`); the tests are CI's (desktop rule).

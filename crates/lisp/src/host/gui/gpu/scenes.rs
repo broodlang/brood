@@ -1045,6 +1045,7 @@ pub(super) fn scene_uniform_len() -> usize {
         sky: [0.0; 3],
         ground: [0.0; 3],
         exposure: 1.0,
+        ambient_occlusion: None,
         background: [0.0; 4],
         palettes: Vec::new(),
         draws: Vec::new(),
@@ -1094,10 +1095,19 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan) -> Vec<u32> {
             None => words.extend_from_slice(&[0; 20]),
         }
     }
-    floats(&mut words, &[scene.sky[0], scene.sky[1], scene.sky[2], 0.0]);
+    // the ambient occlusion rides in the ambient's spare fourths: its radius (0: none) and
+    // strength, and its view (one past the index, 0: none) in the params'
+    let (radius, strength) = match (scene.ambient_occlusion, shadows.occlusion) {
+        (Some(settings), Some(_)) => (settings.radius, settings.strength),
+        _ => (0.0, 0.0),
+    };
     floats(
         &mut words,
-        &[scene.ground[0], scene.ground[1], scene.ground[2], 0.0],
+        &[scene.sky[0], scene.sky[1], scene.sky[2], radius],
+    );
+    floats(
+        &mut words,
+        &[scene.ground[0], scene.ground[1], scene.ground[2], strength],
     );
     floats(
         &mut words,
@@ -1105,7 +1115,7 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan) -> Vec<u32> {
             scene.exposure,
             scene.lights.len().min(MAX_LIGHTS) as f32,
             shadows.layer_side.max(1) as f32,
-            0.0,
+            shadows.occlusion.map_or(0.0, |view| (view + 1) as f32),
         ],
     );
     for index in 0..MAX_SHADOW_VIEWS {

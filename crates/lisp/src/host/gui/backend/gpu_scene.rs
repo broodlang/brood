@@ -16,7 +16,7 @@ use super::render::Renderer;
 use crate::host::gui::Op;
 use crate::host::gui::gpu::{GpuWindow, hardware_adapters};
 use crate::host::gui::mesh::{
-    Draw, Light, Material, Mesh, MeshParts, Scene, Shadow, Surface, rasterize,
+    AmbientOcclusion, Draw, Light, Material, Mesh, MeshParts, Scene, Shadow, Surface, rasterize,
 };
 
 const SIDE: u32 = 64;
@@ -60,6 +60,7 @@ fn scene() -> Scene {
         sky: [0.1, 0.1, 0.1],
         ground: [0.1, 0.1, 0.1],
         exposure: 1.0,
+        ambient_occlusion: None,
         background: [0.0, 0.0, 0.0, 0.0],
         palettes: vec![],
         draws: vec![Draw {
@@ -330,6 +331,92 @@ fn a_soft_shadow_draws_on_the_gpu_as_on_the_cpu() {
             .iter()
             .zip(&gpu_reds)
             .any(|(cpu, gpu)| (cpu - gpu).abs() > 20)
+        {
+            failures.push(format!("{name}: GPU {gpu_reds:?} against CPU {cpu_reds:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn ambient_occlusion_draws_on_the_gpu_as_on_the_cpu() {
+    // seen from above, lit by its ambient alone: a 1 m card lying 10 cm over an 8 m floor, the
+    // floor beside its edges darkened over 0.3 m, open floor untouched
+    let side = 128u32;
+    let floor = Arc::new(square(0.0, 4.0));
+    let card = Arc::new(square(0.1, 0.5));
+    let material = Material {
+        double_sided: true,
+        specular: 0.0,
+        ..Material::default()
+    };
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    // x → clip x / 4, z → clip −y / 4, height → depth
+    scene.view_proj = [
+        0.25, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1, 0.0, 0.0, -0.25, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0,
+    ];
+    scene.eye = [0.0, 10.0, 0.0];
+    scene.lights = vec![];
+    scene.sky = [0.5, 0.5, 0.5];
+    scene.ground = [0.5, 0.5, 0.5];
+    scene.ambient_occlusion = Some(AmbientOcclusion {
+        radius: 0.3,
+        strength: 1.0,
+    });
+    let draw = |mesh: u32| Draw {
+        mesh,
+        model: [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+        palette: None,
+        morphs: vec![],
+        material: material.clone(),
+    };
+    scene.draws = vec![draw(1), draw(2)];
+    let meshes = |handle: u32| match handle {
+        1 => Some(floor.clone()),
+        2 => Some(card.clone()),
+        _ => None,
+    };
+    let (_, _, cpu) = rasterize(&scene, &meshes, &|_| None);
+    let red_at = |pixels: &[u8], stride: usize, x: f32| {
+        let (column, row) = ((64.0 + 16.0 * x) as u32, 64u32);
+        i32::from(pixels[(row * side + column) as usize * stride])
+    };
+    let points = [-0.55f32, -0.75, 0.0, -2.5];
+    let cpu_reds: Vec<i32> = points.iter().map(|x| red_at(&cpu, 4, *x)).collect();
+    assert!(
+        cpu_reds[0] + 15 < cpu_reds[3],
+        "the CPU painter darkens the floor beside the card: {cpu_reds:?}"
+    );
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &floor);
+        gpu.upload_mesh(2, &card);
+        let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+        renderer.set_bg(Some([0, 0, 0]));
+        gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+            .expect("an offscreen frame is never skipped");
+        let pixels = gpu.read_pixels();
+        let gpu_reds: Vec<i32> = points.iter().map(|x| red_at(&pixels, 3, *x)).collect();
+        eprintln!("{name}: ambient occlusion reds cpu {cpu_reds:?} gpu {gpu_reds:?}");
+        // the same taps against the same depth view: within the two painters' rounding
+        if cpu_reds
+            .iter()
+            .zip(&gpu_reds)
+            .any(|(cpu, gpu)| (cpu - gpu).abs() > 12)
         {
             failures.push(format!("{name}: GPU {gpu_reds:?} against CPU {cpu_reds:?}"));
         }

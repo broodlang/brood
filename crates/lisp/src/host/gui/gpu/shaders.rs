@@ -654,9 +654,9 @@ struct SceneU {
     view_proj: mat4x4<f32>,
     eye: vec4<f32>,
     lights: array<Light, 8>,
-    sky: vec4<f32>,
-    ground: vec4<f32>,
-    params: vec4<f32>,          // exposure, light count, shadow layer side
+    sky: vec4<f32>,             // rgb, ambient occlusion radius (metres; 0: none)
+    ground: vec4<f32>,          // rgb, ambient occlusion strength
+    params: vec4<f32>,          // exposure, light count, shadow layer side, occlusion view + 1 (0: none)
     shadows: array<ShadowView, 24>,
 };
 struct DrawU {
@@ -936,9 +936,80 @@ fn shadow_visibility(light: Light, world: vec3<f32>, surface_normal: vec3<f32>, 
     return shadow_sample(at, biased);
 }
 
-fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>) -> vec3<f32> {
+// `mesh::view_distance`: how far along the view a clip depth lies (its w, for a perspective view)
+fn view_distance(view_proj: mat4x4<f32>, depth: f32) -> f32 {
+    let depth_row = vec4<f32>(view_proj[0].z, view_proj[1].z, view_proj[2].z, view_proj[3].z);
+    let w_row = vec4<f32>(view_proj[0].w, view_proj[1].w, view_proj[2].w, view_proj[3].w);
+    let w_length = dot(w_row.xyz, w_row.xyz);
+    if (w_length < 1e-12) {
+        return depth / max(sqrt(dot(depth_row.xyz, depth_row.xyz)), 1e-12);
+    }
+    let slope = dot(depth_row.xyz, w_row.xyz) / w_length;
+    let offset = depth_row.w - slope * w_row.w;
+    let gap = depth - slope;
+    if (abs(gap) < 1e-12) {
+        return 3.4028235e38;
+    }
+    return offset / gap;
+}
+
+// `mesh::occlusion_tap`: a golden-angle spiral over the hemisphere, as a share of the radius
+fn occlusion_tap(index: u32) -> vec3<f32> {
+    let share = (f32(index) + 0.5) / 16.0;
+    let angle = f32(index) * 2.399963;
+    let across = sqrt(share);
+    let reach = 0.2 + 0.8 * share * share;
+    return vec3<f32>(cos(angle) * across * reach, sin(angle) * across * reach, sqrt(1.0 - share) * reach);
+}
+
+// `mesh::ambient_occlusion`: how much of the ambient light reaches `world` past what the
+// camera's depth view (scene.params.w, one past its index; 0 without) holds round it
+fn ambient_occlusion(world: vec3<f32>, normal: vec3<f32>) -> f32 {
+    let radius = scene.sky.w;
+    let at = u32(scene.params.w);
+    if (at == 0u || radius <= 0.0) {
+        return 1.0;
+    }
+    let view = scene.shadows[at - 1u];
+    let own = view.view_proj * vec4<f32>(world, 1.0);
+    if (own.w <= 1e-6) {
+        return 1.0;
+    }
+    let own_distance = view_distance(view.view_proj, own.z / own.w);
+    var helper = vec3<f32>(1.0, 0.0, 0.0);
+    if (abs(normal.y) < 0.99) {
+        helper = vec3<f32>(0.0, 1.0, 0.0);
+    }
+    let across = safe_normalize(cross(helper, normal));
+    let along = cross(normal, across);
+    let side = u32(view.info.y);
+    var occluded = 0.0;
+    for (var index = 0u; index < 16u; index = index + 1u) {
+        let tap = occlusion_tap(index);
+        let point = world + (across * tap.x + along * tap.y + normal * tap.z) * radius;
+        let clip = view.view_proj * vec4<f32>(point, 1.0);
+        if (clip.w <= 1e-6) {
+            continue;
+        }
+        let across_unit = clip.x / clip.w * 0.5 + 0.5;
+        let down_unit = 0.5 - clip.y / clip.w * 0.5;
+        if (across_unit < 0.0 || across_unit >= 1.0 || down_unit < 0.0 || down_unit >= 1.0) {
+            continue;
+        }
+        let column = min(u32(across_unit * f32(side)), side - 1u);
+        let row = min(u32(down_unit * f32(side)), side - 1u);
+        let stored = view_distance(view.view_proj, textureLoad(shadow_maps, vec2<i32>(i32(column), i32(row)), i32(at - 1u), 0));
+        let reached = view_distance(view.view_proj, clip.z / clip.w);
+        if (stored < reached - radius * 0.05) {
+            occluded = occluded + min(radius / max(abs(own_distance - stored), 1e-6), 1.0);
+        }
+    }
+    return clamp(1.0 - scene.ground.w * occluded / 16.0, 0.0, 1.0);
+}
+
+fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32) -> vec3<f32> {
     let up = normal.y * 0.5 + 0.5;
-    var out = base * mix(scene.ground.rgb, scene.sky.rgb, up);
+    var out = base * occlusion * mix(scene.ground.rgb, scene.sky.rgb, up);
     let exponent = shininess(draw.material.x);
     let normalisation = (exponent + 8.0) / (8.0 * 3.14159265);
     let count = u32(scene.params.y);
@@ -1007,7 +1078,8 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> @location
         normal = safe_normalize(tangent * local.x + sign * bitangent * local.y + normal * local.z);
     }
     let view = safe_normalize(scene.eye.xyz - fragment.world);
-    let lit = tone(shade(base, normal, view, fragment.world, surface_normal), scene.params.x);
+    let occlusion = ambient_occlusion(fragment.world, surface_normal);
+    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion), scene.params.x);
     return vec4<f32>(lit * alpha, alpha);
 }
 
