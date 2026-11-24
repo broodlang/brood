@@ -57,12 +57,75 @@ pub const MAX_MORPH_BYTES: usize = 128 << 20;
 /// The most indices one mesh may have (4 bytes each on the GPU target, under 256 MiB).
 pub const MAX_INDICES: usize = 63 << 20;
 
-/// One morph target: per-vertex offsets added to the positions and normals, scaled by the
-/// target's weight in a draw.
+/// One morph target: offsets added to the positions and normals of the vertices it moves,
+/// scaled by the target's weight in a draw. Kept sparse: a face's target moves a few thousand of
+/// a body's seventy thousand vertices, so blending one costs what it moves, not the whole mesh.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Morph {
+    /// The vertices it moves (its position or its normal), ascending.
+    pub vertices: Vec<u32>,
+    /// Their offsets, one a listed vertex.
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+}
+
+/// Each vertex `morphs` move (`(target, weight)` pairs; a target past `targets`, or of no
+/// weight, skipped), with the weight and that target's offsets to its position and normal:
+/// what both painters blend, touching only the vertices a target moves.
+fn each_morphed(
+    targets: &[Morph],
+    morphs: &[(u32, f32)],
+    mut visit: impl FnMut(usize, f32, [f32; 3], [f32; 3]),
+) {
+    for &(target, weight) in morphs {
+        let Some(morph) = targets.get(target as usize) else {
+            continue;
+        };
+        if weight == 0.0 {
+            continue;
+        }
+        for ((&vertex, offset), turn) in morph
+            .vertices
+            .iter()
+            .zip(&morph.positions)
+            .zip(&morph.normals)
+        {
+            visit(vertex as usize, weight, *offset, *turn);
+        }
+    }
+}
+
+/// Adds `morphs` to `positions` and `normals`, one entry a vertex: the CPU painter's blend,
+/// onto the mesh's own.
+pub fn add_morphs(
+    targets: &[Morph],
+    morphs: &[(u32, f32)],
+    positions: &mut [[f32; 3]],
+    normals: &mut [[f32; 3]],
+) {
+    each_morphed(targets, morphs, |vertex, weight, offset, turn| {
+        for axis in 0..3 {
+            positions[vertex][axis] += weight * offset[axis];
+            normals[vertex][axis] += weight * turn[axis];
+        }
+    });
+}
+
+/// Adds `morphs` to `packed`, the GPU target's offsets as its vertex shader reads them: 32
+/// little-endian bytes a vertex, the position's offset (3 f32 and a pad), then the normal's.
+/// Blended straight into the bytes it uploads, so a frame zeroes the draw's span once and
+/// touches only the vertices its targets move.
+pub fn add_morphs_packed(targets: &[Morph], morphs: &[(u32, f32)], packed: &mut [u8]) {
+    let mut add = |at: usize, amount: f32| {
+        let bytes: &mut [u8; 4] = (&mut packed[at..at + 4]).try_into().expect("four bytes");
+        *bytes = (f32::from_le_bytes(*bytes) + amount).to_le_bytes();
+    };
+    each_morphed(targets, morphs, |vertex, weight, offset, turn| {
+        for axis in 0..3 {
+            add(vertex * 32 + axis * 4, weight * offset[axis]);
+            add(vertex * 32 + 16 + axis * 4, weight * turn[axis]);
+        }
+    });
 }
 
 /// A mesh as uploaded and validated: every attribute has one entry per vertex (or none for
@@ -172,11 +235,16 @@ impl MeshBounds {
         let morphs = morphs
             .iter()
             .map(|morph| {
+                // the vertices it leaves stay put: the box holds no offset
                 morph
                     .positions
                     .iter()
-                    .fold(None, |bounds, offset| extend(bounds, *offset))
-                    .unwrap_or([[0.0; 3]; 2])
+                    .fold([[0.0f32; 3]; 2], |[low, high], offset| {
+                        [
+                            [0, 1, 2].map(|axis| low[axis].min(offset[axis])),
+                            [0, 1, 2].map(|axis| high[axis].max(offset[axis])),
+                        ]
+                    })
             })
             .collect();
         MeshBounds {
@@ -353,7 +421,20 @@ impl Mesh {
             } else {
                 floats::<3>(&format!("morph {target} normals"), morph_normals, count)?
             };
-            morphs.push(Morph { positions, normals });
+            // only the vertices it moves
+            let mut morph = Morph {
+                vertices: Vec::new(),
+                positions: Vec::new(),
+                normals: Vec::new(),
+            };
+            for (vertex, (offset, turn)) in positions.into_iter().zip(normals).enumerate() {
+                if offset != [0.0; 3] || turn != [0.0; 3] {
+                    morph.vertices.push(vertex as u32);
+                    morph.positions.push(offset);
+                    morph.normals.push(turn);
+                }
+            }
+            morphs.push(morph);
         }
         let bounds = MeshBounds::of(&positions, &joints, &weights, &morphs);
         Ok(Mesh {
@@ -1621,34 +1702,11 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
 /// through the scene's camera.
 fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
     let palette = scene.palette_of(draw);
-    let morphs: Vec<(&Morph, f32)> = draw
-        .morphs
-        .iter()
-        .filter_map(|&(target, weight)| {
-            mesh.morphs
-                .get(target as usize)
-                .map(|morph| (morph, weight))
-        })
-        .filter(|(_, weight)| *weight != 0.0)
-        .collect();
-    // morphed a target at a time, each streamed through in order (and vectorised): walking every
-    // vertex across all the targets at once reads as many streams as targets and falls out of
-    // the cache. Measured at her size (53,514 vertices, release): 0.16 ms a target, linear, where
-    // the vertex-first walk took 2.1 ms for 8 targets but 16.1 for 37
+    // morphed only where its targets move it (sparse: a face target is a few thousand vertices
+    // of a body's seventy thousand)
     let mut positions = mesh.positions.clone();
     let mut normals = mesh.normals.clone();
-    for (morph, weight) in &morphs {
-        for (position, offset) in positions.iter_mut().zip(&morph.positions) {
-            for axis in 0..3 {
-                position[axis] += weight * offset[axis];
-            }
-        }
-        for (normal, offset) in normals.iter_mut().zip(&morph.normals) {
-            for axis in 0..3 {
-                normal[axis] += weight * offset[axis];
-            }
-        }
-    }
+    add_morphs(&mesh.morphs, &draw.morphs, &mut positions, &mut normals);
     (0..mesh.positions.len())
         .map(|index| {
             let position = positions[index];
@@ -2588,41 +2646,59 @@ mod tests {
         );
     }
 
-    /// What morphing costs the CPU painter at a real figure's size (womanblend's: 53,514
-    /// vertices, 37 face targets), so a growing face or a new figure can be checked against it:
+    /// What morphing costs at a real figure's size (womanblend's body: 70,737 vertices, 37 face
+    /// targets each moving about 2,500 of them, scattered through the mesh as hers are), so a
+    /// growing face or a new figure can be checked against it:
     /// `cargo test --release -p brood --features gui --lib -- --ignored morph_cost --nocapture`.
-    /// Measured 2026-11-24: 1.6 ms with none, then about 0.16 ms a target (37: 7.6 ms).
+    /// BLEND is what both painters do a frame (the GPU target then uploads the offsets and reads
+    /// one pair a vertex); POSE is the CPU painter's whole vertex pass (morph, skin, transform).
     #[test]
     #[ignore = "a timing, run by hand"]
     fn morph_cost_at_her_size() {
-        let vertex_count = 53_514usize;
+        let vertex_count = 70_737usize;
+        let moved_each = 2_500usize;
         let positions: Vec<f32> = (0..vertex_count * 3)
             .map(|index| index as f32 * 1e-5)
             .collect();
-        let offsets: Vec<f32> = (0..vertex_count * 3)
-            .map(|index| (index % 7) as f32 * 1e-4)
-            .collect();
         let parts = MeshParts {
             positions: bytes_of(&positions),
-            morphs: (0..37)
-                .map(|_| (bytes_of(&offsets), bytes_of(&offsets)))
+            morphs: (0..37usize)
+                .map(|target| {
+                    // a scattered set of vertices: every (vertex_count / moved_each)th one, from
+                    // an offset of its own
+                    let mut offsets = vec![0.0f32; vertex_count * 3];
+                    let stride = vertex_count / moved_each;
+                    for step in 0..moved_each {
+                        let vertex = (target * 7 + step * stride) % vertex_count;
+                        offsets[vertex * 3 + 1] = 0.001;
+                    }
+                    (bytes_of(&offsets), bytes_of(&offsets))
+                })
                 .collect(),
             ..MeshParts::default()
         };
         let mesh = Mesh::from_parts(parts).unwrap();
+        let rounds = 50;
+        let per_round =
+            |start: std::time::Instant| start.elapsed().as_secs_f64() * 1000.0 / rounds as f64;
         for count in [0u32, 8, 16, 24, 37] {
-            let morphed = scene(Draw {
-                morphs: (0..count).map(|target| (target, 0.5)).collect(),
-                ..draw()
-            });
-            let rounds = 20;
+            let morphs: Vec<(u32, f32)> = (0..count).map(|target| (target, 0.5)).collect();
+            let start = std::time::Instant::now();
+            for _ in 0..rounds {
+                let mut offsets = vec![[0.0f32; 3]; vertex_count];
+                let mut turns = vec![[0.0f32; 3]; vertex_count];
+                add_morphs(&mesh.morphs, &morphs, &mut offsets, &mut turns);
+                std::hint::black_box((offsets, turns));
+            }
+            let blend = per_round(start);
+            let morphed = scene(Draw { morphs, ..draw() });
             let start = std::time::Instant::now();
             for _ in 0..rounds {
                 std::hint::black_box(pose_vertices(&morphed, &mesh, &morphed.draws[0]));
             }
             eprintln!(
-                "MORPH COST {count} targets: {:.2} ms a pose",
-                start.elapsed().as_secs_f64() * 1000.0 / rounds as f64
+                "MORPH COST {count} targets: BLEND {blend:.3} ms, POSE {:.2} ms",
+                per_round(start)
             );
         }
     }

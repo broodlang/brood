@@ -6,8 +6,8 @@
 
 use super::*;
 use crate::host::gui::mesh::{
-    LightKind, MAX_LIGHTS, MAX_SHADOW_VIEWS, Mesh, MeshBounds, Scene, ShadowPlan, Surface,
-    draw_bounds, shadow_plan, union,
+    LightKind, MAX_LIGHTS, MAX_SHADOW_VIEWS, Mesh, MeshBounds, Morph, Scene, ShadowPlan, Surface,
+    add_morphs_packed, draw_bounds, shadow_plan, union,
 };
 
 /// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4.
@@ -40,8 +40,8 @@ pub(super) struct GpuMesh {
     indices: wgpu::Buffer,
     index_count: u32,
     vertex_count: u32,
-    morph_count: u32,
-    morph_group: wgpu::BindGroup,
+    /// Its morph targets, sparse: a frame blends a draw's into the offsets its vertices read.
+    morphs: Vec<Morph>,
     has_tangents: bool,
     skinned: bool,
     /// Where its vertices can be, to fit shadow maps as the CPU painter fits them.
@@ -93,10 +93,10 @@ pub(super) struct MeshGpu {
     draw_capacity: u64,
     palette_buffer: wgpu::Buffer,
     palette_capacity: u64,
-    /// Every draw's morph weights this frame, `(target, weight)` pairs, each draw's from where
-    /// its uniform says.
-    morph_weight_buffer: wgpu::Buffer,
-    morph_weight_capacity: u64,
+    /// This frame's morph offsets: two vec4s a vertex of each morphed draw, from where its
+    /// uniform says.
+    morph_offset_buffer: wgpu::Buffer,
+    morph_offset_capacity: u64,
     white: wgpu::TextureView,
     flat: wgpu::TextureView,
     sampler: wgpu::Sampler,
@@ -231,7 +231,7 @@ impl MeshGpu {
             });
         let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh draw"),
-            entries: &[uniform(0, true), storage(1)],
+            entries: &[uniform(0, true)],
         });
         let morph_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh morphs"),
@@ -409,8 +409,8 @@ impl MeshGpu {
             draw_capacity: DRAW_BYTES * 16,
             palette_buffer: buffer(device, "mesh palettes", 64 * 256, storage_usage),
             palette_capacity: 64 * 256,
-            morph_weight_buffer: buffer(device, "mesh morph weights", 8 * 256, storage_usage),
-            morph_weight_capacity: 8 * 256,
+            morph_offset_buffer: buffer(device, "mesh morph offsets", 32 * 256, storage_usage),
+            morph_offset_capacity: 32 * 256,
             scene_layout,
             draw_layout,
             morph_layout,
@@ -444,12 +444,17 @@ impl MeshGpu {
         let limits = device.limits();
         let vertex_bytes = (count * VERTEX_FLOATS * 4) as u64;
         let index_bytes = (mesh.indices.len() * 4) as u64;
-        let morph_bytes = (mesh.morphs.len() * count * 32) as u64;
+        // its morph offsets, one frame's, are a storage binding of their own
+        let morph_bytes = if mesh.morphs.is_empty() {
+            0
+        } else {
+            (count * 32) as u64
+        };
         if vertex_bytes.max(index_bytes) > limits.max_buffer_size
             || morph_bytes > limits.max_storage_buffer_binding_size
         {
             eprintln!(
-                "brood gui: mesh {handle} is too big for this device ({vertex_bytes} vertex bytes, {morph_bytes} morph bytes); it will not be drawn"
+                "brood gui: mesh {handle} is too big for this device ({vertex_bytes} vertex bytes, {morph_bytes} morph-offset bytes); it will not be drawn"
             );
             self.meshes.remove(&handle);
             return;
@@ -489,34 +494,6 @@ impl MeshGpu {
             wgpu::BufferUsages::INDEX,
         );
         queue.write_buffer(&index_buffer, 0, &indices);
-        // two vec4s a vertex a target: the position's offset, then the normal's
-        let mut morphs = Vec::with_capacity(mesh.morphs.len() * count * 32);
-        for morph in &mesh.morphs {
-            for index in 0..count {
-                let offset = morph.positions[index];
-                let turn = morph.normals[index];
-                morphs.extend(floats_bytes(&[
-                    offset[0], offset[1], offset[2], 0.0, turn[0], turn[1], turn[2], 0.0,
-                ]));
-            }
-        }
-        let morph_buffer = buffer(
-            device,
-            "mesh morphs",
-            morphs.len() as u64,
-            wgpu::BufferUsages::STORAGE,
-        );
-        if !morphs.is_empty() {
-            queue.write_buffer(&morph_buffer, 0, &morphs);
-        }
-        let morph_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mesh morphs"),
-            layout: &self.morph_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: morph_buffer.as_entire_binding(),
-            }],
-        });
         self.meshes.insert(
             handle,
             GpuMesh {
@@ -524,8 +501,7 @@ impl MeshGpu {
                 indices: index_buffer,
                 index_count: mesh.indices.len() as u32,
                 vertex_count: count as u32,
-                morph_count: mesh.morphs.len() as u32,
-                morph_group,
+                morphs: mesh.morphs.clone(),
                 has_tangents: mesh.tangents.is_some(),
                 skinned: !mesh.joints.is_empty(),
                 bounds: mesh.bounds.clone(),
@@ -675,7 +651,9 @@ impl MeshGpu {
         let mut scene_bytes = Vec::new();
         let mut draw_bytes = Vec::new();
         let mut palette_floats: Vec<f32> = Vec::new();
-        let mut morph_weight_bytes: Vec<u8> = Vec::new();
+        // 32 bytes a vertex of each morphed draw (`mesh::add_morphs_packed`)
+        let mut morph_offsets: Vec<u8> = Vec::new();
+        let morph_offset_limit = device.limits().max_storage_buffer_binding_size as usize;
         let mut plans: Vec<Vec<DrawPlan>> = Vec::new();
         let mut shadow_plans: Vec<ShadowPlan> = Vec::new();
         for scene in scenes {
@@ -726,12 +704,18 @@ impl MeshGpu {
                     | (u32::from(premultiplied(base)) << 1)
                     | (u32::from(normal.is_some()) << 2)
                     | (u32::from(premultiplied(normal)) << 3);
-                let morphs: Vec<(u32, f32)> = draw
-                    .morphs
-                    .iter()
-                    .filter(|(target, _)| *target < mesh.morph_count)
-                    .copied()
-                    .collect();
+                // its morphs blended here, sparse, into one offset a vertex (none when no target
+                // it names moves anything, or the frame's offsets would pass the binding limit)
+                let vertex_count = mesh.vertex_count as usize;
+                let morphed = draw.morphs.iter().any(|&(target, weight)| {
+                    weight != 0.0 && (target as usize) < mesh.morphs.len()
+                }) && morph_offsets.len() + vertex_count * 32 <= morph_offset_limit;
+                let morph_start = (morph_offsets.len() / 32) as u32;
+                if morphed {
+                    let span = morph_offsets.len();
+                    morph_offsets.resize(span + vertex_count * 32, 0);
+                    add_morphs_packed(&mesh.morphs, &draw.morphs, &mut morph_offsets[span..]);
+                }
                 let mut floats = Vec::with_capacity(32);
                 floats.extend_from_slice(&draw.model);
                 floats.extend_from_slice(&material.color);
@@ -752,15 +736,11 @@ impl MeshGpu {
                 let skinned = u32::from(mesh.skinned && palette_joints > 0);
                 bytes.extend(words_bytes(&[surface, bits, palette_start, skinned]));
                 bytes.extend(words_bytes(&[
-                    morphs.len() as u32,
+                    u32::from(morphed),
                     mesh.vertex_count,
                     palette_joints,
-                    (morph_weight_bytes.len() / 8) as u32,
+                    morph_start,
                 ]));
-                for (target, weight) in &morphs {
-                    morph_weight_bytes.extend(target.to_le_bytes());
-                    morph_weight_bytes.extend(weight.to_le_bytes());
-                }
                 bytes.resize(DRAW_BYTES as usize, 0);
                 let at = draw_bytes.len() / DRAW_BYTES as usize;
                 draw_bytes.extend(bytes);
@@ -813,15 +793,15 @@ impl MeshGpu {
         );
         grow(
             device,
-            &mut self.morph_weight_buffer,
-            &mut self.morph_weight_capacity,
-            morph_weight_bytes.len().max(8) as u64,
-            "mesh morph weights",
+            &mut self.morph_offset_buffer,
+            &mut self.morph_offset_capacity,
+            morph_offsets.len().max(32) as u64,
+            "mesh morph offsets",
             wgpu::BufferUsages::STORAGE,
         );
         queue.write_buffer(&self.scene_buffer, 0, &scene_bytes);
-        if !morph_weight_bytes.is_empty() {
-            queue.write_buffer(&self.morph_weight_buffer, 0, &morph_weight_bytes);
+        if !morph_offsets.is_empty() {
+            queue.write_buffer(&self.morph_offset_buffer, 0, &morph_offsets);
         }
         if !draw_bytes.is_empty() {
             queue.write_buffer(&self.draw_buffer, 0, &draw_bytes);
@@ -861,20 +841,22 @@ impl MeshGpu {
         let draw_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mesh draw"),
             layout: &self.draw_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &self.draw_buffer,
-                        offset: 0,
-                        size: std::num::NonZeroU64::new(DRAW_BYTES),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.morph_weight_buffer.as_entire_binding(),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &self.draw_buffer,
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(DRAW_BYTES),
+                }),
+            }],
+        });
+        let morph_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mesh morph offsets"),
+            layout: &self.morph_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: self.morph_offset_buffer.as_entire_binding(),
+            }],
         });
         for (index, scene) in scenes.iter().enumerate() {
             // the material bind groups this scene's draws sample
@@ -955,7 +937,7 @@ impl MeshGpu {
                             &draw_group,
                             &[(draw.at as u64 * DRAW_BYTES) as u32],
                         );
-                        pass.set_bind_group(2, &mesh.morph_group, &[]);
+                        pass.set_bind_group(2, &morph_group, &[]);
                         pass.set_bind_group(3, material, &[]);
                         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                         pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -1021,7 +1003,7 @@ impl MeshGpu {
                     &self.pipelines[draw.double_sided as usize * 2 + draw.blended as usize],
                 );
                 pass.set_bind_group(1, &draw_group, &[(draw.at as u64 * DRAW_BYTES) as u32]);
-                pass.set_bind_group(2, &mesh.morph_group, &[]);
+                pass.set_bind_group(2, &morph_group, &[]);
                 pass.set_bind_group(3, material, &[]);
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);

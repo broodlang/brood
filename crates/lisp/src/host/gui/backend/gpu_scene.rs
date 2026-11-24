@@ -1,0 +1,231 @@
+//! A morphed `[:scene …]` on the GPU against the CPU painter, on a real device with no window.
+//!
+//! Morph targets are kept sparse and blended on the CPU into one offset a vertex, which the GPU
+//! target uploads each frame and its vertex shader reads (`mesh::add_morphs`); nothing in the
+//! pure tests creates the pipelines or binds that buffer, so this draws a triangle that ten
+//! targets (more than the old cap of eight) move across the picture, on both painters, and
+//! checks it landed where all ten put it. A pipeline whose layouts do not match the shader, or
+//! a bind group that does not match its layout, fails here as wgpu's validation error.
+//!
+//! A machine without a GPU (CI) runs the CPU half, and says it skipped the GPU one.
+
+use std::sync::Arc;
+
+use super::fonts::default_families;
+use super::render::Renderer;
+use crate::host::gui::Op;
+use crate::host::gui::gpu::{GpuWindow, hardware_adapters};
+use crate::host::gui::mesh::{Draw, Light, Material, Mesh, MeshParts, Scene, Surface, rasterize};
+
+const SIDE: u32 = 64;
+const TARGETS: u32 = 10;
+
+fn bytes_of(values: &[f32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+/// A triangle in the left half of clip space, facing the camera, and `TARGETS` morphs that
+/// each move it 0.08 to the right: all of them together put it in the right half.
+fn mesh() -> Mesh {
+    let shift = [0.08, 0.0, 0.0];
+    Mesh::from_parts(MeshParts {
+        positions: bytes_of(&[-0.9, -0.9, 0.5, -0.1, -0.9, 0.5, -0.5, 0.9, 0.5]),
+        normals: bytes_of(&[0.0, 0.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0, -1.0]),
+        morphs: (0..TARGETS)
+            .map(|_| (bytes_of(&[shift, shift, shift].concat()), Vec::new()))
+            .collect(),
+        ..MeshParts::default()
+    })
+    .expect("a whole triangle")
+}
+
+fn scene() -> Scene {
+    let mut identity = [0.0f32; 16];
+    for axis in 0..4 {
+        identity[axis * 5] = 1.0;
+    }
+    Scene {
+        x: 0.0,
+        y: 0.0,
+        w: SIDE as f32,
+        h: SIDE as f32,
+        view_proj: identity,
+        eye: [0.0, 0.0, -10.0],
+        lights: vec![Light::directional([0.0, 0.0, 1.0], [1.0, 1.0, 1.0])],
+        sky: [0.1, 0.1, 0.1],
+        ground: [0.1, 0.1, 0.1],
+        exposure: 1.0,
+        background: [0.0, 0.0, 0.0, 0.0],
+        palettes: vec![],
+        draws: vec![Draw {
+            mesh: 1,
+            model: identity,
+            palette: None,
+            morphs: (0..TARGETS).map(|target| (target, 1.0)).collect(),
+            material: Material {
+                surface: Surface::Standard,
+                color: [1.0, 0.0, 0.0, 1.0],
+                double_sided: true,
+                ..Material::default()
+            },
+        }],
+    }
+}
+
+/// Where the triangle was (x −0.5) and where its morphs put it (x +0.3), a quarter of the way
+/// up from the bottom: as `(column, row)` in the picture.
+const WAS: (u32, u32) = (16, 40);
+const IS: (u32, u32) = (41, 40);
+
+fn red(pixels: &[u8], stride: usize, (column, row): (u32, u32)) -> u8 {
+    pixels[(row * SIDE + column) as usize * stride]
+}
+
+#[test]
+fn a_morphed_scene_draws_where_every_target_puts_it_on_both_painters() {
+    let mesh = Arc::new(mesh());
+    let scene = scene();
+    let (_, _, cpu) = rasterize(&scene, &|_| Some(mesh.clone()), &|_| None);
+    assert!(
+        red(&cpu, 4, IS) > 80,
+        "the CPU painter draws it where its morphs put it"
+    );
+    assert!(
+        red(&cpu, 4, WAS) < 30,
+        "the CPU painter leaves where it was"
+    );
+
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let mut gpu = match GpuWindow::offscreen(adapter, SIDE, SIDE) {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                eprintln!("skipped {name}: {error}");
+                continue;
+            }
+        };
+        gpu.upload_mesh(1, &mesh);
+        let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+        renderer.set_bg(Some([0, 0, 0]));
+        gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+            .expect("an offscreen frame is never skipped");
+        let pixels = gpu.read_pixels();
+        let (is, was) = (red(&pixels, 3, IS), red(&pixels, 3, WAS));
+        eprintln!("{name}: red where its morphs put it {is}, where it was {was}");
+        if is <= 80 || was >= 30 {
+            failures.push(format!(
+                "{name}: red {is} where its {TARGETS} morphs put it, {was} where it was"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// What a morphed figure costs a GPU frame at a real figure's size (womanblend's body: 70,737
+/// vertices, 37 face targets each moving about 2,500 of them, scattered), lit by a shadowed
+/// spot, at 900×1000: each frame painted and read back (so it is finished), for 0, 8, 16 and 37
+/// targets moving at once. The difference from 0 is what the morphs cost: the CPU blending them
+/// into the frame's offsets, the upload, and one read a vertex a pass.
+/// `cargo test --release -p brood --features gui-gpu --lib -- --ignored gpu_morph_cost --nocapture`
+#[test]
+#[ignore = "a timing, run by hand"]
+fn gpu_morph_cost_at_her_size() {
+    // a grid of 266 × 266 vertices over the picture: 70,756, near her body's count
+    let across = 266usize;
+    let vertex_count = across * across;
+    let mut positions = Vec::with_capacity(vertex_count * 3);
+    let mut normals = Vec::with_capacity(vertex_count * 3);
+    for row in 0..across {
+        for column in 0..across {
+            let at = |step: usize| step as f32 / (across - 1) as f32 * 1.8 - 0.9;
+            positions.extend_from_slice(&[at(column), at(row), 0.5]);
+            normals.extend_from_slice(&[0.0, 0.0, -1.0]);
+        }
+    }
+    let mut indices: Vec<u8> = Vec::new();
+    for row in 0..across - 1 {
+        for column in 0..across - 1 {
+            let corner = (row * across + column) as u32;
+            let right = corner + 1;
+            let below = corner + across as u32;
+            for index in [corner, right, below, right, below + 1, below] {
+                indices.extend(index.to_le_bytes());
+            }
+        }
+    }
+    let moved_each = 2_500usize;
+    let morphs = (0..37usize)
+        .map(|target| {
+            let mut offsets = vec![0.0f32; vertex_count * 3];
+            let stride = vertex_count / moved_each;
+            for step in 0..moved_each {
+                let vertex = (target * 7 + step * stride) % vertex_count;
+                offsets[vertex * 3 + 2] = -0.001;
+            }
+            (bytes_of(&offsets), Vec::new())
+        })
+        .collect();
+    let mesh = Mesh::from_parts(MeshParts {
+        positions: bytes_of(&positions),
+        normals: bytes_of(&normals),
+        indices,
+        indices_wide: true,
+        morphs,
+        ..MeshParts::default()
+    })
+    .expect("a whole grid");
+    let (width, height) = (900u32, 1000u32);
+    let mut light = Light::directional([0.0, 0.0, 1.0], [1.0, 1.0, 1.0]);
+    light.shadow = Some(crate::host::gui::mesh::Shadow::default());
+    let scene_with = |count: u32| {
+        let mut scene = scene();
+        scene.w = width as f32;
+        scene.h = height as f32;
+        scene.lights = vec![light.clone()];
+        scene.draws[0].morphs = (0..count).map(|target| (target, 0.5)).collect();
+        Arc::new(scene)
+    };
+    for adapter in &hardware_adapters() {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, width, height) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &mesh);
+        let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+        renderer.set_bg(Some([0, 0, 0]));
+        let mut report = Vec::new();
+        for count in [0u32, 8, 16, 37] {
+            let frame = [Op::Scene(scene_with(count))];
+            // warmed up, then timed
+            for _ in 0..5 {
+                gpu.paint(&frame, &mut renderer).expect("painted");
+                gpu.read_pixels();
+            }
+            let rounds = 40;
+            let start = std::time::Instant::now();
+            for _ in 0..rounds {
+                gpu.paint(&frame, &mut renderer).expect("painted");
+                std::hint::black_box(gpu.read_pixels());
+            }
+            report.push(format!(
+                "{count}: {:.2} ms",
+                start.elapsed().as_secs_f64() * 1000.0 / rounds as f64
+            ));
+        }
+        eprintln!(
+            "GPU MORPH COST {name}, a frame with N targets: {}",
+            report.join(", ")
+        );
+    }
+}

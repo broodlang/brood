@@ -2594,3 +2594,21 @@ vectorised: about 0.16 ms a target, linear (37: 7.6 ms; 8: 2.9). An ignored test
 vertex per pass (colour and each shadow view), not measured here (no window on the desktop).
 Guard `every_morph_a_draw_names_is_blended` (20 targets). Run here: fmt, clippy, the targeted
 `host::gui::mesh` tests, `the_mesh_shader_validates`; the suites are CI's (desktop rule).
+
+2026-11-24 (same day, follow-up). **Morph targets are sparse, and the GPU reads one offset a
+vertex.** Her face's targets each move about 2,500 of her body's 70,737 vertices (3.5%; the
+largest, a cheek puff, 12,543), scattered through the mesh, so both painters were paying for the
+whole body per target. `Morph` now keeps only the vertices it moves (`vertices`, with their
+offsets), `mesh::add_morphs` blends a draw's onto the CPU painter's positions touching only
+those, and the GPU target no longer keeps a dense buffer per target (84 MB for her) nor loops
+over targets in its vertex shader: each frame the CPU blends a morphed draw's targets straight
+into the bytes it uploads (`add_morphs_packed`, 32 a vertex, zeroed once), and a vertex reads
+one position-and-normal pair in every pass whatever the number of targets (`morph_info.x` is now
+whether the draw is morphed, `.w` where its pairs start). Measured at her size, release: the
+CPU blend of 37 targets 0.27 ms (was 7.7 ms), the CPU painter's whole vertex pass 2.3 ms bare,
+2.7 ms with all 37; a GPU frame (900×1000, a shadowed light) on an RTX 5060 1.96 ms bare,
+2.6–3.0 ms morphed, on the Intel iGPU 8.5 ms bare, 8.6–8.9 ms morphed. New: a real-device test,
+`a_morphed_scene_draws_where_every_target_puts_it_on_both_painters` (ten targets move a triangle
+across the picture; checked on both adapters here, red with the GPU's morph flag cleared), and
+the timings `morph_cost_at_her_size` and `gpu_morph_cost_at_her_size` (ignored, run by hand).
+Run here: fmt, clippy, the 267 `gui` unit tests including the device test; suites are CI's.

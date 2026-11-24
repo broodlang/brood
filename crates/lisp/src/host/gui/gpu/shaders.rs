@@ -665,20 +665,16 @@ struct DrawU {
     scatter: vec4<f32>,         // rgb, wrap
     material: vec4<f32>,        // roughness, specular, rim, cutoff
     flags: vec4<u32>,           // surface, texture bits, palette offset, skinned
-    morph_info: vec4<u32>,      // morph count, vertex count, palette joint count, first weight
+    morph_info: vec4<u32>,      // morphed (0 or 1), vertex count, palette joint count, first offset
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
 @group(0) @binding(2) var shadow_maps: texture_depth_2d_array;
 @group(0) @binding(3) var shadow_sampler: sampler_comparison;
-// the draws' morph weights, each draw's `morph_info.x` of them from `morph_info.w`: as many as
-// a draw names (a face blends a smile, a blink and speech at once)
-struct MorphWeight {
-    target_index: u32,
-    weight: f32,
-};
 @group(1) @binding(0) var<uniform> draw: DrawU;
-@group(1) @binding(1) var<storage, read> morph_weights: array<MorphWeight>;
+// this frame's morph offsets, blended on the CPU from the sparse targets (`mesh::add_morphs`):
+// two vec4s a vertex (position, normal), a morphed draw's from `morph_info.w`, so a vertex
+// reads one pair whatever the number of targets
 @group(2) @binding(0) var<storage, read> morphs: array<vec4<f32>>;
 @group(3) @binding(0) var base_texture: texture_2d<f32>;
 @group(3) @binding(1) var normal_texture: texture_2d<f32>;
@@ -711,12 +707,10 @@ struct Posed {
 fn pose(input: VertexIn) -> Posed {
     var position = input.position;
     var normal = input.normal;
-    for (var slot = 0u; slot < draw.morph_info.x; slot = slot + 1u) {
-        let blend = morph_weights[draw.morph_info.w + slot];
-        let weight = blend.weight;
-        let at = (blend.target_index * draw.morph_info.y + input.index) * 2u;
-        position = position + weight * morphs[at].xyz;
-        normal = normal + weight * morphs[at + 1u].xyz;
+    if (draw.morph_info.x != 0u) {
+        let at = (draw.morph_info.w + input.index) * 2u;
+        position = position + morphs[at].xyz;
+        normal = normal + morphs[at + 1u].xyz;
     }
     var matrix = draw.model;
     if (draw.flags.w == 1u) {

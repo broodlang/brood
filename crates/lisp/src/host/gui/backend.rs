@@ -16,6 +16,8 @@ mod fonts;
 mod gpu_ink;
 #[cfg(all(test, feature = "gui-gpu"))]
 mod gpu_replay;
+#[cfg(all(test, feature = "gui-gpu"))]
+mod gpu_scene;
 mod headless;
 mod hinted;
 mod ink;
