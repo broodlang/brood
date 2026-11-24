@@ -393,6 +393,28 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 
     (math/atan2 0 1)      ;=> 0.0"
   (%atan2 y x))
+
+(defn tanh (x)
+  "The hyperbolic tangent of `x`: `x` itself near zero, climbing smoothly to 1 (and to -1 for a
+negative `x`). Returns a float. What a quantity that may grow freely but must level off at a
+ceiling is passed through: `(* most (math/tanh (/ x most)))` follows `x` while it is small and
+never passes `most`.
+
+    (math/tanh 0)        ;=> 0.0
+    (math/tanh 1000)     ;=> 1.0
+    (math/tanh -1000)    ;=> -1.0"
+  ;; Written here on `exp`, not a kernel primitive. The quotient of exponentials loses digits
+  ;; as `x` nears zero (its numerator is a difference of two numbers near 1), so below 0.02 the
+  ;; series is used: its first term left out, 62x⁹/2835, is under one part in 10¹⁵ there. Past
+  ;; 20 the answer is 1 to the last bit, and `exp` would overflow long before it mattered.
+  (let (x (* 1.0 x)
+        size (if (< x 0.0) (- 0.0 x) x))
+    (cond
+      (> size 20.0) (if (< x 0.0) -1.0 1.0)
+      (< size 0.02)
+        (let (square (* x x))
+          (* x (+ 1.0 (* square (+ -1/3 (* square (+ 2/15 (* square -17/315))))))))
+      else (let (up (%exp x) down (%exp (- 0.0 x))) (/ (- up down) (+ up down))))))
 (defn exp (x)
   "e raised to the power `x`. Returns a float.
 

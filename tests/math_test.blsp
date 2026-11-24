@@ -371,6 +371,20 @@
     (is (trig-approx? (math/atan 1.0) (/ pi 4))))
   (test "atan(0) = 0"
     (is (trig-approx? (math/atan 0) 0.0)))
+  (test "tanh is x near zero, levels off at 1, and is odd"
+    (is (= 0.0 (math/tanh 0)))
+    (is (= 1.0e-9 (math/tanh 1.0e-9)))
+    (is (trig-approx? (math/tanh 0.5) 0.46211715726000974))
+    (is (trig-approx? (math/tanh 1.0) 0.7615941559557649))
+    (is (trig-approx? (math/tanh 3) 0.9950547536867305))
+    (is (= (math/tanh -0.5) (- 0.0 (math/tanh 0.5))))
+    (is (= 1.0 (math/tanh 1000)))
+    (is (= -1.0 (math/tanh -1000))))
+  (test "tanh's series and its quotient of exponentials agree where they meet"
+    ;; either side of 0.02, against values worked out to 17 digits
+    (is (< (math/abs (- (math/tanh 0.0199) 0.019897373549706100)) 1.0e-16))
+    (is (< (math/abs (- (math/tanh 0.0201) 0.020097293570369068)) 1.0e-16))
+    (is (< (math/tanh 0.0199) (math/tanh 0.02) (math/tanh 0.0201))))
   (test "asin/acos round-trips"
     (is (trig-approx? (math/sin (math/asin 0.5)) 0.5))
     (is (trig-approx? (math/cos (math/acos 0.5)) 0.5)))
