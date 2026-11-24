@@ -97,6 +97,12 @@ pub enum Message {
     /// element — so it has at least two, and every walker treats it as a flat container.
     Dotted(Vec<Message>),
     Vector(Vec<Message>),
+    /// A vector of [`PACKED_FLOATS_MIN`] or more elements, every one a float, carried as the
+    /// bare `f64`s: eight bytes an element where a `Vector` of `Float`s takes a whole
+    /// `Message` each, so a mesh, a joint palette or a block of samples crosses as one tight
+    /// buffer instead of a tree. It is the same Brood value as that `Vector` — it rebuilds
+    /// as an ordinary vector of floats, and a node link sends it as one.
+    FloatVector(Vec<f64>),
     Map(Vec<(Message, Message)>),
     /// A **failure** value — its fields, mirroring `Map` (they share one CHAMP store).
     Failure(Vec<(Message, Message)>),
@@ -199,6 +205,9 @@ pub(crate) fn message_bytes(message: &Message) -> usize {
             }
             Message::Str(text) => total += text.capacity(),
             Message::StrShared(blob) | Message::Bytes(blob) => total += blob.len(),
+            Message::FloatVector(numbers) => {
+                total += numbers.capacity() * std::mem::size_of::<f64>()
+            }
             _ => {}
         }
         next.for_each_child(|child| pending.push(child));
@@ -319,6 +328,7 @@ impl Clone for Message {
             Message::List(items, pos) => grow(|| Message::List(items.clone(), *pos)),
             Message::Dotted(items) => grow(|| Message::Dotted(items.clone())),
             Message::Vector(items) => grow(|| Message::Vector(items.clone())),
+            Message::FloatVector(numbers) => Message::FloatVector(numbers.clone()),
             Message::Map(entries) => grow(|| Message::Map(entries.clone())),
             Message::Failure(entries) => grow(|| Message::Failure(entries.clone())),
             Message::Record(id, entries) => grow(|| Message::Record(*id, entries.clone())),
@@ -447,6 +457,11 @@ pub struct ClosureArmMsg {
     pub(crate) rest: Option<Symbol>,
     pub(crate) body: Vec<Message>,
 }
+
+/// The shortest all-float vector copied as a [`Message::FloatVector`]. Below it a vector is
+/// a tuple — a point, a colour, a quaternion — that Rust consumers of a message may match
+/// element by element, and packing it saves nothing worth having.
+pub(crate) const PACKED_FLOATS_MIN: usize = 16;
 
 /// Maximum nesting depth `to_message` will descend into — a sanity bound on a runaway
 /// structure, not a stack limit: every walker grows the native stack as it descends
@@ -651,6 +666,9 @@ trait CopyTarget {
     /// An improper list: its items, then its tail as the last element.
     fn dotted(&mut self, items_and_tail: Vec<Self::Out>) -> Self::Out;
     fn vector(&mut self, items: Vec<Self::Out>) -> Self::Out;
+    /// A vector of [`PACKED_FLOATS_MIN`] or more elements, every one a float: copied whole,
+    /// charged one node an element as the walk would have been.
+    fn floats(&mut self, items: &[Value]) -> Result<Self::Out, Self::Decline>;
     fn map(&mut self, entries: Vec<(Self::Out, Self::Out)>) -> Self::Out;
     fn set(&mut self, elements: Vec<Self::Out>) -> Self::Out;
     fn failure(&mut self, src: &Heap, id: MapId, depth: u32) -> Result<Self::Out, Self::Decline>;
@@ -783,9 +801,29 @@ fn copy_value_inner<T: CopyTarget>(
             // it shared too, so the items need no copy of their own first.
             let items = src.vector(id);
             target.reserve(items.len() as i64)?;
+            // A long vector of nothing but floats is copied whole (`Message::FloatVector`).
+            if items.len() >= PACKED_FLOATS_MIN
+                && items.iter().all(|item| matches!(item, Value::Float(_)))
+            {
+                return target.floats(items);
+            }
             let mut out = Vec::with_capacity(items.len());
+            // A number (or nil, or a bool) is copied right here rather than through a call
+            // to this function: a vector of floats is the common big message (a mesh, a
+            // joint palette, samples), and the recursive call per element — a frame the
+            // size of this whole match — was most of what each element cost. Charged and
+            // depth-limited exactly as the call would be.
+            let atoms_inline = depth + 1 < MAX_MESSAGE_DEPTH;
             for &item in items.iter() {
-                out.push(copy_value(target, src, item, depth + 1)?);
+                out.push(match item {
+                    Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+                        if atoms_inline =>
+                    {
+                        target.charge()?;
+                        copy_number_atom(target, item)
+                    }
+                    _ => copy_value(target, src, item, depth + 1)?,
+                });
             }
             target.vector(out)
         }
@@ -870,6 +908,19 @@ fn copy_value_inner<T: CopyTarget>(
             target.leaf(|_| v, || Message::Table(id))
         }
     })
+}
+
+/// Copy a `nil`, bool, int or float — an atom with no heap identity — as `copy_value_inner`
+/// does, for a container walk that copies its atoms in line (the vector arm).
+#[inline]
+fn copy_number_atom<T: CopyTarget>(target: &mut T, atom: Value) -> T::Out {
+    match atom {
+        Value::Bool(flag) => target.leaf(|_| atom, || Message::Bool(flag)),
+        Value::Int(number) => target.leaf(|_| atom, || Message::Int(number)),
+        Value::Float(number) => target.leaf(|_| atom, || Message::Float(number)),
+        Value::Nil => target.leaf(|_| atom, || Message::Nil),
+        _ => unreachable!("copy_number_atom takes nil, a bool, an int or a float"),
+    }
 }
 
 /// A map's (or a failure's) entries, each key and value copied. Walked straight off the
@@ -958,6 +1009,16 @@ impl CopyTarget for IntoMessage {
     #[inline]
     fn vector(&mut self, items: Vec<Message>) -> Message {
         Message::Vector(items)
+    }
+    fn floats(&mut self, items: &[Value]) -> Result<Message, LispError> {
+        let numbers = items
+            .iter()
+            .map(|item| match item {
+                Value::Float(number) => *number,
+                _ => unreachable!("`floats` is handed only a vector of floats"),
+            })
+            .collect();
+        Ok(Message::FloatVector(numbers))
     }
     #[inline]
     fn map(&mut self, entries: Vec<(Message, Message)>) -> Message {
@@ -1485,6 +1546,8 @@ pub(crate) fn message_fits(m: &Message, budget: i64) -> bool {
             // decoded from a remote node's wire frame carries whatever that encoder chose,
             // so an inline `Str` of any length can arrive here and `alloc_string` memcpys it.
             Message::Str(s) => *left -= (s.len() / 1024) as i64,
+            // Rebuilt as a vector of that many floats: a node each, as a `Vector` of them.
+            Message::FloatVector(numbers) => *left -= numbers.len() as i64,
             // Rebuilding a shipped closure reconstructs *code* — arms, captured env, and
             // (ADR-245's sibling, KI-55) the woven module guards. Never under the lock.
             Message::Closure(_) => *left = -1,
@@ -1602,10 +1665,22 @@ fn from_message_inner(heap: &mut Heap, m: &Message, depth: u32) -> Value {
             heap.list_with_tail(vals, tail)
         }
         Message::Vector(items) => {
+            // Numbers are rebuilt in line, as the sending side copies them (`copy_number_atom`):
+            // no call per element of a vector of floats.
             let mut vals = Vec::with_capacity(items.len());
             for item in items {
-                vals.push(from_message_nested(heap, item, depth + 1));
+                vals.push(match item {
+                    Message::Float(number) => Value::float(*number),
+                    Message::Int(number) => Value::int(*number),
+                    Message::Bool(flag) => Value::boolean(*flag),
+                    Message::Nil => Value::nil(),
+                    _ => from_message_nested(heap, item, depth + 1),
+                });
             }
+            heap.alloc_vector(vals)
+        }
+        Message::FloatVector(numbers) => {
+            let vals: Vec<Value> = numbers.iter().map(|number| Value::float(*number)).collect();
             heap.alloc_vector(vals)
         }
         Message::Failure(entries) => {
@@ -2057,6 +2132,15 @@ impl CopyTarget for IntoHeap<'_> {
     #[inline]
     fn vector(&mut self, items: Vec<Value>) -> Value {
         self.dst.alloc_vector(items)
+    }
+    /// A float has no heap identity, so the elements are copied as they stand: one slice
+    /// copy, charged as the walk would have charged them.
+    fn floats(&mut self, items: &[Value]) -> Result<Value, Declined> {
+        *self.budget -= items.len() as i64;
+        if *self.budget < 0 {
+            return Err(Declined);
+        }
+        Ok(self.dst.alloc_vector_from_slice(items))
     }
     #[inline]
     fn map(&mut self, entries: Vec<(Value, Value)>) -> Value {
@@ -2870,5 +2954,124 @@ mod message_bytes_tests {
                 message_bytes(&message)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod float_vector_tests {
+    use super::{
+        Message, PACKED_FLOATS_MIN, copy_cross_heap, from_message, message_bytes, message_fits,
+        to_message,
+    };
+    use crate::core::heap::Heap;
+    use crate::core::value::Value;
+
+    fn floats(count: usize) -> Vec<Value> {
+        (0..count)
+            .map(|index| Value::Float(index as f64 * 0.5 - 3.25))
+            .collect()
+    }
+
+    fn float_elements(heap: &Heap, vector: Value) -> Vec<f64> {
+        let Value::Vector(id) = vector else {
+            panic!("expected a vector, got {vector:?}")
+        };
+        heap.vector(id)
+            .iter()
+            .map(|element| match element {
+                Value::Float(number) => *number,
+                other => panic!("expected a float, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The threshold vector packs, and rebuilds in another heap as the same floats, each
+    /// still a float. Sabotage: drop the `FloatVector` arm from `from_message` and the
+    /// receiver gets nil.
+    #[test]
+    fn a_long_float_vector_packs_and_rebuilds_as_the_same_floats() {
+        let mut source = Heap::new();
+        let items = floats(PACKED_FLOATS_MIN);
+        let vector = source.alloc_vector(items.clone());
+        let message = to_message(&source, vector).expect("a vector of floats serialises");
+        let Message::FloatVector(numbers) = &message else {
+            panic!("a {PACKED_FLOATS_MIN}-float vector must pack");
+        };
+        assert_eq!(numbers.len(), PACKED_FLOATS_MIN);
+        let mut destination = Heap::new();
+        let rebuilt = from_message(&mut destination, &message);
+        let expected: Vec<f64> = (0..PACKED_FLOATS_MIN)
+            .map(|index| index as f64 * 0.5 - 3.25)
+            .collect();
+        assert_eq!(float_elements(&destination, rebuilt), expected);
+    }
+
+    /// Below the threshold, or with one element that is not a float, a vector stays a
+    /// `Vector` — the tuple shape Rust consumers of a message match element by element.
+    #[test]
+    fn a_short_or_mixed_vector_stays_a_vector() {
+        let mut heap = Heap::new();
+        let short = heap.alloc_vector(floats(PACKED_FLOATS_MIN - 1));
+        assert!(matches!(
+            to_message(&heap, short).expect("serialises"),
+            Message::Vector(_)
+        ));
+        let mut items = floats(PACKED_FLOATS_MIN);
+        items[3] = Value::Int(7);
+        let mixed = heap.alloc_vector(items);
+        let message = to_message(&heap, mixed).expect("serialises");
+        let Message::Vector(elements) = &message else {
+            panic!("a vector with an int in it must not pack");
+        };
+        assert!(matches!(elements[3], Message::Int(7)));
+    }
+
+    /// A node link (and the startup image) must see exactly the bytes a `Vector` of these
+    /// `Float`s encodes to: the packed form is this runtime's own, and a peer that has never
+    /// heard of it decodes an ordinary vector.
+    #[test]
+    fn the_wire_encodes_a_float_vector_as_a_vector_of_floats() {
+        let numbers: Vec<f64> = (0..20).map(|index| index as f64 / 3.0).collect();
+        let packed = Message::FloatVector(numbers.clone());
+        let spelled_out = Message::Vector(numbers.iter().map(|n| Message::Float(*n)).collect());
+        let mut packed_bytes = Vec::new();
+        let mut spelled_bytes = Vec::new();
+        crate::dist::wire::encode_msg(&mut packed_bytes, &packed).expect("encodes");
+        crate::dist::wire::encode_msg(&mut spelled_bytes, &spelled_out).expect("encodes");
+        assert_eq!(packed_bytes, spelled_bytes);
+    }
+
+    /// The same-runtime direct copy (`IntoHeap`) copies the floats whole and charges the
+    /// budget one unit an element, as the walk did — so a huge vector still declines to the
+    /// message path rather than copying under the mailbox lock.
+    #[test]
+    fn the_direct_copy_charges_each_float_and_declines_past_the_budget() {
+        let mut source = Heap::new();
+        let vector = source.alloc_vector(floats(64));
+        let mut destination = Heap::new();
+        let mut budget = 1000;
+        let copied = copy_cross_heap(&source, &mut destination, vector, &mut budget)
+            .expect("64 floats fit a budget of 1000");
+        assert_eq!(float_elements(&destination, copied).len(), 64);
+        assert!(
+            budget <= 1000 - 64,
+            "each float must be charged: {budget} left"
+        );
+        let mut small_budget = 32;
+        assert!(copy_cross_heap(&source, &mut destination, vector, &mut small_budget).is_none());
+        assert!(
+            small_budget < 0,
+            "the decline must be attributable to the cap"
+        );
+    }
+
+    /// A queued packed vector is weighed by its payload, and rebuilding it counts a node an
+    /// element, as the vector of floats it stands for would.
+    #[test]
+    fn a_packed_vector_is_weighed_by_its_floats() {
+        let packed = Message::FloatVector(vec![1.0; 10_000]);
+        assert!(message_bytes(&packed) >= 10_000 * std::mem::size_of::<f64>());
+        assert!(!message_fits(&packed, 4096));
+        assert!(message_fits(&Message::FloatVector(vec![1.0; 100]), 4096));
     }
 }

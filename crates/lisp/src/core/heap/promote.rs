@@ -579,6 +579,10 @@ impl Heap {
                 let values = self.build_shared_items(items, build);
                 Value::vector(self.runtime.push_vec(VecStore::from_vec(values)))
             }
+            Message::FloatVector(numbers) => {
+                let values = numbers.iter().map(|number| Value::float(*number)).collect();
+                Value::vector(self.runtime.push_vec(VecStore::from_vec(values)))
+            }
             Message::Map(entries) => {
                 let pairs = self.build_shared_entries(entries, build);
                 let local = self.map_from_pairs(pairs);

@@ -66,6 +66,58 @@
   (test "300 random nested values round-trip identically"
     (is (check-rt 20260717 300))))
 
+;; A vector of sixteen or more floats crosses as one packed buffer of doubles
+;; (`Message::FloatVector`, ADR-789) instead of a message per element. It must arrive as
+;; the same vector of floats — never ints, never a list — whichever route it takes: a send,
+;; a captured local in a spawned closure, nested in a map, as a table key and value, and
+;; next to the shorter or mixed vectors that do not pack.
+(def- sixteen-floats (into [] (map (range 16) (fn (index) (- (* 0.5 index) 3.25)))))
+(def- many-floats (into [] (map (range 5000) (fn (index) (* 1.25 index)))))
+
+(defn- all-floats? (vector) (and (vector? vector) (every? vector float?)))
+
+(defn- float-vector-worker (parent floats)
+  (send parent [:sum (fold floats 0.0 +) floats]))
+
+(describe "a vector of floats crosses packed and arrives the same"
+  (test "at, below and above the packing length"
+    (assert= (roundtrip sixteen-floats) sixteen-floats)
+    (assert (all-floats? (roundtrip sixteen-floats)))
+    (assert= (roundtrip (into [] (seq/take-while sixteen-floats (fn (x) (< x 3.75)))))
+      (into [] (seq/take-while sixteen-floats (fn (x) (< x 3.75)))))
+    (assert= (roundtrip many-floats) many-floats))
+  (test "a vector with one int among its floats stays exactly that"
+    (let (mixed (assoc sixteen-floats 7 7))
+      (assert= (roundtrip mixed) mixed)
+      (assert= (nth (roundtrip mixed) 7) 7)))
+  (test "zero, negative zero and the extremes survive"
+    (let (edges (into []
+                  (append [0.0 -0.0 1.0e308 -1.0e308 5.0e-324]
+                    (seq/take-while many-floats (fn (x) (< x 20.0))))))
+      (assert= (roundtrip edges) edges)))
+  (test "nested in a map and a vector"
+    (let (value {:palette many-floats :pair [sixteen-floats sixteen-floats]})
+      (assert= (roundtrip value) value)))
+  (test "a captured local in a spawned closure"
+    (let (me (self) floats many-floats)
+      (spawn (send me [:count (count floats) (nth floats 4999)]))
+      (assert= [5000 6248.75] (receive ([:count n last] [n last]) (after test/*wait-ms* :timeout)))))
+  (test "as a table key and value"
+    (let (store (table/new))
+      (table/put store sixteen-floats many-floats)
+      (assert= (table/get store sixteen-floats) many-floats))))
+
+(describe "packed float vectors across processes"
+  :isolated (test "workers each sent the vector send it back with its sum"
+    (let (me (self) expected (fold many-floats 0.0 +))
+      (each (range 8) (fn (_i) (spawn (float-vector-worker me many-floats))))
+      (assert= (map (range 8)
+                 (fn (_i)
+                   (receive
+                     ([:sum total floats] [total (= floats many-floats)])
+                     (after test/*wait-ms* :timeout))))
+        (map (range 8) (fn (_i) [expected true]))))))
+
 ;; A closure crossing a local send is handed over as a shared-code handle when it is
 ;; already shared (it captures no locals) and deep-copied otherwise (ADR-194). Both
 ;; routes must be indistinguishable to the program: same result, same late binding of
