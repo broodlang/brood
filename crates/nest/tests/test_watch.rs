@@ -203,3 +203,36 @@ fn a_watch_reruns_what_a_save_reaches_and_survives_a_broken_save() {
     );
     session.wait_for(at, "1 tests, 1 passed");
 }
+
+/// The watcher hears a save from the OS (`file/watch`, ADR-782), not from its backstop look:
+/// it reports the change well inside `*watch-backstop-ms*` (5 s), which only the notification
+/// can do — the stamps are compared every 5 s otherwise.
+#[test]
+fn a_save_is_heard_from_the_os_not_the_backstop() {
+    let tmp = temp_dir("test-watch-notify");
+    let dir = &tmp.path;
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    write(dir, "project.blsp", "(project :name watchnotify)\n");
+    write(dir, "src/calc.blsp", "(defmodule calc)\n(defn add (a b) (+ a b))\n");
+    write(
+        dir,
+        "tests/calc_test.blsp",
+        "(defmodule calc-test (:use test) (:use calc))\n\
+         (describe \"calc\" (test \"adds\" (assert= 5 (add 2 3))))\n",
+    );
+    let session = Session::start(dir);
+    session.wait_for(0, "1 tests, 1 passed");
+    session.wait_for(0, "save to rerun");
+    // a backstop look may have just run: wait one out, so the next is ~5 s away
+    std::thread::sleep(Duration::from_millis(300));
+    let at = session.len();
+    let saved = Instant::now();
+    write(dir, "src/calc.blsp", "(defmodule calc)\n(defn add (a b) (- a b))\n");
+    session.wait_for(at, "calc.blsp changed");
+    let heard = saved.elapsed();
+    assert!(
+        heard < Duration::from_secs(3),
+        "the save was heard after {heard:?}: that is the backstop look, not the OS"
+    );
+}

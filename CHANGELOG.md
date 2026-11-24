@@ -6,6 +6,10 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Changed: `nest test --watch` waits on the OS.** It watches each directory holding a source or
+test file (`file/watch`, ADR-782) and reruns when a save is reported, instead of reading every
+file's mtime five times a second; a slow look every 5 s is the backstop.
+
 **Added: signed-distance scenes evaluated natively (ADR-787).** The `sdf` module takes a model of
 shapes and joins LOWERED to flat records (`sdf/record`, `sdf/material`, `sdf/field`), checks it
 (`sdf/check`), evaluates its distance, region and material at points (`sdf/probe`) and marches it

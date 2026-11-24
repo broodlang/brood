@@ -312,10 +312,14 @@ alone.
 ;; require-closure reaches a changed file (the `--stale` graph), or every test file when a
 ;; changed file is one the graph cannot place (a helper beside the tests).
 ;;
-;; One loop polling mtimes, not `reload/on-change`'s watcher per file: a save that touches
-;; several files is one rerun, and a reload always lands before the run that should see it.
+;; One loop, not `reload/on-change`'s watcher per file: a save that touches several files is one
+;; rerun, and a reload always lands before the run that should see it. The loop waits on the OS
+;; (`file/watch` on each directory that holds a watched file, ADR-782) and compares mtimes when
+;; it is told something changed, or every `*watch-backstop-ms*` regardless; where no directory
+;; can be watched it looks every `*watch-poll-ms*`, as it always did.
 
 (def- *watch-poll-ms* 200)
+(def- *watch-backstop-ms* 5000)
 (def- *watch-settle-ms* 50)
 
 (defn- watch-absolute (p) (path/absolute p (file/cwd)))
@@ -411,13 +415,37 @@ alone.
         (io/puts "no test file reaches it" :to *err*)
         (watch-run root tests opts)))))
 
-(defn- watch-loop (root named opts stamps)
-  (proc/sleep *watch-poll-ms*)
+(defn- watch-subscribed (subscribed files)
+  ;; `subscribed` (directory -> watch handle, nil where it could not be watched) with every
+  ;; directory holding one of `files` watched: a directory made since is added
+  (fold (seq/distinct (map files path/dirname))
+    subscribed
+    (fn (acc dir)
+      (if (contains? acc dir)
+        acc
+        (let (handle (file/watch dir)) (assoc acc dir (if (failure? handle) nil handle)))))))
+
+(defn- watch-drain ()
+  ;; the rest of a burst: the stamps say what changed, so one look covers them all
+  (receive ([:file-watch _ _ _] (watch-drain)) (after 0 nil)))
+
+(defn- watch-wait (subscribed)
+  ;; until the OS reports a change in a watched directory, or the backstop look is due
+  (receive
+    ([:file-watch _ _ _] (watch-drain))
+    (after (if (any? (vals subscribed) (fn (handle) (not (nil? handle))))
+             *watch-backstop-ms*
+             *watch-poll-ms*)
+      nil)))
+
+(defn- watch-loop (root named opts stamps &optional (subscribed {}))
+  (watch-wait subscribed)
   (let (files (watch-files root named)
+        subscribed (watch-subscribed subscribed files)
         now (watch-stamps files)
         changed (watch-changed files stamps now))
     (if (empty? changed)
-      (watch-loop root named opts now)
+      (watch-loop root named opts now subscribed)
       (do
         ;; an editor's save can be several writes; let them land, then read the stamps again
         (proc/sleep *watch-settle-ms*)
@@ -437,7 +465,7 @@ alone.
             (catch e
               (io/puts (str "nest test --watch: this cycle raised: " (error-message e)) :to *err*)))
           (watch-banner files)
-          (watch-loop root named opts settled))))))
+          (watch-loop root named opts settled subscribed))))))
 
 (defn watch-tests (paths & opts)
   "Run the tests, then keep running them: on every save, re-evaluate the changed source files'
@@ -449,6 +477,8 @@ reaches. Never returns; Ctrl-C ends it. Backs `nest test --watch`.
         named (map paths watch-absolute))
     (when (and root (empty? named)) (project-load-for-tests "test --watch"))
     (let (files (watch-files root named)
+          ;; watched before the first run, so a save during it is not missed
+          subscribed (watch-subscribed {} files)
           stamps (watch-stamps files))
       (watch-run root
         (cond
@@ -457,7 +487,7 @@ reaches. Never returns; Ctrl-C ends it. Backs `nest test --watch`.
           else (project-test-files root))
         opts)
       (watch-banner files)
-      (watch-loop root named opts stamps))))
+      (watch-loop root named opts stamps subscribed))))
 
 (defn run-tests-structured (& opts)
   "Like `run-tests` — the same discovery, each file in its own rolled-back scope — but

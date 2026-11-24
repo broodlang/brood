@@ -2571,3 +2571,12 @@ no rasteriser depth bias, so both painters compute the same thing. A malformed l
 error raised by `gui/draw` (it was silently a white light pointing down). Run here: the targeted
 unit tests (`host::gui::mesh`, `gui_scene_light_tests`, `the_mesh_shader_validates`), each new
 guard sabotaged; the suites are CI's (desktop rule).
+
+2026-11-24. **`nest test --watch` waits on `file/watch`.** The watcher stat'ed every source and test
+file every 200 ms; it now subscribes to each directory that holds one (`watch-subscribed`, new
+directories added as they appear), sleeps in a `receive` until the OS reports a change or the 5 s
+backstop is due, drains the burst, and compares mtimes as before, so what reruns is unchanged.
+Directories subscribed before the first run, so a save during it is not missed; where nothing can
+be watched it polls at 200 ms as it did. Guard: `test_watch.rs`'s
+`a_save_is_heard_from_the_os_not_the_backstop` (heard in under 3 s; red at 4.7 s with the
+`:file-watch` receive removed).
