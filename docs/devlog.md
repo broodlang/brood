@@ -2571,3 +2571,22 @@ no rasteriser depth bias, so both painters compute the same thing. A malformed l
 error raised by `gui/draw` (it was silently a white light pointing down). Run here: the targeted
 unit tests (`host::gui::mesh`, `gui_scene_light_tests`, `the_mesh_shader_validates`), each new
 guard sabotaged; the suites are CI's (desktop rule).
+
+2026-11-24. **The sampling profiler answers "which function" (ADR-789).** A game's author wrote
+a tool that redefined ~25 functions with timing wrappers to find where a 20 ms frame went; it
+could not wrap reserved names and inflated a recursive 4 ms layer to 129 ms. The profiler that
+existed since July could not have answered either: on a 160 ms smoke run (a JIT loop, a native
+call chain, a builtin calling back) it charged **831 ticks at 997 Hz** — a fresh nested driver
+sampled at its first boundary, tick or no tick, so 685 went to one function called 3000 times
+from native code — and every stack was one frame deep. Now a process samples when the epoch
+moved since *its* last sample (a mark on its heap) and is charged the ticks between; the driver
+samples where the frame that ran is still current; native activations link to their callers
+through `JitCallCtx::parent` (one store per native call) and sample at their reduction poll; a
+sample taken in a nested driver or native activation is held on the thread and completed by
+each enclosing driver on the way out. The same run: **147 ticks in 160 ms**, stacks
+`inner-loop < middle < top < frame` and `churn < nested-churn` across `%isolate`. Policy is
+the new DEV module `profile`: `profile/run`, `start`/`stop`, `sample`, `functions` (self and
+total), `report` (two ranked tables), `folded`; `nest profile` prints the report.
+`dev/profile->folded` moved to `profile/folded` (ledgered). Run here: the release build, one
+seconds-long smoke run on old and new binaries, and the static gates; the suites, `make ab` and
+`make ab-vm` (owed for the native call store) are CI's and the test machine's (desktop rule).

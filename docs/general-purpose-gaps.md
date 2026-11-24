@@ -225,8 +225,9 @@ hive.
 
 **Update 2026-10-26: done, bar publishing.** `nest dap` is a Debug Adapter Protocol server
 over `debug` (ADR-452: function and line breakpoints, threads, stack, variables, evaluate,
-continue); `nest profile` writes folded stacks (`dev/profile->folded`) that flamegraph.pl,
-inferno and speedscope read; `observe-otlp` (OTLP/HTTP JSON: logs, errors as
+continue); `nest profile` writes folded stacks (`profile/folded`) that flamegraph.pl,
+inferno and speedscope read, and prints the top functions by self and total time (ADR-789);
+`observe-otlp` (OTLP/HTTP JSON: logs, errors as
 `exception.*` log records, metrics) is written and tested as a package, not yet on hive.
 W3C `traceparent` propagation is still open — `observe` has no traces to propagate.
 

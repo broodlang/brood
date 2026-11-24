@@ -1671,8 +1671,11 @@ mechanism/policy split: kernel primitive, Brood policy.
   frame-boundary probe in `vm_run_bc` that records each process's reified
   named-frame stack into a histogram — no signals, one relaxed load per frame
   boundary when off (exactly what the state-capture rewrite made possible).
-  JIT-resident loops attribute at their quantum preempt; the tree-walker isn't
-  sampled. `tests/observability_test.blsp`. Slice 2 shipped 2026-07-19 — the
+  The tree-walker isn't sampled. ✅ **2026-11-24 (ADR-789): whole stacks, charged by
+  ticks** — native callers through `JitCallCtx::parent`, nested drivers completed on the
+  way out, a sample worth the ticks since the process's last; the `profile` module
+  (`profile/run`, `profile/report`, `profile/folded`) is the policy.
+  `tests/observability_test.blsp`. Slice 2 shipped 2026-07-19 — the
   **kernel event stream** (ADR-137): `(system-monitor pid opts)` pushes
   `:gc`/`:spawn`/`:exit`/`:deopt` events to one subscriber as
   `[:system kind subject-pid detail]` messages (`:gc-min-pause-us` reports
