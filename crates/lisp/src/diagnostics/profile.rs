@@ -18,18 +18,19 @@
 //! innermost first: a driver's own frames, the native activations' names through
 //! `crate::jit::JitCallCtx::parent`, and the frames of the drivers outside a nested one.
 //! A nested driver (a builtin calling back into Brood, a native arm calling interpreted code)
-//! cannot see the frames outside it, so a sample taken inside one is held on this thread as a
-//! [`Partial`] and each enclosing driver appends its frames when control comes back to it; the
-//! outermost driver on the thread commits it to the histogram. A process runs on one thread
-//! for as long as a nested driver is open (a nested run cannot capture), so the thread is the
-//! right place to keep them.
+//! cannot see the frames outside it, so every open driver is a [`Level`] in a thread-local
+//! chain, and publishes where its pending frames are for exactly as long as it is running code
+//! that could sample — its interpreter or a native activation. A sample walks the chain outward
+//! and is committed at once. A process runs on one thread for as long as a nested driver is
+//! open (a nested run cannot capture), so the chain is always the sampling process's.
 //!
 //! **Costs.** Off (the default): one relaxed load per driver frame boundary and per native
-//! reduction poll, a thread-local count per driver entry, one store per native→native call.
+//! reduction poll, three cell stores around each interpreter or native run and a thread-local
+//! link per driver entry, one store per native→native call.
 //! On: a stack walk and a mutex insert per sample, bounded by the ticker rate, not by the
 //! workload. Policy (reports, folded stacks) is Brood, over the raw `(%profile-stop)` data.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -43,8 +44,8 @@ static SAMPLES: Mutex<Option<HashMap<Box<[Symbol]>, u64>>> = Mutex::new(None);
 /// Generation counter for the ticker thread: bumping it retires the previous
 /// ticker (it checks on each tick), so start/stop cycles never leak threads.
 static TICKER_GEN: AtomicU64 = AtomicU64::new(0);
-/// Which profile is running: bumped by every start, so a process's [`Mark`] and a held
-/// [`Partial`] from an earlier profile are recognised as stale.
+/// Which profile is running: bumped by every start, so a process's [`Mark`] from an earlier
+/// profile, and a sample still in flight from one, are recognised as stale.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 /// The one process to sample, or 0 for every process. Every process that runs takes a
 /// sample per tick, so a profile of a busy program is the sum of all of them — and an
@@ -108,45 +109,113 @@ pub fn due(mark: &mut Mark) -> Option<u64> {
     Some(now - since)
 }
 
-/// A sample still missing the frames outside the nested driver or native activation it was
-/// taken in. Each enclosing driver appends its frames; the outermost commits it.
-struct Partial {
-    /// Innermost first.
-    stack: Vec<Symbol>,
-    ticks: u64,
-    generation: u64,
-    /// The stack ends at a native activation a bytecode driver entered (its chain reached
-    /// `crate::jit::backend::PARENT_DRIVER`); `root` is that activation's name. The driver
-    /// that entered it holds the same arm as its current frame and must not name it twice.
-    native_root: bool,
-    root: u32,
-}
-
 /// A native activation's `crate::jit::JitCallCtx`, type-erased so this module builds without
 /// the JIT; only JIT code makes or reads one.
 pub(crate) type NativeContext = *const ();
 
-/// The bytecode drivers open on this thread and how many [`Partial`]s are held. A `const`
-/// thread-local of plain cells: an access is one thread-pointer-relative load, which is what
-/// a driver entry pays when the profiler is off.
-struct Drivers {
-    depth: Cell<u32>,
-    held: Cell<u32>,
+/// Pushes the names of a driver's pending frames, innermost first, from the pointer it
+/// published (`Level::publish`). Supplied by the driver, which knows its frame type.
+pub(crate) type FrameWalk = unsafe fn(*const (), &mut Vec<Symbol>);
+
+/// One open bytecode driver, as the samples taken inside what it calls see it: a link in a
+/// thread-local chain from the innermost driver outward. It lives in the driver's own stack
+/// frame and is linked for the driver's extent (`Level::link`). While the driver is running
+/// its interpreter or a native activation — the only time anything it calls can sample — it
+/// publishes where its pending frames are and which frame is current; outside that window the
+/// frames are unpublished and a sample stops there. Only cells, so the driver and a sample
+/// reading it through the chain share it without either holding a unique borrow.
+pub(crate) struct Level {
+    parent: Cell<*const Level>,
+    /// The native activation that called the Rust code that entered this driver, taken from
+    /// `NATIVE_CALLER` when it was entered: the frames between this driver and its parent.
+    native_caller: Cell<NativeContext>,
+    frames: Cell<*const ()>,
+    current: Cell<u32>,
+    walk: FrameWalk,
+}
+
+/// Keeps a [`Level`] linked; dropping it unlinks it and gives back the native caller it took.
+pub(crate) struct LevelLink<'a>(&'a Level);
+
+/// What a sample on this thread walks outward through. A `const` thread-local of plain cells:
+/// an access is one thread-pointer-relative load.
+struct Thread {
+    /// The innermost open driver's [`Level`], or null.
+    innermost: Cell<*const Level>,
+    /// The native activation a runtime callback is running for, while it runs
+    /// ([`NativeCallerScope`]): what a native activation or a driver it enters continues its
+    /// stack into. Null outside every such callback, and inside a driver's extent (the driver
+    /// took it).
+    native_caller: Cell<NativeContext>,
 }
 
 thread_local! {
-    static DRIVERS: Drivers = const {
-        Drivers {
-            depth: Cell::new(0),
-            held: Cell::new(0),
+    static THREAD: Thread = const {
+        Thread {
+            innermost: Cell::new(std::ptr::null()),
+            native_caller: Cell::new(std::ptr::null()),
         }
     };
-    static HELD: RefCell<Vec<Partial>> = const { RefCell::new(Vec::new()) };
-    /// The native activation a runtime callback is running for, while it runs
-    /// ([`NativeCallerScope`]): what a native activation or a driver it enters continues
-    /// its stack into. Null outside every such callback, and inside a driver's extent (the
-    /// driver took it, [`DriverMark`]).
-    static NATIVE_CALLER: Cell<NativeContext> = const { Cell::new(std::ptr::null()) };
+}
+
+impl Level {
+    /// An unlinked level for a driver whose pending frames `walk` reads.
+    #[inline]
+    pub(crate) const fn new(walk: FrameWalk) -> Level {
+        Level {
+            parent: Cell::new(std::ptr::null()),
+            native_caller: Cell::new(std::ptr::null()),
+            frames: Cell::new(std::ptr::null()),
+            current: Cell::new(u32::MAX),
+            walk,
+        }
+    }
+
+    /// Make this the innermost driver on the thread until the link is dropped. Always done,
+    /// armed or not: a profile started while a driver runs must still find it.
+    #[inline]
+    pub(crate) fn link(&self) -> LevelLink<'_> {
+        THREAD.with(|thread| {
+            self.parent
+                .set(thread.innermost.replace(self as *const Level));
+            self.native_caller
+                .set(thread.native_caller.replace(std::ptr::null()));
+        });
+        LevelLink(self)
+    }
+
+    /// The driver is about to run its interpreter or a native activation: `frames` points at
+    /// its pending frames (what its [`FrameWalk`] reads), `current` names its current frame.
+    /// The pointer must stay valid, and the frames unchanged, until [`Level::unpublish`].
+    #[inline]
+    pub(crate) fn publish(&self, frames: *const (), current: Option<Symbol>) {
+        self.frames.set(frames);
+        self.current.set(current.unwrap_or(u32::MAX));
+    }
+
+    /// The current frame changed inside the window (a deopt resuming in another chunk).
+    #[inline]
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub(crate) fn set_current(&self, current: Option<Symbol>) {
+        self.current.set(current.unwrap_or(u32::MAX));
+    }
+
+    /// The window closed: the driver is about to change its frames.
+    #[inline]
+    pub(crate) fn unpublish(&self) {
+        self.frames.set(std::ptr::null());
+    }
+}
+
+impl Drop for LevelLink<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        let level = self.0;
+        THREAD.with(|thread| {
+            thread.innermost.set(level.parent.get());
+            thread.native_caller.set(level.native_caller.get());
+        });
+    }
 }
 
 /// The native caller of the Rust code running now, for a native entry's
@@ -158,7 +227,7 @@ pub(crate) fn native_caller() -> NativeContext {
     if !armed() {
         return std::ptr::null();
     }
-    NATIVE_CALLER.with(|caller| caller.get())
+    THREAD.with(|thread| thread.native_caller.get())
 }
 
 /// Names `ctx` as the native caller for the extent of a runtime callback that can run Brood
@@ -177,7 +246,9 @@ impl NativeCallerScope {
         if !armed() {
             return NativeCallerScope(None);
         }
-        NativeCallerScope(Some(NATIVE_CALLER.with(|caller| caller.replace(ctx))))
+        NativeCallerScope(Some(
+            THREAD.with(|thread| thread.native_caller.replace(ctx)),
+        ))
     }
 }
 
@@ -185,155 +256,85 @@ impl Drop for NativeCallerScope {
     #[inline]
     fn drop(&mut self) {
         if let Some(previous) = self.0 {
-            NATIVE_CALLER.with(|caller| caller.set(previous));
+            THREAD.with(|thread| thread.native_caller.set(previous));
         }
     }
 }
 
-/// One bytecode driver's place among the drivers open on its thread, held for the driver's
-/// extent ([`driver_enter`]); dropping it closes the driver.
-pub(crate) struct DriverMark {
-    /// Drivers open on the thread, this one included: 1 is the outermost.
-    depth: u32,
-    /// Partials held when the driver was entered — not this driver's.
-    entry_floor: u32,
-    /// Partials below this are not for this driver to complete: those held at entry, and
-    /// those it has already given its frames to.
-    work_floor: u32,
-    /// The native caller this driver took from [`NATIVE_CALLER`] at entry (null when there
-    /// was none, or the profiler was off): its frames go on what the driver hands back.
-    caller: NativeContext,
-    took_caller: bool,
-}
-
-/// Enter a bytecode driver. Always counted, armed or not: whether a driver is the outermost
-/// on its thread must be right for a profile started while it runs.
-#[inline]
-pub(crate) fn driver_enter() -> DriverMark {
-    let (depth, held) = DRIVERS.with(|drivers| {
-        let depth = drivers.depth.get() + 1;
-        drivers.depth.set(depth);
-        (depth, drivers.held.get())
-    });
-    let (caller, took_caller) = if armed() {
-        (
-            NATIVE_CALLER.with(|caller| caller.replace(std::ptr::null())),
-            true,
-        )
-    } else {
-        (std::ptr::null(), false)
-    };
-    DriverMark {
-        depth,
-        entry_floor: held,
-        work_floor: held,
-        caller,
-        took_caller,
-    }
-}
-
-impl Drop for DriverMark {
-    #[inline]
-    fn drop(&mut self) {
-        let held = DRIVERS.with(|drivers| {
-            drivers.depth.set(drivers.depth.get() - 1);
-            drivers.held.get()
-        });
-        if self.took_caller {
-            NATIVE_CALLER.with(|caller| caller.set(self.caller));
+/// Extend `stack` outward from where a sample was taken: through the native caller `caller`
+/// (null for none), then each enclosing driver from `level` out — its current frame, its
+/// pending frames, the native caller that entered it — stopping at a driver whose frames are
+/// not published. `skip` names a current frame not to push again: the root of a native
+/// chain that a driver entered is that driver's current frame.
+fn extend_outward(
+    stack: &mut Vec<Symbol>,
+    mut skip: Option<u32>,
+    mut caller: NativeContext,
+    mut level: *const Level,
+) {
+    loop {
+        #[cfg(feature = "jit")]
+        if !caller.is_null() {
+            // SAFETY: a native caller is named only by a callback still running beneath the
+            // code sampling now (`NativeCallerScope`), so it and its parents are live.
+            let (driver_root, root) =
+                unsafe { crate::jit::backend::native_stack(caller.cast(), stack) };
+            skip = driver_root.then_some(root);
         }
-        if held > self.entry_floor {
-            driver_exit(self);
-        }
-    }
-}
-
-/// A driver leaves with partials it was given: put the native caller's frames on them (the
-/// frames between this driver and the one outside it), or commit them when no driver is
-/// outside it.
-#[cold]
-#[inline(never)]
-fn driver_exit(mark: &DriverMark) {
-    let generation = GENERATION.load(Ordering::Relaxed);
-    let live = armed();
-    with_held(|held| {
-        let floor = mark.entry_floor as usize;
-        if !live {
-            held.truncate(floor);
+        #[cfg(not(feature = "jit"))]
+        let _ = caller;
+        if level.is_null() {
             return;
         }
-        // Only native code names a caller, so without the JIT `caller` is always null.
-        #[cfg(feature = "jit")]
-        if !mark.caller.is_null() {
-            for partial in &mut held[floor..] {
-                // SAFETY: `caller` was named by a callback that is still running beneath this
-                // driver (`NativeCallerScope`), so it and its parents are live.
-                let (native_root, root) = unsafe {
-                    crate::jit::backend::native_stack(mark.caller.cast(), &mut partial.stack)
-                };
-                partial.native_root = native_root;
-                partial.root = root;
-            }
+        // SAFETY: a linked level lives in the stack frame of a driver that is still open
+        // beneath the code sampling now (links are made and dropped in stack order).
+        let open = unsafe { &*level };
+        let frames = open.frames.get();
+        if frames.is_null() {
+            return;
         }
-        if mark.depth == 1 {
-            commit_all(held.drain(floor..), generation);
+        let current = open.current.get();
+        if current != u32::MAX && skip != Some(current) {
+            stack.push(current);
         }
-    });
+        // SAFETY: the driver published `frames` before running the code that is sampling now
+        // and changes them only after it returns ([`Level::publish`]).
+        unsafe { (open.walk)(frames, stack) };
+        skip = None;
+        caller = open.native_caller.get();
+        level = open.parent.get();
+    }
 }
 
-/// The driver's sample and its partials, at a frame boundary: `current` is the frame that was
-/// running (the native arm itself after a native run, `ran_native`), `callers` the driver's
-/// pending frames innermost first. Called only while armed.
+/// The driver's sample at a frame boundary, where the frame that just ran is still current:
+/// `current` and `callers` (its pending frames, innermost first) are the driver's own; the
+/// drivers around it come from its [`Level`]. Called only while armed.
 #[cold]
 #[inline(never)]
-pub(crate) fn driver_boundary(
-    mark: &mut DriverMark,
+pub(crate) fn driver_sample(
+    level: &Level,
     process: &mut Mark,
     current: Option<Symbol>,
-    callers: impl Iterator<Item = Option<Symbol>> + Clone,
-    ran_native: bool,
+    callers: impl Iterator<Item = Option<Symbol>>,
 ) {
-    let ticks = due(process);
-    let held = DRIVERS.with(|drivers| drivers.held.get());
-    if ticks.is_none() && held <= mark.work_floor {
+    let Some(ticks) = due(process) else {
         return;
-    }
-    let generation = GENERATION.load(Ordering::Relaxed);
-    let push_frames = |stack: &mut Vec<Symbol>, skip_current: bool| {
-        if !skip_current && let Some(name) = current {
-            stack.push(name);
-        }
-        stack.extend(callers.clone().flatten());
     };
-    with_held(|held| {
-        let floor = mark.work_floor as usize;
-        for partial in &mut held[floor..] {
-            let skip = ran_native
-                && partial.native_root
-                && current.is_some_and(|name| name == partial.root);
-            push_frames(&mut partial.stack, skip);
-            partial.native_root = false;
-        }
-        if let Some(ticks) = ticks {
-            let mut stack = Vec::with_capacity(8);
-            push_frames(&mut stack, false);
-            held.push(Partial {
-                stack,
-                ticks,
-                generation,
-                native_root: false,
-                root: u32::MAX,
-            });
-        }
-        if mark.depth == 1 {
-            commit_all(held.drain(floor..), generation);
-        }
-        mark.work_floor = held.len() as u32;
-    });
+    let generation = GENERATION.load(Ordering::Relaxed);
+    let mut stack = Vec::with_capacity(16);
+    stack.extend(current);
+    stack.extend(callers.flatten());
+    extend_outward(
+        &mut stack,
+        None,
+        level.native_caller.get(),
+        level.parent.get(),
+    );
+    commit(&stack, ticks, generation);
 }
 
-/// A sample taken in native code: the native activations' names from `ctx` outward, held for
-/// the drivers around it (or committed when there are none).
+/// A sample taken in native code: the native activations' names from `ctx` outward, then the
+/// drivers around them.
 ///
 /// # Safety
 /// `ctx` is the running native activation's live context.
@@ -344,42 +345,18 @@ pub(crate) unsafe fn native_sample(process: &mut Mark, ctx: *const crate::jit::J
     let Some(ticks) = due(process) else {
         return;
     };
-    let mut stack = Vec::with_capacity(8);
-    // SAFETY: the caller hands the running activation's live context (this fn's contract).
-    let (native_root, root) = unsafe { crate::jit::backend::native_stack(ctx, &mut stack) };
     let generation = GENERATION.load(Ordering::Relaxed);
-    if DRIVERS.with(|drivers| drivers.depth.get()) == 0 {
-        commit(&stack, ticks, generation);
-        return;
-    }
-    with_held(|held| {
-        held.push(Partial {
-            stack,
-            ticks,
-            generation,
-            native_root,
-            root,
-        })
-    });
-}
-
-/// Run `body` on this thread's held partials, keeping the count the drivers read in step.
-fn with_held<T>(body: impl FnOnce(&mut Vec<Partial>) -> T) -> T {
-    HELD.with(|cell| {
-        let mut held = cell.borrow_mut();
-        let answer = body(&mut held);
-        let count = held.len() as u32;
-        DRIVERS.with(|drivers| drivers.held.set(count));
-        answer
-    })
-}
-
-fn commit_all(partials: impl Iterator<Item = Partial>, generation: u64) {
-    for partial in partials {
-        if partial.generation == generation {
-            commit(&partial.stack, partial.ticks, generation);
-        }
-    }
+    let mut stack = Vec::with_capacity(16);
+    // SAFETY: the caller hands the running activation's live context (this fn's contract).
+    let (driver_root, root) = unsafe { crate::jit::backend::native_stack(ctx, &mut stack) };
+    let innermost = THREAD.with(|thread| thread.innermost.get());
+    extend_outward(
+        &mut stack,
+        driver_root.then_some(root),
+        std::ptr::null(),
+        innermost,
+    );
+    commit(&stack, ticks, generation);
 }
 
 /// Add `ticks` to `stack`'s count — when the profile the sample was taken in is still the
@@ -425,8 +402,7 @@ pub fn start(hz: u32, pid: Option<u64>) {
 }
 
 /// Disarm and take the histogram (stack → ticks), largest first. Empty if the
-/// profiler was never armed (or already stopped). Samples still held for a driver that has
-/// not handed control back are dropped.
+/// profiler was never armed (or already stopped).
 pub fn stop() -> Vec<(Box<[Symbol]>, u64)> {
     ARMED.store(false, Ordering::SeqCst);
     TICKER_GEN.fetch_add(1, Ordering::SeqCst); // retire the ticker promptly
