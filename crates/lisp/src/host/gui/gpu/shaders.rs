@@ -665,15 +665,20 @@ struct DrawU {
     scatter: vec4<f32>,         // rgb, wrap
     material: vec4<f32>,        // roughness, specular, rim, cutoff
     flags: vec4<u32>,           // surface, texture bits, palette offset, skinned
-    morph_info: vec4<u32>,      // morph count, vertex count, palette joint count
-    morph_index: array<vec4<u32>, 2>,
-    morph_weight: array<vec4<f32>, 2>,
+    morph_info: vec4<u32>,      // morph count, vertex count, palette joint count, first weight
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
 @group(0) @binding(2) var shadow_maps: texture_depth_2d_array;
 @group(0) @binding(3) var shadow_sampler: sampler_comparison;
+// the draws' morph weights, each draw's `morph_info.x` of them from `morph_info.w`: as many as
+// a draw names (a face blends a smile, a blink and speech at once)
+struct MorphWeight {
+    target_index: u32,
+    weight: f32,
+};
 @group(1) @binding(0) var<uniform> draw: DrawU;
+@group(1) @binding(1) var<storage, read> morph_weights: array<MorphWeight>;
 @group(2) @binding(0) var<storage, read> morphs: array<vec4<f32>>;
 @group(3) @binding(0) var base_texture: texture_2d<f32>;
 @group(3) @binding(1) var normal_texture: texture_2d<f32>;
@@ -707,9 +712,9 @@ fn pose(input: VertexIn) -> Posed {
     var position = input.position;
     var normal = input.normal;
     for (var slot = 0u; slot < draw.morph_info.x; slot = slot + 1u) {
-        let target_index = draw.morph_index[slot / 4u][slot % 4u];
-        let weight = draw.morph_weight[slot / 4u][slot % 4u];
-        let at = (target_index * draw.morph_info.y + input.index) * 2u;
+        let blend = morph_weights[draw.morph_info.w + slot];
+        let weight = blend.weight;
+        let at = (blend.target_index * draw.morph_info.y + input.index) * 2u;
         position = position + weight * morphs[at].xyz;
         normal = normal + weight * morphs[at + 1u].xyz;
     }

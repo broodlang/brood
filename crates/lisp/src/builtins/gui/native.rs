@@ -1513,7 +1513,7 @@ fn scene_spec(
     spec: Value,
     num: &dyn Fn(Value) -> f32,
 ) -> Result<Option<crate::host::gui::mesh::Scene>, String> {
-    use crate::host::gui::mesh::{Draw, MAX_MORPHS, Material, Scene, Surface};
+    use crate::host::gui::mesh::{Draw, Material, Scene, Surface};
     let Value::Map(map) = spec else {
         return Ok(None);
     };
@@ -1686,7 +1686,6 @@ fn scene_spec(
                     _ => Vec::new(),
                 };
                 morphs.sort_by(|left, right| right.1.abs().total_cmp(&left.1.abs()));
-                morphs.truncate(MAX_MORPHS);
                 Some(Ok(Draw {
                     mesh,
                     model: matrix(get(*draw_map, "model")).unwrap_or([

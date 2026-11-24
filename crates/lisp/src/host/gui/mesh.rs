@@ -46,8 +46,6 @@ pub const NEAR_LIGHT: f32 = 0.01;
 /// The texels each cube face of a point light's shadow reaches past its 90°, so the filter of
 /// a receiver on a face's edge stays on that face.
 const CUBE_MARGIN: f32 = 3.0;
-/// The most morph targets one draw blends (the heaviest, when it names more).
-pub const MAX_MORPHS: usize = 8;
 /// The largest side of a scene's picture, in pixels.
 pub const MAX_SCENE_SIDE: u32 = 4096;
 /// The most vertices one mesh may have: 80 bytes each on the GPU target stays under the
@@ -551,7 +549,8 @@ pub struct Draw {
     pub model: [f32; 16],
     /// Which of the scene's palettes skins it; `None` draws it rigid.
     pub palette: Option<usize>,
-    /// `(target, weight)` pairs, at most [`MAX_MORPHS`] of them, heaviest first.
+    /// `(target, weight)` pairs, heaviest first: every one is blended (no cap; a face blends a
+    /// smile, a blink and speech at once).
     pub morphs: Vec<(u32, f32)>,
     pub material: Material,
 }
@@ -814,7 +813,7 @@ pub struct ShadowPlan {
 pub fn draw_bounds(scene: &Scene, draw: &Draw, bounds: &MeshBounds) -> Option<Bounds> {
     // what the morphs can add to a position, before skinning
     let mut grow = [[0.0f32; 3]; 2];
-    for &(target, weight) in draw.morphs.iter().take(MAX_MORPHS) {
+    for &(target, weight) in &draw.morphs {
         if let Some(offsets) = bounds.morphs.get(target as usize) {
             for axis in 0..3 {
                 let (low, high) = (weight * offsets[0][axis], weight * offsets[1][axis]);
@@ -1625,7 +1624,6 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
     let morphs: Vec<(&Morph, f32)> = draw
         .morphs
         .iter()
-        .take(MAX_MORPHS)
         .filter_map(|&(target, weight)| {
             mesh.morphs
                 .get(target as usize)
@@ -1633,16 +1631,28 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
         })
         .filter(|(_, weight)| *weight != 0.0)
         .collect();
+    // morphed a target at a time, each streamed through in order (and vectorised): walking every
+    // vertex across all the targets at once reads as many streams as targets and falls out of
+    // the cache. Measured at her size (53,514 vertices, release): 0.16 ms a target, linear, where
+    // the vertex-first walk took 2.1 ms for 8 targets but 16.1 for 37
+    let mut positions = mesh.positions.clone();
+    let mut normals = mesh.normals.clone();
+    for (morph, weight) in &morphs {
+        for (position, offset) in positions.iter_mut().zip(&morph.positions) {
+            for axis in 0..3 {
+                position[axis] += weight * offset[axis];
+            }
+        }
+        for (normal, offset) in normals.iter_mut().zip(&morph.normals) {
+            for axis in 0..3 {
+                normal[axis] += weight * offset[axis];
+            }
+        }
+    }
     (0..mesh.positions.len())
         .map(|index| {
-            let mut position = mesh.positions[index];
-            let mut normal = mesh.normals[index];
-            for (morph, weight) in &morphs {
-                for axis in 0..3 {
-                    position[axis] += weight * morph.positions[index][axis];
-                    normal[axis] += weight * morph.normals[index][axis];
-                }
-            }
+            let position = positions[index];
+            let normal = normals[index];
             let tangent = mesh
                 .tangents
                 .as_ref()
@@ -2546,6 +2556,74 @@ mod tests {
                     vertex.world
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_morph_a_draw_names_is_blended() {
+        // a face blends a smile, a blink and speech at once: twenty targets, none dropped
+        let count = 20u32;
+        let parts = MeshParts {
+            positions: bytes_of(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+            morphs: (0..count)
+                .map(|_| {
+                    (
+                        bytes_of(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.01, 0.0]),
+                        Vec::new(),
+                    )
+                })
+                .collect(),
+            ..MeshParts::default()
+        };
+        let mesh = Mesh::from_parts(parts).unwrap();
+        let morphed = scene(Draw {
+            morphs: (0..count).map(|target| (target, 1.0)).collect(),
+            ..draw()
+        });
+        let vertices = pose_vertices(&morphed, &mesh, &morphed.draws[0]);
+        assert!(
+            (vertices[2].world[1] - (1.0 + 0.01 * count as f32)).abs() < 1e-5,
+            "every target moved it: {:?}",
+            vertices[2].world
+        );
+    }
+
+    /// What morphing costs the CPU painter at a real figure's size (womanblend's: 53,514
+    /// vertices, 37 face targets), so a growing face or a new figure can be checked against it:
+    /// `cargo test --release -p brood --features gui --lib -- --ignored morph_cost --nocapture`.
+    /// Measured 2026-11-24: 1.6 ms with none, then about 0.16 ms a target (37: 7.6 ms).
+    #[test]
+    #[ignore = "a timing, run by hand"]
+    fn morph_cost_at_her_size() {
+        let vertex_count = 53_514usize;
+        let positions: Vec<f32> = (0..vertex_count * 3)
+            .map(|index| index as f32 * 1e-5)
+            .collect();
+        let offsets: Vec<f32> = (0..vertex_count * 3)
+            .map(|index| (index % 7) as f32 * 1e-4)
+            .collect();
+        let parts = MeshParts {
+            positions: bytes_of(&positions),
+            morphs: (0..37)
+                .map(|_| (bytes_of(&offsets), bytes_of(&offsets)))
+                .collect(),
+            ..MeshParts::default()
+        };
+        let mesh = Mesh::from_parts(parts).unwrap();
+        for count in [0u32, 8, 16, 24, 37] {
+            let morphed = scene(Draw {
+                morphs: (0..count).map(|target| (target, 0.5)).collect(),
+                ..draw()
+            });
+            let rounds = 20;
+            let start = std::time::Instant::now();
+            for _ in 0..rounds {
+                std::hint::black_box(pose_vertices(&morphed, &mesh, &morphed.draws[0]));
+            }
+            eprintln!(
+                "MORPH COST {count} targets: {:.2} ms a pose",
+                start.elapsed().as_secs_f64() * 1000.0 / rounds as f64
+            );
         }
     }
 }

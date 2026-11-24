@@ -2580,3 +2580,17 @@ Directories subscribed before the first run, so a save during it is not missed; 
 be watched it polls at 200 ms as it did. Guard: `test_watch.rs`'s
 `a_save_is_heard_from_the_os_not_the_backstop` (heard in under 3 s; red at 4.7 s with the
 `:file-watch` receive removed).
+
+2026-11-24. **A scene draw blends every morph it names (ADR-786 amended).** womanblend's face
+asks for a smile, a blink and speech at once, about 14 of its 37 targets, and the eighth-heaviest
+cap dropped the small ones first: the eyes never narrowed in a smile. The cap is gone in both
+painters: the GPU reads each draw's `(target, weight)` pairs from a storage buffer in the draw
+group (`morph_info.w` its first pair), so `DrawU` stays 256 bytes whatever the count; the CPU
+painter blends them all. Measuring first showed the CPU painter's morphing fell out of the cache
+past about 16 targets (every vertex walked across all targets: 8 took 2.1 ms at her 53,514
+vertices, 37 took 16.1), so it now adds one target at a time over the vertices, streamed and
+vectorised: about 0.16 ms a target, linear (37: 7.6 ms; 8: 2.9). An ignored test,
+`morph_cost_at_her_size`, re-measures it. The GPU's cost per target is two storage reads per
+vertex per pass (colour and each shadow view), not measured here (no window on the desktop).
+Guard `every_morph_a_draw_names_is_blended` (20 targets). Run here: fmt, clippy, the targeted
+`host::gui::mesh` tests, `the_mesh_shader_validates`; the suites are CI's (desktop rule).
