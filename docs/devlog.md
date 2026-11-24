@@ -2581,9 +2581,13 @@ sampled at its first boundary, tick or no tick, so 685 went to one function call
 from native code — and every stack was one frame deep. Now a process samples when the epoch
 moved since *its* last sample (a mark on its heap) and is charged the ticks between; the driver
 samples where the frame that ran is still current; native activations link to their callers
-through `JitCallCtx::parent` (one store per native call) and sample at their reduction poll; a
-sample taken in a nested driver or native activation is held on the thread and completed by
-each enclosing driver on the way out. The same run: **147 ticks in 160 ms**, stacks
+through `JitCallCtx::parent` (one store per native call) and sample at their reduction poll;
+every open driver links itself into a thread-local chain and publishes its frames while it runs
+its interpreter or a native activation, so a sample walks out through the drivers around it and
+is committed at once. (A first version held such samples until the outermost driver got control
+back; CI showed the flaw — the test runner, like `proc/interruptible`, keeps the outermost driver
+inside one call-out for the whole profile, so four profiler tests read empty profiles. A runner-
+shaped smoke run reproduced it: 0 ticks before, 83 after.) The same run: **147 ticks in 160 ms**, stacks
 `inner-loop < middle < top < frame` and `churn < nested-churn` across `%isolate`. Policy is
 the new DEV module `profile`: `profile/run`, `start`/`stop`, `sample`, `functions` (self and
 total), `report` (two ranked tables), `folded`; `nest profile` prints the report.

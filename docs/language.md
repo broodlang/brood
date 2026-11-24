@@ -4061,7 +4061,8 @@ iolist in memory.
     `fn` names nothing; its time goes to the nearest named function around it. The
     legacy tree-walker (`BROOD_TIER=0`) is not sampled.
   - **Cost.** Off: one relaxed load per frame boundary and per native reduction poll, a
-    thread-local count per driver entry, one store per native call. On: a stack walk and a
+    thread-local link per driver entry, three cell stores around each interpreter or native
+    run, one store per native call. On: a stack walk and a
     mutex insert per sample, a few microseconds, so well under 1% of a process at 997 Hz
     (an estimate from the code path; not yet measured on the benchmark machine).
 - `(proc/system-monitor [pid opts])` — the **runtime event stream**: the kernel
