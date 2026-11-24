@@ -1500,9 +1500,10 @@ fn emitter_spec(
 /// numbers, a column-major view-projection with clip depth 0 … 1 — required), `:eye [x y z]`,
 /// `:lights` (up to `MAX_LIGHTS`, each directional, point or spot — [`light_spec`], ADR-788),
 /// `:sky` / `:ground [r g b]` (the ambient from above and below) or `:ambient-sh` (nine
-/// `[r g b]` spherical-harmonic coefficients, ADR-791), `:exposure`, `:background
-/// [r g b a]` (0 … 1, transparent by default), `:palettes` (joint matrices, 16 numbers each: a
-/// vector of numbers or f32 bytes per skeleton) and `:draws [{:mesh h :model [16] :palette i
+/// `[r g b]` spherical-harmonic coefficients, ADR-793), `:exposure`, `:background
+/// [r g b a]` (0 … 1, transparent by default), `:ambient-occlusion {:radius m :strength s}`
+/// (or `true`: folds and corners darken the ambient light — off by default), `:palettes`
+/// (joint matrices, 16 numbers each: a vector of numbers or f32 bytes per skeleton) and `:draws [{:mesh h :model [16] :palette i
 /// :morphs [[target weight] …] :material {…}} …]`. Colours and light are linear. A key of the
 /// wrong shape keeps its default and a draw without a mesh handle is dropped — except the
 /// lights, `:ambient-sh`, and a material's `:cast-shadow` and `:lobes`, where a mistake would
@@ -1514,7 +1515,9 @@ fn scene_spec(
     spec: Value,
     num: &dyn Fn(Value) -> f32,
 ) -> Result<Option<crate::host::gui::mesh::Scene>, String> {
-    use crate::host::gui::mesh::{Draw, Material, SPECULAR_TO_F0, Scene, Surface};
+    use crate::host::gui::mesh::{
+        AmbientOcclusion, DEFAULT_OCCLUSION_RADIUS, Draw, Material, SPECULAR_TO_F0, Scene, Surface,
+    };
     let Value::Map(map) = spec else {
         return Ok(None);
     };
@@ -1606,6 +1609,7 @@ fn scene_spec(
                 "skin" => Surface::Skin,
                 "cutout" => Surface::Cutout,
                 "blend" => Surface::Blend,
+                "hair" => Surface::Hair,
                 _ => Surface::Standard,
             };
         }
@@ -1745,6 +1749,25 @@ fn scene_spec(
             Some(std::array::from_fn(|index| triples[index]))
         }
     };
+    // `:ambient-occlusion {:radius metres :strength 0 … 1}` (or `true` for the defaults): the
+    // ambient light darkened in folds and corners (`mesh::ambient_occlusion`); off without it
+    let ambient_occlusion = match get(map, "ambient-occlusion") {
+        Some(Value::Bool(true)) => Some(AmbientOcclusion {
+            radius: DEFAULT_OCCLUSION_RADIUS,
+            strength: 1.0,
+        }),
+        Some(Value::Map(settings)) => {
+            let number = |key: &str, default: f32| match get(settings, key) {
+                Some(item) if is_number(item) && num(item).is_finite() => num(item),
+                _ => default,
+            };
+            Some(AmbientOcclusion {
+                radius: number("radius", DEFAULT_OCCLUSION_RADIUS).max(0.0),
+                strength: number("strength", 1.0).clamp(0.0, 1.0),
+            })
+        }
+        _ => None,
+    };
     Ok(Some(Scene {
         x: rect[0],
         y: rect[1],
@@ -1757,6 +1780,7 @@ fn scene_spec(
         ground: three(get(map, "ground"), [0.1, 0.08, 0.06]),
         ambient_sh,
         exposure,
+        ambient_occlusion,
         background,
         palettes,
         draws,
@@ -1837,10 +1861,11 @@ fn lights_spec(
 ///
 /// `:color` (linear, 0 or more; white by default) is a point or spot light's light 1 m away.
 /// `:size` (a point or spot light's diameter, metres) or `:angle` (a directional light's apparent
-/// diameter, radians), 0 or more, softens its shadow by distance (ADR-791).
+/// diameter, radians), 0 or more, softens its shadow by distance (ADR-793).
 /// `:range` (above 0) windows its falloff to nothing there. `:shadow` is `true`, `false` or a
 /// map of `:resolution` (texels, 16 … 4096), `:bias` and `:normal-bias` (texels, 0 or more),
-/// `:softness` (the soft penumbra's radius in texels, above 0; with a size, its most),
+/// `:softness` (metres, 0 or more: the radius its edge is filtered over at the receiver; with
+/// a `:size` or `:angle`, the most its penumbra grows to),
 /// for a directional light `:extent` (metres, above 0) and `:center [x y z]`, for a spot or
 /// point light `:near` (metres, above 0).
 fn light_spec(
@@ -2033,7 +2058,14 @@ fn light_spec(
                                 }
                                 ("near", false) => shadow.near = positive("near", setting)?,
                                 ("softness", _) => {
-                                    shadow.softness = Some(positive("softness", setting)?)
+                                    shadow.softness = number(setting)
+                                        .filter(|amount| *amount >= 0.0 && amount.is_finite())
+                                        .ok_or_else(|| {
+                                            format!(
+                                                ":shadow :softness is 0 or more metres, not {}",
+                                                shown(setting)
+                                            )
+                                        })?
                                 }
                                 _ => {
                                     return Err(format!(
@@ -3176,7 +3208,7 @@ mod gui_scene_light_tests {
 
     #[test]
     fn soft_shadows_sh_ambient_lobes_and_occlusion_read_and_default() {
-        // ADR-791: every new key read, and what each is without it
+        // ADR-793: every new key read, and what each is without it
         let scene = scene_keyed(
             "[{:position [0 2 0] :direction [0 -1 0] :cone [0.3 0.6] :size 0.4
                :shadow {:softness 24}}
@@ -3188,9 +3220,9 @@ mod gui_scene_light_tests {
         .expect("a scene");
         let spot = &scene.lights[0];
         assert_eq!(spot.size, 0.4);
-        assert_eq!(spot.shadow.as_ref().unwrap().softness, Some(24.0));
+        assert_eq!(spot.shadow.as_ref().unwrap().softness, 24.0);
         assert_eq!(scene.lights[1].size, 0.0093);
-        assert_eq!(scene.lights[1].shadow.as_ref().unwrap().softness, None);
+        assert_eq!(scene.lights[1].shadow.as_ref().unwrap().softness, 0.0);
         assert_eq!(scene.lights[2].size, 0.0, "a light is a point by default");
         let sh = scene.ambient_sh.expect("the SH ambient");
         assert_eq!(
@@ -3230,8 +3262,8 @@ mod gui_scene_light_tests {
             );
         };
         refused(
-            lights("[{:direction [0 -1 0] :shadow {:softness 0}}]"),
-            ":softness is a number above 0",
+            lights("[{:direction [0 -1 0] :shadow {:softness -0.1}}]"),
+            ":shadow :softness is 0 or more metres",
         );
         refused(
             lights("[{:position [0 1 0] :size -1}]"),

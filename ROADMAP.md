@@ -1671,8 +1671,12 @@ mechanism/policy split: kernel primitive, Brood policy.
   frame-boundary probe in `vm_run_bc` that records each process's reified
   named-frame stack into a histogram — no signals, one relaxed load per frame
   boundary when off (exactly what the state-capture rewrite made possible).
-  JIT-resident loops attribute at their quantum preempt; the tree-walker isn't
-  sampled. `tests/observability_test.blsp`. Slice 2 shipped 2026-07-19 — the
+  The tree-walker isn't sampled. ✅ **2026-11-24 (ADR-791): whole stacks, charged by
+  ticks** — native callers through `JitCallCtx::parent`, the frames of enclosing drivers
+  read through the pointers they publish while calling out,
+  a sample worth the ticks since the process's last; the `profile` module
+  (`profile/run`, `profile/report`, `profile/folded`) is the policy.
+  `tests/observability_test.blsp`. Slice 2 shipped 2026-07-19 — the
   **kernel event stream** (ADR-137): `(system-monitor pid opts)` pushes
   `:gc`/`:spawn`/`:exit`/`:deopt` events to one subscriber as
   `[:system kind subject-pid detail]` messages (`:gc-min-pause-us` reports
@@ -3110,8 +3114,8 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
     8; `:shadow` gives up to 4 of them PCF shadow maps (a cube for a point light), recomputed
     every frame from the posed meshes, alpha-tested for cutout/blend, `:cast-shadow false` per
     draw. Both painters, one plan. ⬜ Cascaded maps for a large sunlit scene; ✅ soft
-    (contact-hardening) shadows, ADR-791.
-  - ✅ **Soft shadows, SH ambient, Fresnel, dual-lobe skin, occlusion maps** (ADR-791,
+    (contact-hardening) shadows, ADR-793.
+  - ✅ **Soft shadows, SH ambient, Fresnel, dual-lobe skin, occlusion maps** (ADR-793,
     2026-11-24) — `:softness` / `:size` / `:angle` (PCSS over a 16-tap disc), `:ambient-sh`
     (nine L2 coefficients), Schlick Fresnel with F0 from `:specular`, `:lobes` (skin two by
     default), `:occlusion` on the ambient. ⬜ Energy conservation between diffuse and specular.

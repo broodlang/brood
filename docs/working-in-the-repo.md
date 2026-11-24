@@ -14,7 +14,9 @@ launch over an unbound symbol in the entry point's require-closure; `--no-check`
 `--watch`; `--check-boot` loads every module and resolves `:main` but runs nothing, KI-66),
 `doc`, `docs`, `doctest`, `format`, `repl`, `mcp` (an MCP server over the project, ADR-036),
 `observe`, `attach` (thin frontend for a `ui-run` daemon, ADR-090), `completions`/`complete`,
-`grammar` (editor grammars from `(special-forms)`, ADR-092), `rename`, `ws`, `stdimage`, the
+`grammar` (editor grammars from `(special-forms)`, ADR-092), `rename`, `check-syntax` (the
+reader alone over FILEs, or a Claude Code hook payload with `--claude-hook`, ADR-789), `form`
+(`list`/`read`/`replace`/`insert`/`delete` a whole top-level form by name, ADR-789), `ws`, `stdimage`, the
 package manager (`fetch`/`update`/`tree`/`add`/`remove`, ADR-037; `publish`/`search` against
 the hosted `hive` registry, ADR-147/211; `key`, ADR-212), `release` (bundling, ADR-038;
 boot-checks the binary it wrote and deletes it on failure; `--no-smoke` opts out), and
@@ -66,6 +68,22 @@ here. The ones you reach for first: `BROOD_GC_STRESS` / `BROOD_GC_VERIFY` (GC ra
 `BROOD_TIER` (which engine), `BROOD_J=1` (one worker), `BROOD_JIT_DUMP_IR` /
 `BROOD_JIT_BAIL_TRACE` (did an arm lower, and why not), `BROOD_PERF_STATS` (counters; needs
 `make perf-brood`).
+
+**Which Brood functions is the time going to? The sampling profiler** (ADR-791,
+`std/tool/profile.blsp`; the API is in `docs/language.md` under the observability
+instruments). It attributes running time to Brood functions by qualified name — interpreted,
+native (JIT) and through builtins that call back — with nothing in the program changed, so it
+replaces hand-written timing wrappers (which cannot wrap a reserved name and inflate a cheap or
+recursive function many times over):
+
+    (io/puts (profile/report (profile/run (fn () (step-many-frames)))))
+    nest profile app.blsp --top 30          # report on stderr, app.blsp.folded for a flame graph
+
+Around part of a running loop, `(profile/start)` … `(profile/stop session)`; from outside it,
+`(profile/sample 3000 {:pid pid})`. Read **self** time for the code that is slow itself and
+**total** time for the call that is slow because of what it calls. `perf/report` is the other
+instrument: it *counts* the VM's kinds of work and needs a `perf-stats` build; the profiler
+*times* functions on any build.
 
 **Build with `RUSTFLAGS="-C debug-assertions=on" cargo build --release`** to keep release
 speed while arming every debug check (plain `--release` strips them; plain debug is correct

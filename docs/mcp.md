@@ -133,7 +133,7 @@ The contract for every operation:
 
 ## The tool surface (Brood, in `std/tool/mcp.blsp`)
 
-Twenty-four tools, each earning its place by needing the runtime to answer —
+Twenty-nine tools, each earning its place by needing the runtime to answer —
 anything a plain file read or grep would answer is **not** here, because
 Claude Code already has those:
 
@@ -142,7 +142,12 @@ Claude Code already has those:
 | `eval`        | `{source}`                  | `{value}` or `{error}`                 | The point — iterate without restart; runs every form and returns the last value |
 | `load`        | `{file}`                    | `{ok, diagnostics, shadows}`           | Reload a `.blsp` into the live image, *and* check it: `diagnostics` are `check-file-structured` warnings (type/arity/unbound/non-tail-recursion); `shadows` flags names this file also-defines in another source file (flat-namespace collision) |
 | `write`       | `{path, content}`           | `{ok, path, diagnostics, shadows}`     | Create/overwrite a project file *through* the image, not the raw filesystem: `path` is project-relative and sandboxed under the project root (absolute paths, `~`, `..` rejected); a `.blsp` file is loaded into the session and checked, so success carries `diagnostics`/`shadows` like `load` (failure is `{ok: false, error}`) |
-| `edit`        | `{path, old, new}`          | `{ok, path, diagnostics, shadows}`     | Exact-string replace in a project file (sandboxed like `write`; `old` must occur exactly once); a `.blsp` file is reloaded and checked, same result shape as `write` |
+| `edit`        | `{path, old, new}`          | `{ok, path, diagnostics, shadows}`     | Exact-string replace in a project file (sandboxed like `write`; `old` must occur exactly once); a `.blsp` file is reloaded and checked, same result shape as `write`. `write` and `edit` refuse to leave a `.blsp` that read unreadable: nothing is written, and `{ok: false, error, line, col, hint}` gives the reader's message with the position in the NEW text (ADR-789) |
+| `list-forms`  | `{path}`                    | `{ok, forms: [{kind, name, line, end-line}]}` | A file's top-level forms by what they define, to find one without reading the file |
+| `read-form`   | `{path, name}`              | `{ok, text, line, end-line}`           | The exact source of the top-level form defining `name` (`parse`, or `defn parse` to pick the kind); missing or ambiguous lists the definitions |
+| `replace-form`| `{path, name, text}`        | `{ok, path, line, end-line, diagnostics, shadows}` | Replace that whole form; `text` must read as exactly one form or nothing is written. Formatted, reloaded and checked. **The way to change a function**: brackets cannot drift (ADR-789) |
+| `insert-form` | `{path, text, after}`       | same as `replace-form`                 | Add a form after the one defining `after`, or at `"start"` (after the `defmodule`) or `"end"` |
+| `delete-form` | `{path, name}`              | `{ok, path, diagnostics, shadows}`     | Remove the whole form defining `name` |
 | `lookup`      | `{name}`                    | `{arglist, doc, type, source_location}`| Resolves prelude, project, macros uniformly; `type` is the checker's arrow signature (shared with LSP hover) |
 
 > **"Sandboxed" above means an ergonomic guardrail on `write`/`edit`, not a containment

@@ -174,3 +174,21 @@ or use `editor/frontend/quit-request?`. If the app binds Esc to cancel/normal-mo
 brood/gui`. Without it the `gui/*` primitives raise `gui backend not compiled in —
 this brood was built without it` rather than opening a window; an app that "does
 nothing" may simply be running a non-GUI build.
+
+## 8. It runs, but too slowly: which function?
+
+Measure before guessing, and don't wrap functions in hand-written timers — a wrapper cannot
+wrap a reserved name and inflates a cheap or recursive function many times over. The sampling
+profiler attributes running time to functions by qualified name, interpreted or native, with
+nothing in the program changed:
+
+```lisp
+(io/puts (profile/report (profile/run (fn () (step-many-frames)))))
+;; around part of a loop that is already running:
+(let (session (profile/start)) … (io/puts (profile/report (profile/stop session))))
+```
+
+`nest profile FILE` does it for a whole program (and writes `FILE.folded` for a flame graph).
+Read **self** time for the function that is slow itself, **total** time for the call that is
+slow because of what it calls. A builtin's time is its caller's; an anonymous `fn`'s is the
+nearest named function's; waiting in `receive` is not counted.

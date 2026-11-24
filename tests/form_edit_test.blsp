@@ -1,0 +1,91 @@
+;; form-edit: editing Brood source by whole top-level forms (ADR-789) — what `nest form` and
+;; the `nest mcp` form tools run, so an agent's edit cannot unbalance a file's brackets.
+(defmodule form-edit-test
+  (:use test)
+  (:use form-edit))
+
+(def- *source*
+  "(defmodule m)\n\n;; f's doc\n(sig f (int -> int))\n(defn f (x)\n  (inc x)) ; why\n\n(check-allow :x\n  (defn g () 1))\n\n(describe \"parser tests\" 1)\n")
+
+(describe "form-edit: finding forms by what they define"
+  (test "list-forms names each top-level form's kind, name and lines"
+    (assert= [{:kind "defmodule" :name "m" :line 1 :end-line 1}
+               {:kind "sig" :name "f" :line 4 :end-line 4}
+               {:kind "defn" :name "f" :line 5 :end-line 6}
+               {:kind "defn" :name "g" :line 8 :end-line 9}
+               {:kind "describe" :name "parser tests" :line 11 :end-line 11}]
+      (list-forms *source*)))
+  (test "a bare name shared by a sig and a defn means the definition; the kind picks the sig"
+    (assert= {:ok true :text "(defn f (x)\n  (inc x))" :line 5 :end-line 6}
+      (read-form *source* "f"))
+    (assert= "(sig f (int -> int))" (get (read-form *source* "sig f") :text)))
+  (test "a form inside check-allow is found, and the whole wrapper is the form"
+    (assert= "(check-allow :x\n  (defn g () 1))" (get (read-form *source* "g") :text)))
+  (test "a name with a space is tried whole before it is read as KIND NAME"
+    (assert= "(describe \"parser tests\" 1)" (get (read-form *source* "parser tests") :text)))
+  (test "a missing name is refused with the file's definitions listed"
+    (let (refused (read-form *source* "nope"))
+      (refute (get refused :ok))
+      (is (includes? (get refused :error) "no top-level form defines `nope`"))
+      (is (includes? (get refused :error) "5-6 defn f"))))
+  (test "a name defined twice is refused as ambiguous"
+    (let (refused (read-form "(def a 1)\n(def a 2)\n" "a"))
+      (refute (get refused :ok))
+      (is (includes? (get refused :error) "names 2 top-level forms")))))
+
+(describe "form-edit: replacing a whole form"
+  (test "the form is replaced and formatted, the rest of the file byte for byte"
+    (let (result (replace-form *source* "f" "(defn f (x)\n(+ x 2))"))
+      (is (get result :ok))
+      (assert= (string/replace *source* "(defn f (x)\n  (inc x))" "(defn f (x)\n  (+ x 2))")
+        (get result :text))
+      (assert= [5 6] [(get result :line) (get result :end-line)])))
+  (test "a replacement that does not read is refused with the reader's message"
+    (let (result (replace-form *source* "f" "(defn f (x)\n  (+ x 2)"))
+      (refute (get result :ok))
+      (assert= "the new form:1:1: unclosed list (opened here)" (get result :error))
+      (assert= 1 (get result :line))))
+  (test "a replacement of two forms is refused"
+    (let (result (replace-form *source* "f" "(defn f (x) x) (defn h () 1)"))
+      (refute (get result :ok))
+      (is (includes? (get result :error) "reads as 2 forms"))))
+  (test "a file that does not read is not edited"
+    (let (result (replace-form "(defn f (x)\n  (inc x)\n" "f" "(defn f (x) x)"))
+      (refute (get result :ok))
+      (is (includes? (get result :error) "it must read before a form can be replaced")))))
+
+(describe "form-edit: inserting and deleting forms"
+  (test "start is after the defmodule, end is after the last form"
+    (assert= "(defmodule m)\n\n(def a 1)\n\n(def b 2)\n"
+      (get (insert-form "(defmodule m)\n\n(def b 2)\n" "(def a 1)" "start") :text))
+    (assert= "(defmodule m)\n\n(def b 2)\n\n(def a 1)\n"
+      (get (insert-form "(defmodule m)\n\n(def b 2)\n" "(def a 1)" "end") :text)))
+  (test "after a name, past that form's trailing comment"
+    (let (result (insert-form *source* "(def h 3)" "f"))
+      (is (includes? (get result :text) "(inc x)) ; why\n\n(def h 3)\n\n(check-allow"))
+      (assert= 8 (get result :line))))
+  (test "a delete takes the form and its trailing comment, and squeezes the blank lines"
+    (assert= "(def a 1)\n\n(def c 3)\n"
+      (get (delete-form "(def a 1)\n\n(def b 2) ; gone\n\n(def c 3)\n" "b") :text))))
+
+(describe "form-edit: the write guard"
+  (test "a write that leaves a reading file unreadable is refused, the position in the new text"
+    (let (refused (guard-write "a.blsp" "(defn f (x)\n  x)\n" "(defn f (x)\n  [x)\n"))
+      (refute (get refused :ok))
+      (assert= "a.blsp:2:5: unexpected ')' — expected ']' to close the vector opened at 2:3"
+        (get refused :error))
+      (assert= [2 5] [(get refused :line) (get refused :col)])
+      (is (includes? (get refused :hint) "replace-form"))))
+  (test "a new file is guarded too; a file that did not read is not (the write may repair it)"
+    (is (map? (guard-write "a.blsp" nil "(a")))
+    (assert= nil (guard-write "a.blsp" "(a" "(a b"))
+    (assert= nil (guard-write "a.blsp" "(a" "(a b)"))))
+
+(describe "form-edit: read-error says where"
+  (test "a missing closer names the line it belongs before"
+    (assert= {:message "unclosed list: `(defn a` opened at 1:1 is still open when line 3 starts `(defn b` at column 1 — a `)` is missing before line 3"
+              :line 1
+              :col 1}
+      (read-error "(defn a ()\n  (foo)\n(defn b () 1)\n")))
+  (test "a source excerpt points a caret at the column"
+    (assert= "    (a [1 2)\n            ^" (source-excerpt "(a [1 2)" {:line 1 :col 9}))))

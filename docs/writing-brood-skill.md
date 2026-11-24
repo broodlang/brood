@@ -10,6 +10,22 @@ idioms you will get wrong if you write it like Clojure, Scheme or Common Lisp. T
 reference is `docs/brood-for-claude.md` (processes, servers, UI, hot reload, what to do
 when the runtime crashes); `std/prelude/*.blsp` is the canonical idiomatic code.
 
+## Editing Brood: whole forms, never bracket surgery
+
+A string-replace edit inside a function is how brackets drift: one `)` too many or too few
+and the file no longer reads. So:
+
+- **Change a function with `replace-form`** (MCP) or **`nest form replace FILE NAME`**
+  (shell, the new form on stdin). It replaces the whole top-level form that defines `NAME`;
+  the new text must read as exactly one balanced form or nothing is written.
+- **See it first** with `list-forms` / `read-form` (`nest form list FILE`, `nest form read
+  FILE NAME`). Add with `insert-form` (`--after NAME|start|end`), remove with `delete-form`.
+- **Never sed or perl Brood source.** After any other hand edit run **`nest check-syntax
+  FILE`**; the `.claude/settings.json` hook that `nest new` / `nest update-tooling` install
+  runs it after every Edit/Write and hands a broken file's message back to you.
+- A read error says where the bracket belongs: `` `(let` opened at 2:3 is still open when
+  line 5 starts `(defn b` at column 1 — a `)` is missing before line 5 ``.
+
 ## The traps
 
 1. **No mutation.** No `set!`, `setq`, atoms, cells, `vector-set!`, `set-car!`; every
@@ -167,8 +183,10 @@ EOF
 A Brood project's `.mcp.json` points at `nest mcp`, a server over the **live image**
 (tools appear as `mcp__brood__eval` and so on). Prefer it to guessing:
 
+- **`replace-form`** / **`insert-form`** / **`delete-form`** change a `.blsp` by whole top-level
+  form (**`list-forms`** / **`read-form`** to look first): the way to change a function.
 - **`eval`** runs source in the image; **`write`** / **`edit`** change a file and load and
-  check a `.blsp` in the same call; **`load`** re-`def`s a file changed any other way (the
+  check a `.blsp` in the same call (an edit that would leave a `.blsp` unreadable is refused); **`load`** re-`def`s a file changed any other way (the
   image does not see disk edits until then).
 - **`check`** (project) / **`check-source`** (a snippet); **`run-tests`**.
 - **`lookup`** — a global's arglist, docstring, type and location; check argument order

@@ -706,6 +706,16 @@ fn encode_msg_inner(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
                 encode_msg(w, it)?;
             }
         }
+        // The bytes a `Vector` of these `Float`s encodes to, so a peer (and the startup
+        // image) sees exactly what it always did: the packed form is this runtime's own.
+        Message::FloatVector(numbers) => {
+            w.push(M_VECTOR);
+            put_u32(w, numbers.len() as u32);
+            for number in numbers {
+                w.push(M_FLOAT);
+                w.extend_from_slice(&number.to_bits().to_be_bytes());
+            }
+        }
         Message::Map(entries) => {
             w.push(M_MAP);
             put_u32(w, entries.len() as u32);

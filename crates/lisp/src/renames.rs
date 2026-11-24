@@ -1009,6 +1009,13 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
         "http/*connection-timeout-ms*",
         "ADR-718",
     ),
+    // ADR-791 — the profiler's policy moved into the `profile` module, which reads a whole
+    // profile (`profile/stop`, `profile/run`) rather than the bare histogram: a call shape.
+    (
+        "dev/profile->folded",
+        "profile/folded {:stacks histogram}",
+        "ADR-791",
+    ),
 ];
 
 /// Where `old` went, if it is a ledgered rename: `(new, adr)`.

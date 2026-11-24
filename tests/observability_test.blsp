@@ -75,3 +75,92 @@
         (when (not (%tree-walker?))
           (is (includes? frames "observability-test/obs-churn"))
           (is (not (includes? frames "observability-test/obs-other-churn"))))))))
+
+;; ---- the profiler's stacks and charges (ADR-791) -------------------------------------
+;; A sample must carry every frame around the code that was running — through a builtin that
+;; runs Brood in a nested driver, and through native activations calling each other — and a
+;; process must never be charged more ticks than passed while it ran.
+
+(defn obs-nested-churn (n) (%isolate (fn () (obs-churn n ()))))
+
+(defn obs-inner-loop (n acc) (if (= n 0) acc (obs-inner-loop (- n 1) (+ acc 1))))
+(defn obs-middle (n) (+ 1 (obs-inner-loop n 0)))
+(defn obs-top (rounds acc) (if (= rounds 0) acc (obs-top (- rounds 1) (+ acc (obs-middle 20000)))))
+
+(defn obs-stacks-with (profile name)
+  (seq/filter (map (:stacks profile) :stack) (fn (stack) (includes? stack name))))
+
+(describe "profiler stacks"
+  :isolated (test "a sample taken in a nested driver carries the frames outside it"
+    ;; `%isolate` runs its thunk in a driver of its own, which cannot see the frames of the
+    ;; one that called the builtin; the enclosing driver completes the sample
+    (let (profile (profile/run (fn () (obs-nested-churn 800000) (obs-nested-churn 800000))
+                    {:hz 999})
+          churn (obs-stacks-with profile "observability-test/obs-churn"))
+      (when (not (%tree-walker?))
+        (is (not (empty? churn)))
+        (is (every? churn (fn (stack) (includes? stack "observability-test/obs-nested-churn")))))))
+  :isolated (test "a sample taken in native code names its native callers"
+    ;; once tiered, obs-top calls obs-middle calls obs-inner-loop natively; a sample in the
+    ;; inner loop walks the callers through each activation's context
+    (let (profile (profile/run (fn () (obs-top 300 0)) {:hz 999})
+          inner (obs-stacks-with profile "observability-test/obs-inner-loop"))
+      (when (not (%tree-walker?))
+        (is (= 300 (- (:result profile) 6000000)))
+        (is (not (empty? inner)))
+        (is (every? inner (fn (stack) (includes? stack "observability-test/obs-middle"))))
+        (is (every? inner (fn (stack) (includes? stack "observability-test/obs-top")))))))
+  :isolated (test "one process is never charged more ticks than passed"
+    ;; a sample is worth the ticks since the process's last one, so a process's ticks cannot
+    ;; outrun the clock — however many nested drivers it enters (each once took a sample at
+    ;; its first boundary, tick or no tick)
+    (let (profile (profile/run (fn () (doseq (_ (range 40)) (obs-nested-churn 20000))) {:hz 999}))
+      (is (<= (:ticks profile) (+ 2 (/ (* (:wall-ms profile) (:hz profile)) 1000.0)))))))
+
+(describe "profile reports"
+  (test "functions: self time is the innermost frame's, total counts a function once a stack"
+    (let (rows (profile/functions {:hz 500
+                                   :stacks [{:stack ["leaf" "mid" "main"] :count 4}
+                                             {:stack ["mid" "mid" "main"] :count 2}
+                                             {:stack ["main"] :count 1}]}))
+      (assert= ["main" "mid" "leaf"] (into [] (map rows :name)))
+      (assert= [7 6 4] (into [] (map rows :total-ticks)))
+      (assert= [1 2 4] (into [] (map rows :self-ticks)))
+      ;; 500 Hz: a tick is 2 ms
+      (assert= [14.0 12.0 8.0] (into [] (map rows :total-ms)))))
+  (test "report ranks by self time and by total time"
+    (let (text (profile/report {:hz 1000
+                                :wall-ms 10.0
+                                :ticks 10
+                                :cpu-ms 10.0
+                                :stacks [{:stack ["hot" "main"] :count 9}
+                                          {:stack ["main"] :count 1}]}
+                 {:top 5})
+          lines (string/split text "\n"))
+      (is (string/starts-with? (first lines) "profile: 10.0 ms of running time in 10.0 ms"))
+      ;; the first row under each heading is that ranking's leader
+      (let (self-at (index-of lines "   self ms   self %   total ms  function")
+            total-at (index-of lines "  total ms  total %    self ms  function"))
+        (is (string/ends-with? (str (nth lines (+ self-at 1))) "  hot"))
+        (is (string/ends-with? (str (nth lines (+ total-at 1))) "  main")))))
+  (test "folded stacks are root first, one line a stack"
+    (assert= "main;mid;leaf 4\nmain 1\n"
+      (profile/folded {:stacks [{:stack ["leaf" "mid" "main"] :count 4} {:stack ["main"] :count 1}]}))))
+
+(describe "profiling across processes"
+  ;; the profile of one process, read while others build and send values: a pid-scoped
+  ;; profile holds only its frames, and the samples' strings cross back intact
+  :isolated (test "workers' frames stay out of a pid-scoped profile; a profile crosses a send"
+    (let (me (self)
+          workers (map (range 4)
+                    (fn (_) (spawn (fn () (obs-other-churn 400000 ()) (send me :worker-done)))))
+          profile (profile/run (fn () (obs-churn 800000 ())) {:hz 999}))
+      (doseq (_ workers) (receive (:worker-done nil) (after 60000 nil)))
+      (let (child (spawn (fn ()
+                           (receive
+                             ([:profile from received]
+                               (send from [:folded (profile/folded received)]))))))
+        (send child [:profile me profile])
+        (receive ([:folded text] (assert= (profile/folded profile) text)) (after 60000 (is false))))
+      (when (not (%tree-walker?))
+        (is (empty? (obs-stacks-with profile "observability-test/obs-other-churn")))))))

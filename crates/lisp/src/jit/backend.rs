@@ -156,6 +156,52 @@ pub(crate) struct JitCallCtx {
     /// native call site of an arm that can be rebuilt passes its `unwind` on directly, and
     /// one that cannot passes 0. The unboxed register worker reaches neither.
     pub no_child_unwind: u8,
+    /// The activation that called this one, for the sampling profiler (ADR-791): a native
+    /// call site stores its own context here, so a sample taken in native code walks the
+    /// native callers' names without any per-call bookkeeping beyond this one store. Not a
+    /// pointer in two cases: null when Rust entered the activation with no native caller to
+    /// name, and [`PARENT_DRIVER`] when the bytecode driver entered it (the frames around it
+    /// are that driver's). A real pointer always names a live context: a callee's context
+    /// is built in its caller's stack frame, and the caller outlives the call.
+    pub parent: *const JitCallCtx,
+}
+
+/// [`JitCallCtx::parent`] of an activation the bytecode driver entered (`EntryFrom::Driver`):
+/// the frames outside it are the driver's, which the driver adds to the sample itself.
+pub(crate) const PARENT_DRIVER: *const JitCallCtx = std::ptr::without_provenance(1);
+
+/// The names of the native activations from `ctx` outward, innermost first, appended to
+/// `stack` (an anonymous arm names nothing), and the context the walk stopped at: whether
+/// the chain ends at a driver's entry ([`PARENT_DRIVER`]) and that root activation's name.
+///
+/// # Safety
+/// `ctx` is a live context: the running activation's, or one a runtime callback was handed
+/// and has not returned from. Every `parent` it reaches is then live too (see the field).
+pub(crate) unsafe fn native_stack(
+    ctx: *const JitCallCtx,
+    stack: &mut Vec<crate::core::value::Symbol>,
+) -> (bool, u32) {
+    // A chain is as deep as native recursion (KI-11 bounds it); the cap only keeps a walk
+    // finite should a context ever be built without its parent.
+    const MAX_FRAMES: usize = 4096;
+    let mut at = ctx;
+    let mut walked = 0;
+    loop {
+        // SAFETY: `at` is `ctx` or a `parent` reached from it, live by this fn's contract.
+        let context = unsafe { &*at };
+        if context.dbg_fn != u32::MAX {
+            stack.push(context.dbg_fn);
+        }
+        walked += 1;
+        let parent = context.parent;
+        if parent == PARENT_DRIVER {
+            return (true, context.dbg_fn);
+        }
+        if parent.is_null() || walked >= MAX_FRAMES {
+            return (false, context.dbg_fn);
+        }
+        at = parent;
+    }
 }
 
 impl JitCallCtx {
@@ -173,6 +219,7 @@ impl JitCallCtx {
             dbg_fn: heap.jit_dbg_fn,
             unwind: 0,
             no_child_unwind: 0,
+            parent: std::ptr::null(),
         }
     }
 

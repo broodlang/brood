@@ -74,9 +74,16 @@ pub unsafe extern "C" fn brood_rt_tick_n(
     n: i64,
     ctx: *const crate::jit::JitCallCtx,
 ) -> u8 {
-    // SAFETY: `heap` is the live process heap and is only read here (contract: heap); `ctx`
-    // is the running activation's context (contract: ctx).
+    // SAFETY: `heap` is the live process heap (contract: heap): the limit peeks read it, and a
+    // profiler sample writes only its `profile_mark`; `ctx` is the running activation's
+    // context (contract: ctx), whose parents are its live callers.
     unsafe {
+        // The sampling profiler (ADR-791): a native activation reaches no driver boundary
+        // until it returns, so it samples here — the full chain of native callers, held for
+        // the drivers around it. Off: one relaxed load per poll.
+        if crate::diagnostics::profile::armed() {
+            crate::diagnostics::profile::native_sample(&mut (*heap).profile_mark, ctx);
+        }
         match crate::core::alloc::soft_limit_state() {
             crate::core::alloc::SoftLimit::Clear => {}
             // A native loop near the limit measures itself like an interpreted one, or the
@@ -93,34 +100,11 @@ pub unsafe extern "C" fn brood_rt_tick_n(
             NativePoll::Preempt => 1,
             NativePoll::Leave => 2,
             NativePoll::RunOnFreshQuantum => {
-                // The sampling profiler records at interpreter frame boundaries, and this loop
-                // will not reach one until it finishes. Sample it here instead, once per
-                // profiler tick, by the running arm's name.
-                if crate::diagnostics::profile::armed() {
-                    sample_native_activation(&*ctx);
-                }
                 // The once-per-quantum checks a native loop does not reach otherwise.
                 crate::core::alloc::refresh_container_limits();
                 0
             }
         }
-    }
-}
-
-/// One profiler sample for a native activation that cannot yield to a driver: the stack is
-/// just its own name (the frames below it are a builtin's or a nested driver's), recorded at
-/// most once per profiler tick on this thread, as a driver records once per tick.
-#[cold]
-fn sample_native_activation(ctx: &crate::jit::JitCallCtx) {
-    thread_local! {
-        static LAST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    }
-    let epoch = crate::diagnostics::profile::epoch();
-    if LAST.with(|l| l.replace(epoch)) == epoch {
-        return;
-    }
-    if ctx.dbg_fn != u32::MAX {
-        crate::diagnostics::profile::record(&[ctx.dbg_fn]);
     }
 }
 
@@ -1459,6 +1443,8 @@ pub unsafe extern "C" fn brood_rt_call_slow(
     unsafe {
         // Rung A1: this callback consults activation state, so it asserts its own first.
         crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);
+        // ADR-791: what the call runs samples its stack on into this activation.
+        let _caller = crate::diagnostics::profile::NativeCallerScope::enter(ctx.cast());
         #[cfg(debug_assertions)]
         if crate::diagnostics::debug_flags::jit_callback_trace() {
             eprintln!("[jit-cb] brood_rt_call_slow(argc={})", argc);
@@ -1609,6 +1595,8 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
         // Rung A1: this callback consults activation state, so it asserts its own first.
         crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);
         use crate::eval::compile::FastLinkOutcome;
+        // ADR-791: what the call runs samples its stack on into this activation.
+        let _caller = crate::diagnostics::profile::NativeCallerScope::enter(ctx.cast());
         // Copy the whole slot BY VALUE before anything can run: the dispatch below can compile
         // and publish, which grows `vm_fast_links` and reallocates the buffer `slot` points
         // into. A `&*slot` reference here would be sound today only because NLL ends the borrow
@@ -1694,6 +1682,9 @@ pub unsafe extern "C" fn brood_rt_xcall_cold(
     unsafe {
         // Rung A1: this callback consults activation state, so it asserts its own first.
         crate::jit::JitCallCtx::assert_into(ctx, &mut *heap);
+        // ADR-791: a staged tail call's callee (or a re-run of a deopted one) samples its
+        // stack on into this activation.
+        let _caller = crate::diagnostics::profile::NativeCallerScope::enter(ctx.cast());
         let site = (site_head >> 32) as u32;
         let head = site_head as u32;
         let argc = (argc_nslots >> 32) as usize;

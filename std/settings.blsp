@@ -143,7 +143,10 @@ empty or comment-only file included. `warnings` then checks the keys it did take
            ":"
            (get failure :col "?")
            ": "
-           (get failure :message "does not read")
+           ;; after a form that applies, that form is the context: the reader's own account of
+           ;; what the stray closer falls after (ADR-789) would say it twice
+           (let (message (get failure :message "does not read") cut (index-of message " — "))
+             (if (and applies? (>= cut 0)) (string/substring message 0 cut) message))
            (if applies?
              (str " — after the " form-text ", which still applies")
              " — the file does not read, so none of it applies"))]

@@ -206,8 +206,7 @@ language uses — so a diff in a PR is human-reviewable:
     :sha256 "..."
     :deps   [ansi]]
    [shared
-    :path   "../shared"
-    :sha256 "..."                         ; tree hash at fetch time
+    :path   "../shared"                   ; loads live: no hash, so editing it never rewrites the lock
     :deps   []]
    ;; A registry dep: the range resolved to a concrete version, plus the
    ;; publisher's pinned pubkey when the release was signed (ADR-212).
@@ -234,8 +233,10 @@ ignored, so a manifest written for a newer Brood still loads (ADR-673 §3, road-
 Two invariants:
 
 1. **Manifest-consistent.** Every direct dep in the manifest appears here,
-   with the resolved commit (for `:git`) or with the tree hash recorded at
-   fetch time (for `:path`). A manifest edit that changes a `:ref` makes
+   with the resolved commit (for `:git`), the version and checksum (for a registry
+   dep), or the archive's checksum (for `:tarball`). A `:path` dep carries no hash: it
+   loads live from a tree outside the project, so a hash would pin nothing and would
+   rewrite the committed lock whenever that tree changed. A manifest edit that changes a `:ref` makes
    the lock file stale; `nest fetch` notices and re-resolves only that dep.
 2. **Transitively closed.** Every dep this project transitively uses
    appears at the top level. Nesting is deliberately avoided — flat is

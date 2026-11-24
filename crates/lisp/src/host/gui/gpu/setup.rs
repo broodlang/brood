@@ -265,8 +265,9 @@ impl GpuWindow {
         // Linear, for a texture uploaded `{:filter :smooth}` (ADR-783): a painted sprite
         // drawn scaled or turned mixes the four texels around each sample instead of
         // stair-stepping. Its texels are premultiplied at upload (`upload_texture`) so the
-        // mix weighs colour by coverage; no mipmaps, so it is for sprites drawn near their
-        // own size, not shrunk far below it.
+        // mix weighs colour by coverage. A sprite reads the texture at its own size (its mip
+        // chain, kept for a scene's meshes, is held off by `lod_max_clamp`), so it is for
+        // sprites drawn near their own size, not shrunk far below it.
         let smooth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("smooth"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -275,6 +276,7 @@ impl GpuWindow {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            lod_max_clamp: 0.0,
             ..Default::default()
         });
 

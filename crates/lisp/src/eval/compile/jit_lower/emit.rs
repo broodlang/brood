@@ -97,6 +97,9 @@ pub(super) struct Funcs {
     pub vobase: FuncRef,
     /// `brood_rt_vector_ref` — the bounds-checked FFI fallback read.
     pub vref: FuncRef,
+    /// `brood_rt_vector_base(heap, 3w, out_len) -> *const Value` — a vector's element
+    /// storage, decoded once for a run of reads ([`vector_storage`]).
+    pub vbase: FuncRef,
     /// `brood_rt_car` / `brood_rt_cdr` — the `first`/`rest` handle ops (FFI fallback).
     pub car: FuncRef,
     /// `brood_rt_first` / `brood_rt_rest` — `first`/`rest` of a NON-pair (the inline
@@ -254,6 +257,42 @@ pub(super) struct Frame<'a> {
     /// slots (written by `SelfCall`/entry with raw stores) are never cached. Empty (all
     /// `None`) under `BROOD_NO_INT_SLOT_CACHE=1`.
     pub slot_i64_cache: &'a std::cell::RefCell<Vec<Option<cranelift_codegen::ir::Value>>>,
+    /// A slot READ as a number, kept for the rest of the straight-line run: the `f64` it
+    /// reads as (a float's bits, or an int promoted with `fcvt_from_sint`) and an `i8` that
+    /// is 1 when it really was a float. Unlike the two caches above it is filled by a READ —
+    /// the first float-path read tag-checks the slot (`number_of`), and every later read in
+    /// the run reuses both values with no load and no tag test. The `i8` keeps the VM's mixed
+    /// rule exact (KI-114): an op is float arithmetic only when some operand really was a
+    /// float, so two cached ints still deopt (`FloatPairBothInt`) rather than compute in
+    /// floats. Cleared with the other caches: at every leader, on any store to the slot, and
+    /// on a widened join.
+    pub slot_num_cache: &'a std::cell::RefCell<Vec<Option<NumberRead>>>,
+    /// A vector slot's element storage, `(pointer to element 0, length)`, decoded once by the
+    /// first fused `(nth slot k)` of a run that reads the slot again (`vector_reads_reused`)
+    /// and reused by the rest: a destructuring `let` reads every element of one vector in a
+    /// row, and each read used to re-check the tag, region and storage kind and call for the
+    /// slab base. The pointer is into storage the next allocation may move (a small vector's
+    /// elements live in its slab slot), so the emit loop clears this before every instruction
+    /// `keeps_vector_storage` does not vouch for, as well as at leaders and on a store to
+    /// the slot.
+    pub slot_vec_cache: &'a std::cell::RefCell<Vec<Option<VectorStorage>>>,
+}
+
+/// A slot or operand read as a number on the float path: `value` is the `f64` it reads as
+/// (a float's own bits, or an int promoted the VM's way), `is_float` an `i8` that is 1 when
+/// the value really was a float. See [`Frame::slot_num_cache`].
+#[derive(Clone, Copy)]
+pub(super) struct NumberRead {
+    pub value: cranelift_codegen::ir::Value,
+    pub is_float: cranelift_codegen::ir::Value,
+}
+
+/// A vector's element storage, decoded once: the address of element 0 and the element
+/// count. See [`Frame::slot_vec_cache`].
+#[derive(Clone, Copy)]
+pub(super) struct VectorStorage {
+    pub elements: cranelift_codegen::ir::Value,
+    pub length: cranelift_codegen::ir::Value,
 }
 
 /// How one operand-stack entry crosses a block boundary. Block params are `I64`, so the
@@ -983,10 +1022,14 @@ pub(super) fn as_f64(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
 enum FOperand {
     /// A float with no check needed: an `Op::Float`, or a slot already carried/cached as f64.
     Float(cranelift_codegen::ir::Value),
-    /// A tagged value whose type is only known at runtime.
+    /// A number already read this run: a slot in [`Frame::slot_num_cache`].
+    Number(NumberRead),
+    /// A tagged value whose type is only known at runtime. `slot` names the frame slot it
+    /// was loaded from, so its number read can be kept for the rest of the run.
     Tagged {
         tag: cranelift_codegen::ir::Value,
         payload: cranelift_codegen::ir::Value,
+        slot: Option<usize>,
     },
     /// Cannot be a float, and `as_f64` has always deopted on it: an unboxed `Op::Int`, a
     /// bool, a hoisted vector/table.
@@ -1005,6 +1048,9 @@ fn classify_float_operand(b: &mut FunctionBuilder, op: Op, f: Frame) -> FOperand
             if let Some(v) = f.slot_f64_cache.borrow().get(k).copied().flatten() {
                 return FOperand::Float(v);
             }
+            if let Some(number) = f.slot_num_cache.borrow().get(k).copied().flatten() {
+                return FOperand::Number(number);
+            }
             let roots_base = b.use_var(f.rb_var);
             let i = b.ins().iadd_imm_s(f.base, k as i64);
             let o = b.ins().imul_imm_s(i, STRIDE);
@@ -1016,15 +1062,77 @@ fn classify_float_operand(b: &mut FunctionBuilder, op: Op, f: Frame) -> FOperand
                 addr,
                 PAYLOAD_OFFSET as i32,
             );
-            FOperand::Tagged { tag, payload }
+            FOperand::Tagged {
+                tag,
+                payload,
+                slot: Some(k),
+            }
         }
         Op::Handle(w0, w1, _) => FOperand::Tagged {
             tag: b.ins().band_imm_s(w0, 0xff),
             payload: w1,
+            slot: None,
         },
         Op::Int(_) | Op::Bool(_) | Op::HoistedVec { .. } | Op::HoistedTable { .. } => {
             FOperand::Never
         }
+    }
+}
+
+/// Read a tagged value as a number: a float's bits, or an int promoted with
+/// `fcvt_from_sint` (the VM's `i64 as f64`), with an `i8` saying which; anything else
+/// deopts with `reason`. One branch, then two selects' worth of straight-line code — so
+/// the answer can be kept ([`Frame::slot_num_cache`]) and reused by every later read of
+/// the slot in the run with no load and no tag test.
+///
+/// Promoting here is not yet a decision to compute in floats: [`as_f64_pair`] makes that
+/// from both operands' `is_float`, the VM's own mixed rule (KI-109, KI-114).
+fn number_of(
+    b: &mut FunctionBuilder,
+    tag: cranelift_codegen::ir::Value,
+    payload: cranelift_codegen::ir::Value,
+    f: Frame,
+    reason: DeoptReason,
+) -> NumberRead {
+    let is_float = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_FLOAT as i64);
+    let is_int = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_INT as i64);
+    let is_number = b.ins().bor(is_float, is_int);
+    let number = b.create_block();
+    let deopt_reason = deopt_code(b, reason);
+    b.ins().brif(
+        is_number,
+        number,
+        &[],
+        f.deopt,
+        &[BlockArg::Value(deopt_reason)],
+    );
+    b.switch_to_block(number);
+    let bits = b.ins().bitcast(types::F64, MemFlagsData::new(), payload);
+    let promoted = b.ins().fcvt_from_sint(types::F64, payload);
+    let value = b.ins().select(is_float, bits, promoted);
+    NumberRead { value, is_float }
+}
+
+/// A classified operand as a number read, tag-checking a `Tagged` one (and keeping the
+/// read of a slot for the rest of the run). `Float` and `Never` are the caller's.
+fn operand_number(
+    b: &mut FunctionBuilder,
+    operand: FOperand,
+    f: Frame,
+    reason: DeoptReason,
+) -> Option<NumberRead> {
+    match operand {
+        FOperand::Number(number) => Some(number),
+        FOperand::Tagged { tag, payload, slot } => {
+            let number = number_of(b, tag, payload, f, reason);
+            if let Some(k) = slot
+                && let Some(entry) = f.slot_num_cache.borrow_mut().get_mut(k)
+            {
+                *entry = Some(number);
+            }
+            Some(number)
+        }
+        FOperand::Float(_) | FOperand::Never => None,
     }
 }
 
@@ -1045,8 +1153,12 @@ fn classify_float_operand(b: &mut FunctionBuilder, op: Op, f: Frame) -> FOperand
 /// together is what makes that expressible — and it is why this is one function rather than
 /// two calls: neither operand can decide alone.
 ///
-/// The common both-float path costs the same two branches the unconditional version did:
-/// the first operand's tag test, then the second's inside [`float_or_promoted_int`].
+/// Each operand not already a float is read as a number ([`number_of`]: float bits or a
+/// promoted int, and whether it was a float); beside a certain float that is the answer,
+/// and with neither certain, one test that at least one really was a float licenses both
+/// (two ints deopt with `FloatPairBothInt`, and the VM answers an int). A slot's number
+/// read is kept for the run, so a value used in several products — every element of a
+/// destructured matrix — is loaded and tag-checked once, not once per use.
 pub(super) fn as_f64_pair(
     b: &mut FunctionBuilder,
     oa: Op,
@@ -1067,63 +1179,36 @@ pub(super) fn as_f64_pair(
         }
         (FOperand::Float(x), FOperand::Float(y)) => (x, y),
         // One side is certainly a float, so the other may promote (KI-109).
-        (FOperand::Float(x), FOperand::Tagged { tag, payload }) => {
-            let right = DeoptReason::FloatPairRightBesideFloat;
-            (x, float_or_promoted_int(b, tag, payload, f, right, true))
+        (FOperand::Float(x), right) => {
+            let reason = DeoptReason::FloatPairRightNotNumber;
+            let number = operand_number(b, right, f, reason);
+            (x, number.map_or(x, |read| read.value))
         }
-        (FOperand::Tagged { tag, payload }, FOperand::Float(y)) => {
-            let left = DeoptReason::FloatPairLeftBesideFloat;
-            (float_or_promoted_int(b, tag, payload, f, left, true), y)
+        (left, FOperand::Float(y)) => {
+            let reason = DeoptReason::FloatPairLeftNotNumber;
+            let number = operand_number(b, left, f, reason);
+            (number.map_or(y, |read| read.value), y)
         }
         // Neither is certainly a float: whichever proves to be one licenses the other's
-        // promotion, and two non-floats deopt. Written as one fused test rather than a
-        // gate plus two reads so the both-float path keeps its original branch count.
-        (
-            FOperand::Tagged {
-                tag: ta,
-                payload: pa,
-            },
-            FOperand::Tagged {
-                tag: tb,
-                payload: pb,
-            },
-        ) => {
-            let merge = b.create_block();
-            b.append_block_param(merge, types::F64);
-            b.append_block_param(merge, types::F64);
-            let a_float = b.create_block();
-            let a_notfloat = b.create_block();
-            let a_int = b.create_block();
-
-            let is_fa = b.ins().icmp_imm_s(IntCC::Equal, ta, TAG_FLOAT as i64);
-            b.ins().brif(is_fa, a_float, &[], a_notfloat, &[]);
-
-            // A is a float, so B may be a float or an int-to-promote.
-            b.switch_to_block(a_float);
-            let fa = b.ins().bitcast(types::F64, MemFlagsData::new(), pa);
-            let fb =
-                float_or_promoted_int(b, tb, pb, f, DeoptReason::FloatPairSecondBesideFloat, true);
-            b.ins()
-                .jump(merge, &[BlockArg::Value(fa), BlockArg::Value(fb)]);
-
-            b.switch_to_block(a_notfloat);
-            let deopt_reason = deopt_code(b, DeoptReason::FloatPairFirstNotNumber);
-            let is_ia = b.ins().icmp_imm_s(IntCC::Equal, ta, TAG_INT as i64);
-            b.ins()
-                .brif(is_ia, a_int, &[], f.deopt, &[BlockArg::Value(deopt_reason)]);
-
-            // A is an int, so this is float arithmetic only if B is a float. If it is not,
-            // the VM computes in ints and answers an int — deopt and let it.
-            b.switch_to_block(a_int);
-            let fa2 = b.ins().fcvt_from_sint(types::F64, pa);
-            let fb2 =
-                float_or_promoted_int(b, tb, pb, f, DeoptReason::FloatPairSecondBesideInt, false);
-            b.ins()
-                .jump(merge, &[BlockArg::Value(fa2), BlockArg::Value(fb2)]);
-
-            b.switch_to_block(merge);
-            let params = b.block_params(merge);
-            (params[0], params[1])
+        // promotion, and two ints deopt — the VM computes in ints and answers an int.
+        (left, right) => {
+            let first = operand_number(b, left, f, DeoptReason::FloatPairLeftNotNumber);
+            let second = operand_number(b, right, f, DeoptReason::FloatPairRightNotNumber);
+            let (Some(first), Some(second)) = (first, second) else {
+                unreachable!("both operands are numbers or tagged here")
+            };
+            let some_float = b.ins().bor(first.is_float, second.is_float);
+            let float_arithmetic = b.create_block();
+            let deopt_reason = deopt_code(b, DeoptReason::FloatPairBothInt);
+            b.ins().brif(
+                some_float,
+                float_arithmetic,
+                &[],
+                f.deopt,
+                &[BlockArg::Value(deopt_reason)],
+            );
+            b.switch_to_block(float_arithmetic);
+            (first.value, second.value)
         }
     }
 }
@@ -1150,6 +1235,24 @@ pub(super) fn as_f64_guarded(
             }
             if let Some(v) = f.slot_f64_cache.borrow().get(k).copied().flatten() {
                 return v;
+            }
+            // Read as a number earlier in the run: no load. An int may stand only where
+            // promotion is licensed; otherwise it deopts, as the tag check below would.
+            if let Some(number) = f.slot_num_cache.borrow().get(k).copied().flatten() {
+                if promote {
+                    return number.value;
+                }
+                let float = b.create_block();
+                let deopt_reason = deopt_code(b, DeoptReason::SlotNumberNotFloat);
+                b.ins().brif(
+                    number.is_float,
+                    float,
+                    &[],
+                    f.deopt,
+                    &[BlockArg::Value(deopt_reason)],
+                );
+                b.switch_to_block(float);
+                return number.value;
             }
             let roots_base = b.use_var(f.rb_var);
             let i = b.ins().iadd_imm_s(f.base, k as i64);
@@ -1222,6 +1325,22 @@ pub(super) fn set_slot_flags(b: &FunctionBuilder, dst: i64, op: Op, f: Frame) {
             (false, false, None, None)
         }
     };
+    // A slot copy carries the source's number read with it; any other store ends it, and
+    // ends a decoded vector storage for the slot (the slot now holds another value).
+    let number = match op {
+        Op::Slot(k) => f.slot_num_cache.borrow().get(k).copied().flatten(),
+        _ => None,
+    };
+    if let Some(s) = f.slot_num_cache.borrow_mut().get_mut(dst as usize) {
+        *s = number;
+    }
+    let storage = match op {
+        Op::Slot(k) => f.slot_vec_cache.borrow().get(k).copied().flatten(),
+        _ => None,
+    };
+    if let Some(s) = f.slot_vec_cache.borrow_mut().get_mut(dst as usize) {
+        *s = storage;
+    }
     set_slot_float(dst, is_float, f);
     set_slot_bool(dst, is_bool, f);
     if let Some(s) = f.slot_f64_cache.borrow_mut().get_mut(dst as usize) {
@@ -2179,4 +2298,86 @@ pub(super) fn inline_vec_ref(
     let w1 = b.block_params(ivr_done)[1];
     let w2 = b.block_params(ivr_done)[2];
     Op::Handle(w0, w1, w2)
+}
+
+/// Decode a vector's element storage once, for a run of reads (`Frame::slot_vec_cache`):
+/// the tag must be `Vector` (else deopt, as [`inline_vec_ref`] does), and
+/// `brood_rt_vector_base` answers the address of element 0 and the length for a vector in
+/// any region. One callback per vector instead of a tag, region, storage-kind check and a
+/// slab-base callback per element.
+///
+/// The address is valid only until something allocates or calls — the caller keeps it no
+/// longer than `prepass::keeps_vector_storage` allows.
+pub(super) fn vector_storage(
+    b: &mut FunctionBuilder,
+    vec: [cranelift_codegen::ir::Value; 3],
+    frame: Frame,
+    funcs: Funcs,
+) -> VectorStorage {
+    let tag = b.ins().band_imm_s(vec[0], 0xff);
+    let is_vector = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_VECTOR as i64);
+    let decode = b.create_block();
+    let deopt_reason = deopt_code(b, DeoptReason::InlineVectorRefNotVector);
+    b.ins().brif(
+        is_vector,
+        decode,
+        &[],
+        frame.deopt,
+        &[BlockArg::Value(deopt_reason)],
+    );
+    b.switch_to_block(decode);
+    let length_slot = b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+        8,
+        3,
+    ));
+    let length_address = b.ins().stack_addr(funcs.ptr_ty, length_slot, 0);
+    let call = b.ins().call(
+        funcs.vbase,
+        &[funcs.heap, vec[0], vec[1], vec[2], length_address],
+    );
+    let elements = b.inst_results(call)[0];
+    let length = b.ins().stack_load(types::I64, types::I64, length_slot, 0);
+    VectorStorage { elements, length }
+}
+
+/// Element `index` of a decoded vector storage ([`vector_storage`]): a bounds check (out of
+/// range deopts — the VM owns `nth`'s exact answer) and the element's three words.
+pub(super) fn storage_element(
+    b: &mut FunctionBuilder,
+    storage: VectorStorage,
+    index: i64,
+    frame: Frame,
+) -> Op {
+    let index_value = b.ins().iconst(types::I64, index);
+    let in_bounds = b
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, index_value, storage.length);
+    let read = b.create_block();
+    let deopt_reason = deopt_code(b, DeoptReason::CachedVectorRefOutOfRange);
+    b.ins().brif(
+        in_bounds,
+        read,
+        &[],
+        frame.deopt,
+        &[BlockArg::Value(deopt_reason)],
+    );
+    b.switch_to_block(read);
+    let element = b.ins().iadd_imm_s(storage.elements, index * STRIDE);
+    let word0 = b
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), element, 0);
+    let word1 = b.ins().load(
+        types::I64,
+        MemFlagsData::trusted(),
+        element,
+        PAYLOAD_OFFSET as i32,
+    );
+    let word2 = b.ins().load(
+        types::I64,
+        MemFlagsData::trusted(),
+        element,
+        PAYLOAD_OFFSET as i32 + 8,
+    );
+    Op::Handle(word0, word1, word2)
 }

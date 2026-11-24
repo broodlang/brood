@@ -632,7 +632,7 @@ fn fs_particle(in: ParticleOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// The mesh shader (ADR-786, ADR-788, ADR-791): morph, skin and transform a vertex; shade a
+/// The mesh shader (ADR-786, ADR-788, ADR-793): morph, skin and transform a vertex; shade a
 /// fragment with the fixed model `host::gui::mesh` writes for the CPU painter (`shade`, `tone`,
 /// `ambient`, `sh_irradiance`, `fresnel`, `specular_lobes`, `light_arrival`,
 /// `shadow_visibility`, `sample_shadow`, `soft_shadow`, `receiver_slope`, `bilinear_tap`,
@@ -644,7 +644,7 @@ pub(super) const MESH_SRC: &str = r#"
 struct Light {
     position: vec4<f32>,        // xyz, range (0: no window)
     direction: vec4<f32>,       // xyz: the way the light travels, size (metres; radians directional)
-    color: vec4<f32>,           // rgb, soft filter radius in texels (0: the 3×3 filter)
+    color: vec4<f32>,           // rgb, shadow softness (metres at the receiver; 0 and no size: 3×3)
     cone: vec4<f32>,            // cos inner, cos outer, shadow bias, shadow normal bias
     shadow: vec4<u32>,          // kind (0 directional, 1 point, 2 spot), first view, view count
 };
@@ -661,6 +661,7 @@ struct SceneU {
     params: vec4<f32>,          // exposure, light count, shadow layer side, ambient is SH (0 or 1)
     ambient_sh: array<vec4<f32>, 9>,    // L00, L1-1, L10, L11, L2-2, L2-1, L20, L21, L22 (rgb)
     shadows: array<ShadowView, 24>,
+    occlusion: vec4<f32>,       // ambient occlusion radius (metres; 0: none), strength, view + 1 (0: none)
 };
 struct DrawU {
     model: mat4x4<f32>,
@@ -1028,9 +1029,17 @@ fn shadow_visibility(light: Light, world: vec3<f32>, surface_normal: vec3<f32>, 
     let toward = light.cone.z * texel * (1.0 + slope);
     let along = light.cone.w * texel;
     let biased = world + surface_normal * along + to_light * toward;
-    if (light.color.w > 0.0) {
-        let slope = receiver_slope(view, biased, surface_normal, to_light);
-        return soft_shadow(at, light.shadow.x != 0u, biased, light.direction.w, light.color.w, turn, slope);
+    // the CPU's `shadow_softness`: the softness in metres as texels where the receiver stands,
+    // held to 1 … 32, or 32 for a light with a size and no softness
+    var softness = 0.0;
+    if (light.color.w > 0.0 && texel > 0.0) {
+        softness = clamp(light.color.w / texel, 1.0, 32.0);
+    } else if (light.direction.w > 0.0) {
+        softness = 32.0;
+    }
+    if (softness > 0.0) {
+        let receiver_plane = receiver_slope(view, biased, surface_normal, to_light);
+        return soft_shadow(at, light.shadow.x != 0u, biased, light.direction.w, softness, turn, receiver_plane);
     }
     return shadow_sample(at, biased);
 }
@@ -1084,9 +1093,88 @@ fn specular_lobes(normal_dot_half: f32) -> f32 {
     return draw.lobes.z * first + (1.0 - draw.lobes.z) * specular_lobe(draw.material.x * draw.lobes.y, normal_dot_half);
 }
 
-fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32) -> vec3<f32> {
+// `mesh::view_distance` (the CPU's name): how far along the camera's view a clip depth lies
+fn camera_distance(view_proj: mat4x4<f32>, depth: f32) -> f32 {
+    let depth_row = vec4<f32>(view_proj[0].z, view_proj[1].z, view_proj[2].z, view_proj[3].z);
+    let w_row = vec4<f32>(view_proj[0].w, view_proj[1].w, view_proj[2].w, view_proj[3].w);
+    let w_length = dot(w_row.xyz, w_row.xyz);
+    if (w_length < 1e-12) {
+        return depth / max(sqrt(dot(depth_row.xyz, depth_row.xyz)), 1e-12);
+    }
+    let slope = dot(depth_row.xyz, w_row.xyz) / w_length;
+    let offset = depth_row.w - slope * w_row.w;
+    let gap = depth - slope;
+    if (abs(gap) < 1e-12) {
+        return 3.4028235e38;
+    }
+    return offset / gap;
+}
+
+// `mesh::occlusion_tap`: a golden-angle spiral over the hemisphere, as a share of the radius
+fn occlusion_tap(index: u32) -> vec3<f32> {
+    let share = (f32(index) + 0.5) / 16.0;
+    let angle = f32(index) * 2.399963;
+    let across = sqrt(share);
+    let reach = 0.2 + 0.8 * share * share;
+    return vec3<f32>(cos(angle) * across * reach, sin(angle) * across * reach, sqrt(1.0 - share) * reach);
+}
+
+// `mesh::ambient_occlusion`: how much of the ambient light reaches `world` past what the
+// camera's depth view (scene.occlusion.z, one past its index; 0 without) holds round it
+fn ambient_occlusion(world: vec3<f32>, normal: vec3<f32>) -> f32 {
+    let radius = scene.occlusion.x;
+    let at = u32(scene.occlusion.z);
+    if (at == 0u || radius <= 0.0) {
+        return 1.0;
+    }
+    let view = scene.shadows[at - 1u];
+    let own = view.view_proj * vec4<f32>(world, 1.0);
+    if (own.w <= 1e-6) {
+        return 1.0;
+    }
+    let own_distance = camera_distance(view.view_proj, own.z / own.w);
+    var helper = vec3<f32>(1.0, 0.0, 0.0);
+    if (abs(normal.y) < 0.99) {
+        helper = vec3<f32>(0.0, 1.0, 0.0);
+    }
+    let across = safe_normalize(cross(helper, normal));
+    let along = cross(normal, across);
+    let side = u32(view.info.y);
+    var occluded = 0.0;
+    for (var index = 0u; index < 16u; index = index + 1u) {
+        let tap = occlusion_tap(index);
+        let point = world + (across * tap.x + along * tap.y + normal * tap.z) * radius;
+        let clip = view.view_proj * vec4<f32>(point, 1.0);
+        if (clip.w <= 1e-6) {
+            continue;
+        }
+        let across_unit = clip.x / clip.w * 0.5 + 0.5;
+        let down_unit = 0.5 - clip.y / clip.w * 0.5;
+        if (across_unit < 0.0 || across_unit >= 1.0 || down_unit < 0.0 || down_unit >= 1.0) {
+            continue;
+        }
+        let column = min(u32(across_unit * f32(side)), side - 1u);
+        let row = min(u32(down_unit * f32(side)), side - 1u);
+        let stored = camera_distance(view.view_proj, textureLoad(shadow_maps, vec2<i32>(i32(column), i32(row)), i32(at - 1u), 0));
+        let reached = camera_distance(view.view_proj, clip.z / clip.w);
+        if (stored < reached - radius * 0.05) {
+            occluded = occluded + min(radius / max(abs(own_distance - stored), 1e-6), 1.0);
+        }
+    }
+    return clamp(1.0 - scene.occlusion.y * occluded / 16.0, 0.0, 1.0);
+}
+
+// a `:hair` highlight (`mesh::shade`): across the strand shifted along the normal, sharpened
+fn hair_highlight(strand: vec3<f32>, normal: vec3<f32>, half_vector: vec3<f32>, shift: f32, sharpness: f32) -> f32 {
+    let along = dot(safe_normalize(strand + normal * shift), half_vector);
+    return pow(sqrt(max(1.0 - along * along, 0.0)), sharpness);
+}
+
+fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>) -> vec3<f32> {
     var out = base * ambient(normal) * occlusion;
     let f0 = draw.lobes.w;
+    // a `:hair` surface's highlights: as sharp as its roughness asks
+    let exponent = shininess(draw.material.x);
     let count = u32(scene.params.y);
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let light = scene.lights[slot];
@@ -1100,6 +1188,15 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         let facing = dot(normal, to_light);
         let lambert = max(facing, 0.0);
         let half_vector = safe_normalize(to_light + view);
+        if (draw.flags.x == 4u) {
+            let primary = hair_highlight(strand, normal, half_vector, -0.08, exponent);
+            let secondary = hair_highlight(strand, normal, half_vector, 0.12, exponent * 0.25);
+            let lit_side = clamp(facing + 0.25, 0.0, 1.0);
+            let hair_diffuse = clamp(0.25 + 0.75 * facing, 0.0, 1.0);
+            let shine = draw.material.y * lit_side * (vec3<f32>(primary) + secondary * base);
+            out = out + light.color.rgb * arriving * seen * (base * hair_diffuse + shine);
+            continue;
+        }
         let specular = fresnel(f0, dot(view, half_vector)) * specular_lobes(dot(normal, half_vector)) * lambert;
         var diffuse = vec3<f32>(lambert * seen);
         if (draw.flags.x == 0u) {
@@ -1121,8 +1218,15 @@ fn tone(color: vec3<f32>, exposure: f32) -> vec3<f32> {
     return linear_to_srgb(mapped);
 }
 
+struct MeshFragment {
+    @location(0) color: vec4<f32>,
+    // the samples it covers: all of them, but a `:hair` surface's coverage of its 4 (each
+    // sample a step of `mesh::HAIR_COVERAGE_STEPS`, as the CPU painter's 2×2 sub-samples)
+    @builtin(sample_mask) mask: u32,
+};
+
 @fragment
-fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragment {
     // every texture sampled before any branch (uniform control flow); a missing one is a
     // white or flat-normal pixel bound in its place
     let base_texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
@@ -1142,6 +1246,15 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> @location
     } else {
         alpha = 1.0;
     }
+    var mask = 0xFFFFFFFFu;
+    if (draw.flags.x == 4u) {
+        let coverage = clamp((texel.a * draw.color.a - 0.5 * draw.material.w) / max(draw.material.w, 1e-6), 0.0, 1.0);
+        mask = select(0u, 1u, coverage > 0.125) | select(0u, 2u, coverage > 0.625)
+            | select(0u, 4u, coverage > 0.875) | select(0u, 8u, coverage > 0.375);
+        if (mask == 0u) {
+            discard;
+        }
+    }
     let base = srgb_to_linear(texel.rgb) * draw.color.rgb;
     var normal = safe_normalize(fragment.normal);
     if (!front) {
@@ -1157,11 +1270,15 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> @location
         normal = safe_normalize(tangent * local.x + sign * bitangent * local.y + normal * local.z);
     }
     let view = safe_normalize(scene.eye.xyz - fragment.world);
-    let occlusion = select(1.0, occlusion_texel.r, (draw.flags.y & 16u) != 0u);
+    // the ambient's occlusion: its map's, times the scene's screen-space ambient occlusion
+    let occlusion = select(1.0, occlusion_texel.r, (draw.flags.y & 16u) != 0u)
+        * ambient_occlusion(fragment.world, surface_normal);
     // a soft shadow's taps turned by the pixel's noise, the CPU painter's at the same pixel
     let turn = 6.28318531 * pixel_noise(floor(fragment.clip.xy));
-    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn), scene.params.x);
-    return vec4<f32>(lit * alpha, alpha);
+    // a hair's strand: the bitangent, as its UV v runs
+    let strand = safe_normalize(cross(surface_normal, safe_normalize(fragment.tangent.xyz)) * select(1.0, -1.0, fragment.tangent.w < 0.0));
+    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand), scene.params.x);
+    return MeshFragment(vec4<f32>(lit * alpha, alpha), mask);
 }
 
 struct ShadowOut {
@@ -1178,13 +1295,13 @@ fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> Shado
     return out;
 }
 
-// a `:cutout` or `:blend` surface casts only where its alpha reaches its cutoff, as the CPU's
-// `render_shadow_map` tests it
+// a `:cutout`, `:blend` or `:hair` surface casts only where its alpha (read at the texture's
+// own size, not a mip level) reaches its cutoff, as the CPU's `render_shadow_map` tests it
 @fragment
 fn fs_shadow(fragment: ShadowOut) {
-    let base_texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
+    let base_texel = straight(textureSampleLevel(base_texture, texture_sampler, fragment.uv, 0.0), (draw.flags.y & 2u) != 0u);
     let alpha = select(1.0, base_texel.a, (draw.flags.y & 1u) != 0u) * draw.color.a;
-    if ((draw.flags.x == 2u || draw.flags.x == 3u) && alpha < draw.material.w) {
+    if ((draw.flags.x == 2u || draw.flags.x == 3u || draw.flags.x == 4u) && alpha < draw.material.w) {
         discard;
     }
 }

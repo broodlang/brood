@@ -87,12 +87,12 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                         Backend::Cpu { .. } => {
                             win.renderer.textures.insert(
                                 tex,
-                                render::CpuTexture {
-                                    w: texture_width,
-                                    h: texture_height,
+                                render::CpuTexture::new(
+                                    texture_width,
+                                    texture_height,
                                     rgba,
                                     filter,
-                                },
+                                ),
                             );
                         }
                         #[cfg(feature = "gui-gpu")]

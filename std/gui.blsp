@@ -772,18 +772,20 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; ones after in front, so a game lays a backdrop, a 3D figure and a HUD in one frame with no
 ;; mode to switch. The spec carries a camera (`:camera`, 16 numbers: a column-major
 ;; view-projection with clip depth 0 … 1, and `:eye`), up to eight `:lights` over a
-;; `:sky`/`:ground` ambient (or `:ambient-sh`, below), an
+;; `:sky`/`:ground` ambient (or `:ambient-sh`, below; darkened in folds and corners with
+;; `:ambient-occlusion {:radius m :strength s}`, or `true` for 3 cm at full strength), an
 ;; `:exposure`, a `:background` ([r g b a], transparent by default), the skeletons' joint
 ;; `:palettes` (16 numbers a joint, or f32 bytes), and the `:draws` — each `{:mesh handle
 ;; :model [16] :palette i :morphs [[target weight] …] :material {…}}`. A material is the fixed
-;; shading model's parameters: `:surface` (:skin, :standard, :cutout or :blend), `:base`,
-;; `:normal` and `:occlusion` (texture handles), `:color`, `:roughness`, `:specular`,
-;; `:lobes`, `:wrap` and `:scatter` (light under the skin), `:rim`, `:cutoff`,
-;; `:double-sided`, `:cast-shadow` (true by default). A glTF loader, a skeleton's maths, a
-;; camera — policy above this, in the engine. Both window painters draw a scene: the GPU
-;; target with a depth buffer and 4× multisampling, the CPU painter in software.
+;; shading model's parameters: `:surface` (:skin, :standard, :cutout, :blend or :hair — strands
+;; lit along the bitangent, their alpha coverage), `:base`, `:normal` and `:occlusion` (texture
+;; handles), `:color`, `:roughness`, `:specular`, `:lobes`, `:wrap` and `:scatter` (light under
+;; the skin), `:rim`, `:cutoff`, `:double-sided`, `:cast-shadow` (true by default). A glTF
+;; loader, a skeleton's maths, a camera — policy above this, in the engine. Both window painters
+;; draw a scene: the GPU target with a depth buffer and 4× multisampling, the CPU painter in
+;; software.
 ;;
-;; SHADING (ADR-791). A light's `:color` is the irradiance it brings (π times its radiance),
+;; SHADING (ADR-793). A light's `:color` is the irradiance it brings (π times its radiance),
 ;; so diffuse is the albedo times it and the Blinn-Phong specular is normalised to (n + 8)/8 —
 ;; one scale for both. `:specular` × 0.08 is the reflectance at normal incidence, F0 (UE4's
 ;; mapping; default 0.5 = 4 %, a common dielectric; skin's 2.8 % is 0.35; 0 … 12.5), raised
@@ -813,14 +815,14 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; `:extent` metres about `:center`, else fitted to the scene each frame; a spot or point
 ;; light's `:near`, default 0.05 m) gives the light a shadow map — six, a cube, for a point
 ;; light — rendered every frame from the posed, morphed meshes and filtered 3×3; at most four
-;; shadowed lights a scene. A `:cutout` or `:blend` surface casts where its alpha reaches
-;; `:cutoff`.
-;; SOFT SHADOWS (ADR-791): a shadow's `:softness` (texels of radius, above 0) filters it over a
-;; disc of 16 taps that radius wide, turned per pixel. A light's size — a point or spot
-;; light's `:size` (its diameter, metres), a directional light's `:angle` (its apparent
-;; diameter, radians: the sun's 0.0093) — makes the penumbra grow with the distance from
-;; caster to receiver, as a real lamp's does (percentage-closer soft shadows): crisp where an
-;; object touches, wide far from it, up to `:softness` texels (32 by default with a size). A
+;; shadowed lights a scene. A `:cutout`, `:blend` or `:hair` surface casts where its alpha
+;; reaches `:cutoff`.
+;; SOFT SHADOWS (ADR-788, ADR-793): a shadow's `:softness` (metres at the receiver, 0 or more)
+;; filters it over a disc of 16 taps that radius wide, turned per pixel. A light's size — a
+;; point or spot light's `:size` (its diameter, metres), a directional light's `:angle` (its
+;; apparent diameter, radians: the sun's 0.0093) — makes the penumbra grow with the distance
+;; from caster to receiver, as a real lamp's does (percentage-closer soft shadows): crisp where
+;; an object touches, wide far from it, up to `:softness` (32 texels by default with a size). A
 ;; 0.4 m lamp 1.5 m away gives about half a centimetre of penumbra under a nose and 25 cm on
 ;; a wall a metre behind the figure. With neither, the 3×3 filter as before.
 ;; A malformed light, an unknown key, a malformed `:ambient-sh` or `:lobes`, or too many

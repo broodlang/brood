@@ -246,8 +246,7 @@ pub(crate) enum NativePoll {
     Preempt,
     /// Leave for the interpreter: a hard kill is pending, which only its safepoint raises.
     Leave,
-    /// Keep running on a fresh quantum the activation could not yield at — the point where
-    /// the sampling profiler, which records at interpreter frame boundaries, must sample it.
+    /// Keep running on a fresh quantum the activation could not yield at.
     RunOnFreshQuantum,
 }
 

@@ -6,9 +6,39 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Added: bracket errors say where the bracket belongs (ADR-789).** An unclosed delimiter names
+the later line its body was left at, read from the indentation: ``unclosed list: `(let` opened at
+2:3 is still open when line 5 starts `(defn b` at column 1 — `))` are missing before line 5``.
+A wrong closer names the expected one and its opener (`unexpected ')' — expected ']' to close the
+vector opened at 2:8`), and an extra closer at top level the form it falls after.
+
+**Added: edit Brood by whole top-level form (ADR-789).** `nest mcp` serves `list-forms`,
+`read-form`, `replace-form`, `insert-form` and `delete-form`, and `nest form list|read|replace|
+insert|delete` does the same from a shell (the new form on stdin). A form is named by what it
+defines (`parse`, or `defn parse`); a new form must read as exactly one form, is formatted, and a
+refusal writes nothing. **Changed:** `nest mcp`'s `write` and `edit` refuse to leave a `.blsp`
+that read unreadable, with the reader's message and its position in the new text.
+
+**Added: `nest check-syntax FILE…` (ADR-789).** The reader alone, no project load: silent and 0
+when every file reads, the first read error of each that does not and exit 1 otherwise.
+`--claude-hook` reads a Claude Code hook payload on stdin and exits 2 with the message on stderr.
+`nest new` and `nest update-tooling` now merge the `brood` server into `.mcp.json` and that hook
+into `.claude/settings.json`, keeping what is there; a second run changes nothing.
+
 **Changed: `nest test --watch` waits on the OS.** It watches each directory holding a source or
 test file (`file/watch`, ADR-782) and reruns when a save is reported, instead of reading every
 file's mtime five times a second; a slow look every 5 s is the backstop.
+**Added: the profiler attributes time to Brood functions (ADR-791).** `(profile/run thunk)` runs a
+thunk under the sampling profiler and returns its profile; `(profile/report profile)` prints the
+top functions by self and by total time, `(profile/functions profile)` gives the same as data and
+`(profile/folded profile)` folded stacks for flamegraph.pl, inferno and speedscope.
+`(profile/start)` … `(profile/stop session)` profile any region, and `(profile/sample ms {:pid
+pid})` a running program from outside it. `nest profile FILE` now prints the report too. The
+samples themselves are fixed: a stack now holds every frame around the running code — native
+(JIT) callers, and the frames outside a builtin that called back into Brood — and a sample is
+worth the ticks since the process's last one, where code reached through a nested driver used to
+be sampled once per call. **Breaking:** `dev/profile->folded` is `profile/folded`, which takes a
+profile (`{:stacks histogram}` for a bare `dev/profile-stop` result).
 
 **Added: signed-distance scenes evaluated natively (ADR-787).** The `sdf` module takes a model of
 shapes and joins LOWERED to flat records (`sdf/record`, `sdf/material`, `sdf/field`), checks it
@@ -32,7 +62,7 @@ malformed light (an unknown key, a wrong shape, a `:range` on a directional ligh
 8 lights is now an error raised by `gui/draw`, where it used to be ignored.
 
 **Added: soft shadows, a spherical-harmonic ambient, Fresnel and dual-lobe skin in a 3D scene
-(ADR-791).** A light's `:shadow` takes `:softness` (penumbra radius in texels, a 16-tap disc
+(ADR-793).** A light's `:shadow` takes `:softness` (penumbra radius in metres at the receiver, a 16-tap disc
 turned per pixel), and a light's size — `:size` (metres) on a point or spot light, `:angle`
 (radians) on a directional one — makes the penumbra grow with the distance from caster to
 receiver (percentage-closer soft shadows), crisp at contact, up to `:softness` (32 by default). A

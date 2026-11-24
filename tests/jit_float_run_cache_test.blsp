@@ -1,0 +1,118 @@
+;;; Guards for the JIT's two straight-line caches (ADR-792): a slot read as a number is kept
+;;; for the rest of its run (`Frame::slot_num_cache`), and a vector slot read element by
+;;; element decodes its storage once (`Frame::slot_vec_cache`). Both are what make a
+;;; destructured 4x4 matrix product fast, and both are only sound if they keep the VM's
+;;; answers: the mixed int/float rule (KI-114), `nth`'s errors, and `nth` over a list.
+;;;
+;;; Each arm is driven until it SETTLES NATIVE on floats before the answer is checked, so the
+;;; check runs the lowered code, not the VM. Under a ceiling below Native (`BROOD_TIER=0`,
+;;; `BROOD_TIER=1`) there is no tier to settle on, and the value checks run on whatever
+;;; engine is live.
+;;;
+;;; Sabotage-verified by construction: "an int read earlier in the run" fails if the
+;;; `FloatPairBothInt` guard in `as_f64_pair` is dropped (the cached int and the fresh int
+;;; would multiply as floats, `[3.0 6.0]` for `[3.0 6]`); "past the end deopts" fails if the
+;;; cached read's bounds check is dropped (it would read past the storage).
+
+(defmodule jit-float-run-cache-test (:use test) (:use suite-helpers))
+
+(def- identity-4 [1.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 0.0 1.0])
+
+;; Column-major 4x4 product, written out over destructured elements — the shape of
+;; b3d-math's `mat4-multiply`.
+(defn- product (a b)
+  (let ([a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15] a
+        [b0 b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15] b)
+    [(+ (* a0 b0) (* a4 b1) (* a8 b2) (* a12 b3))
+      (+ (* a1 b0) (* a5 b1) (* a9 b2) (* a13 b3))
+      (+ (* a2 b0) (* a6 b1) (* a10 b2) (* a14 b3))
+      (+ (* a3 b0) (* a7 b1) (* a11 b2) (* a15 b3))
+      (+ (* a0 b4) (* a4 b5) (* a8 b6) (* a12 b7))
+      (+ (* a1 b4) (* a5 b5) (* a9 b6) (* a13 b7))
+      (+ (* a2 b4) (* a6 b5) (* a10 b6) (* a14 b7))
+      (+ (* a3 b4) (* a7 b5) (* a11 b6) (* a15 b7))
+      (+ (* a0 b8) (* a4 b9) (* a8 b10) (* a12 b11))
+      (+ (* a1 b8) (* a5 b9) (* a9 b10) (* a13 b11))
+      (+ (* a2 b8) (* a6 b9) (* a10 b10) (* a14 b11))
+      (+ (* a3 b8) (* a7 b9) (* a11 b10) (* a15 b11))
+      (+ (* a0 b12) (* a4 b13) (* a8 b14) (* a12 b15))
+      (+ (* a1 b12) (* a5 b13) (* a9 b14) (* a13 b15))
+      (+ (* a2 b12) (* a6 b13) (* a10 b14) (* a14 b15))
+      (+ (* a3 b12) (* a7 b13) (* a11 b14) (* a15 b15))]))
+
+;; The same product the slow way — indexed reads in a comprehension — as the reference.
+(defn- reference-product (a b)
+  (into []
+    (for (column (range 4) row (range 4))
+      (fold (range 4)
+        0.0
+        (fn (sum k) (+ sum (* (nth a (+ row (* 4 k))) (nth b (+ k (* 4 column))))))))))
+
+(def- matrix-a [1.0 2.0 0.5 0.0 -1.0 3.0 0.25 0.0 2.0 -0.5 1.0 0.0 4.0 1.5 -2.0 1.0])
+(def- matrix-b [0.5 1.0 -1.0 0.0 2.0 0.0 1.0 0.0 -0.25 3.0 2.0 0.0 1.0 -1.0 0.5 1.0])
+
+;; `a` is read twice: first beside a float (promoted, kept as an int read), then beside a
+;; fresh int — two ints, which the VM multiplies as ints.
+(defn- promote-then-ints (v) (let ([a b c] v) [(* a c) (* a b)]))
+
+;; Three reads of one vector in a run: the storage is decoded once.
+(defn- first-three (v) (+ (nth v 0) (nth v 1) (nth v 2)))
+
+;; A read, an allocation, a read: the allocation ends the decoded storage.
+(defn- around-a-literal (v) (let (a (nth v 0) pair [a a] b (nth v 1)) [pair b]))
+
+(defn- settle-on (f argc thunk)
+  (when (%native-tier?)
+    (assert= :native (settle f argc thunk 500))))
+
+(describe "the JIT's straight-line number and vector caches"
+  (test "a destructured 4x4 product matches the reference once native"
+    (settle-on product 2 (fn () (fold (range 300) nil (fn (_acc _i) (product matrix-a matrix-b)))))
+    (assert= (product matrix-a matrix-b) (reference-product matrix-a matrix-b))
+    (assert= (product identity-4 matrix-b) matrix-b)
+    (assert= (product matrix-a identity-4) matrix-a))
+
+  (test "an int read earlier in the run still multiplies as an int beside an int"
+    (settle-on promote-then-ints
+      1
+      (fn () (fold (range 300) nil (fn (_acc _i) (promote-then-ints [1.5 2.5 2.0])))))
+    (assert= (promote-then-ints [1.5 2.5 2.0]) [3.0 3.75])
+    (assert= (promote-then-ints [2 3 1.5]) [3.0 6])
+    (assert= (promote-then-ints [2 3 4]) [8 6]))
+
+  (test "repeated reads of one vector answer as nth does, in every storage"
+    (settle-on first-three
+      1
+      (fn () (fold (range 300) nil (fn (_acc _i) (first-three [1.0 2.0 3.0])))))
+    (assert= (first-three [1.0 2.0 3.0]) 6.0)
+    (assert= (first-three (into [] (range 20))) 3)
+    (assert= (first-three matrix-a) 3.5)
+    (assert= (first-three (list 1.0 2.0 4.0)) 7.0))
+
+  (test "a read past the end deopts to nth's own error"
+    (settle-on first-three
+      1
+      (fn () (fold (range 300) nil (fn (_acc _i) (first-three [1.0 2.0 3.0])))))
+    (assert-error (first-three [1.0 2.0])))
+
+  (test "an allocation between two reads of a vector leaves the second read right"
+    (settle-on around-a-literal
+      1
+      (fn () (fold (range 300) nil (fn (_acc _i) (around-a-literal [1.5 2.5])))))
+    (assert= (around-a-literal [1.5 2.5]) [[1.5 1.5] 2.5])
+    (assert= (around-a-literal [1.0 2.0 3.0 4.0]) [[1.0 1.0] 2.0])))
+
+;; Every language feature is exercised across processes: workers run the native product
+;; concurrently, on matrices they were sent, and send the answers back.
+(defn- product-worker (parent a b)
+  (fold (range 200) nil (fn (_acc _i) (product a b)))
+  (send parent [:product (product a b)]))
+
+(describe "the native product across processes"
+  :isolated (test "workers computing products concurrently agree with the reference"
+    (let (me (self)
+          expected (reference-product matrix-a matrix-b))
+      (each (range 8) (fn (_i) (spawn (product-worker me matrix-a matrix-b))))
+      (assert= (map (range 8)
+                 (fn (_i) (receive ([:product answer] answer) (after test/*wait-ms* :timeout))))
+        (map (range 8) (fn (_i) expected))))))

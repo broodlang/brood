@@ -804,6 +804,9 @@ const TOOLCHAIN_MODULES: &[EmbeddedModule] = &[
     // Identifier-aware whole-token rewrites over a project's .blsp sources — drives
     // `nest rename` for an ecosystem-wide rename that a plain sed would corrupt. Opt-in.
     embedded_module!("codemod", "std/tool/codemod.blsp"),
+    // Edit a source by whole top-level forms named by what they define — `nest form` and
+    // the `nest mcp` form tools, so an agent's edit cannot unbalance the brackets. Opt-in.
+    embedded_module!("form-edit", "std/tool/form-edit.blsp"),
     // `nest deps`: a project's module graph read as contexts — references into another
     // context's detail, contexts that reach each other (ADR-752). Opt-in.
     embedded_module!("module-graph", "std/tool/module-graph.blsp"),
@@ -871,6 +874,10 @@ const DEV_MODULES: &[EmbeddedModule] = &[
     // dispatch-, env-, or alloc-bound?" does not depend on recalling them. DEV: it serves
     // *developing* a program, and a shipped app has no use for it.
     embedded_module!("perf", "std/tool/perf.blsp"),
+    // The sampling profiler's policy (ADR-791): `(profile/run thunk)`, `(profile/report p)`,
+    // folded stacks — per-function self and total time over `dev/profile-start`/`-stop`. DEV,
+    // as `perf` is: it serves developing a program.
+    embedded_module!("profile", "std/tool/profile.blsp"),
     // The read-eval-print loop itself, written in Brood (`(require 'repl)`):
     // policy over the `read-line`/`reflect/eval-string`/`pr-str` primitives. The Rust
     // binaries (`brood`, `nest repl`) just bootstrap into `(repl-run)`. A shipped

@@ -7,7 +7,7 @@
 use super::*;
 use crate::host::gui::mesh::{
     LightKind, MAX_LIGHTS, MAX_SHADOW_VIEWS, Mesh, MeshBounds, Morph, Scene, ShadowPlan, Surface,
-    add_morphs_packed, draw_bounds, shadow_plan, shadow_softness, union,
+    add_morphs_packed, draw_bounds, shadow_plan, union,
 };
 
 /// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4.
@@ -424,6 +424,9 @@ impl MeshGpu {
                 address_mode_v: wgpu::AddressMode::Repeat,
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
+                // trilinear through a smooth texture's mip chain (`mesh::mip_chain`), as the
+                // CPU painter's `sample_lod`
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
                 ..Default::default()
             }),
             meshes: HashMap::new(),
@@ -698,6 +701,7 @@ impl MeshGpu {
                     Surface::Standard => 1,
                     Surface::Cutout => 2,
                     Surface::Blend => 3,
+                    Surface::Hair => 4,
                 };
                 let premultiplied = |texture: Option<&GpuTexture>| {
                     texture.is_some_and(|texture| texture.filter == TextureFilter::Smooth)
@@ -1057,6 +1061,7 @@ pub(super) fn scene_uniform_len() -> usize {
         ground: [0.0; 3],
         ambient_sh: None,
         exposure: 1.0,
+        ambient_occlusion: None,
         background: [0.0; 4],
         palettes: Vec::new(),
         draws: Vec::new(),
@@ -1083,12 +1088,14 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan) -> Vec<u32> {
                     &mut words,
                     &[position[0], position[1], position[2], light.range],
                 );
-                // a soft shadow's light size and filter radius (0: the 3×3 filter)
+                // a soft shadow's light size, and its softness in metres (the shader's
+                // `shadow_softness` turns it into texels where the receiver stands, as
+                // `mesh::shadow_softness` does; 0 and no size: the 3×3 filter)
                 floats(
                     &mut words,
                     &[direction[0], direction[1], direction[2], light.size],
                 );
-                let softness = shadow_softness(light).unwrap_or(0.0);
+                let softness = light.shadow.as_ref().map_or(0.0, |shadow| shadow.softness);
                 floats(&mut words, &[color[0], color[1], color[2], softness]);
                 let (bias, normal_bias) = light
                     .shadow
@@ -1149,5 +1156,20 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan) -> Vec<u32> {
             None => words.extend_from_slice(&[0; 20]),
         }
     }
+    // the ambient occlusion: its radius (0: none), strength, and view (one past its index, 0:
+    // none)
+    let (radius, strength) = match (scene.ambient_occlusion, shadows.occlusion) {
+        (Some(settings), Some(_)) => (settings.radius, settings.strength),
+        _ => (0.0, 0.0),
+    };
+    floats(
+        &mut words,
+        &[
+            radius,
+            strength,
+            shadows.occlusion.map_or(0.0, |view| (view + 1) as f32),
+            0.0,
+        ],
+    );
     words
 }

@@ -29,10 +29,16 @@ Brood code, read:
   kind. A user `(throw v)` keeps `(catch e e) → v`.
 
 **MCP tools (use these against the live image instead of guessing)**
+- `replace-form` — change a function (or any definition) by replacing its
+  whole top-level form; the new text must read as one balanced form, so the
+  brackets cannot drift. Prefer it to `edit` for `.blsp` code. `list-forms` /
+  `read-form` find and show a form first; `insert-form` / `delete-form` add
+  and remove one. Without MCP: `nest form list|read|replace|insert|delete`.
 - `eval` — try expressions. State (a `def`, a `spawn`) persists between
   calls. Printed output comes back as a second `[captured stdout]` block.
 - `write` / `edit` — create or change a project file; a `.blsp` file is
-  then loaded and checked, so the result carries its diagnostics. Editing
+  then loaded and checked, so the result carries its diagnostics. An
+  edit that would leave a `.blsp` unreadable is refused, with where it breaks. Editing
   a file another way leaves the image stale until you `load` it.
 - `load` — load a `.blsp` file into the live image.
 - `check` (the project) / `check-source` (a snippet) — advisory

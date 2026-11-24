@@ -113,7 +113,7 @@
           (assert= (get e :name) 'greeter)
           (assert= (dep-kind e) :path)
           (assert= (get e :path) "../greeter")
-          (is (string? (get e :sha256)))
+          (assert= (get e :sha256) nil)
           (assert= (get e :deps) nil)))))
   (test "transitive path deps are resolved depth-first into a flat list"
     (let (parent (pkg-fixture-root)
@@ -1196,11 +1196,24 @@
         (let (locked (read-lockfile app-dir))
           (is (vector? locked))
           (assert= (count locked) 1)
-          ;; entry vector: [greeter :path "../greeter" :sha256 H :deps []]
-          (let (row (nth locked 0))
-            (assert= (nth row 0) 'greeter)
-            (assert= (nth row 1) :path)
-            (assert= (nth row 2) "../greeter"))))))
+          ;; entry vector: [greeter :path "../greeter" :deps []] — no hash of a live tree
+          (assert= (nth locked 0) ['greeter :path "../greeter" :deps []])))))
+  (test "editing a path dep's source leaves the lock as it was"
+    ;; a path dep loads live from outside the project; hashing it rewrote the committed lock
+    ;; every time that tree changed (bedit-agent's lock, on every bedit commit)
+    (let (parent (pkg-fixture-root)
+          dep-dir (path/join parent "greeter")
+          app-dir (path/join parent "app"))
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
+      (pkg-write-project app-dir
+        "app" "main" "(defn main () 1)" " :dependencies [[greeter :path \"../greeter\"]]")
+      (let (dep (list (dep-path 'greeter "../greeter"))
+            lock-path (path/join app-dir "project.lock.blsp"))
+        (write-lockfile app-dir (resolve-deps app-dir dep nil))
+        (let (before (file/slurp lock-path))
+          (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) (str w \"!\"))" "")
+          (write-lockfile app-dir (resolve-deps app-dir dep (read-lockfile app-dir)))
+          (assert= (file/slurp lock-path) before)))))
   ;; The lock is a CANONICAL artifact: resolution order isn't stable across runs, so the
   ;; serialized content must not depend on it — otherwise every `nest fetch` rewrites the
   ;; committed file with the same deps in a new order (the churn this sort fixes).

@@ -388,3 +388,94 @@
     (assert= (mcp/with-warning {:jsonrpc "2.0" :id 1 :error {:code -32601 :message "x"}} "STALE")
       nil)
     (is (includes? (mcp/staleness-warning "/x/nest") "STALE"))))
+
+;; Whole-form editing (ADR-789): the form tools take a top-level form by the name it
+;; defines, and `write`/`edit` refuse to leave a `.blsp` that read unreadable. Each test
+;; serves a scratch project of its own; `:isolated` because a loaded file defines its module.
+(defn- mcpt-with-project (body)
+  ;; `(body root)` with `project/*root*` a fresh project holding src/shapes.blsp
+  (let (root (path/temp "mcpt-forms-")
+        source (path/join root "src/shapes.blsp"))
+    (file/mkdir (path/join root "src"))
+    (file/spit (path/join root "project.blsp") "(project :name \"mcpt\" :version \"0.1.0\")\n")
+    (file/spit source
+      "(defmodule mcpt-shapes)\n\n(defn area (w h)\n  (* w h))\n\n(defn perimeter (w h) (* 2 (+ w h)))\n")
+    (let (result (binding (project/*root* root) (body root)))
+      (doseq (file [source (path/join root "project.blsp")])
+        (when (file/exists? file) (file/rm file)))
+      (file/rmdir (path/join root "src"))
+      (file/rmdir root)
+      result)))
+
+(defn- mcpt-shapes-text (root) (file/slurp (path/join root "src/shapes.blsp")))
+
+(describe "mcp whole-form tools and the write guard"
+  :isolated (test "list-forms and read-form find a definition by name"
+    (mcpt-with-project (fn (_root)
+                         (assert= [{:kind "defmodule" :name "mcpt-shapes" :line 1 :end-line 1}
+                                    {:kind "defn" :name "area" :line 3 :end-line 4}
+                                    {:kind "defn" :name "perimeter" :line 6 :end-line 6}]
+                           (get (mcp/list-forms-tool {:path "src/shapes.blsp"}) :forms))
+                         (assert= {:ok true
+                                   :text "(defn area (w h)\n  (* w h))"
+                                   :line 3
+                                   :end-line 4}
+                           (mcp/read-form-tool {:path "src/shapes.blsp" :name "area"}))
+                         (is (includes? (get (mcp/read-form-tool {:path "src/shapes.blsp"
+                                                                  :name "volume"})
+                                          :error)
+                               "6-6 defn perimeter")))))
+  :isolated (test "replace-form writes the whole form formatted, then loads and checks it"
+    (mcpt-with-project (fn (root)
+                         (let (result (mcp/replace-form-tool {:path "src/shapes.blsp"
+                                                              :name "area"
+                                                              :text "(defn area (w h)   (* w h 10))"}))
+                           (is (get result :ok))
+                           (assert= [3 3] [(get result :line) (get result :end-line)])
+                           (is (contains? result :diagnostics))
+                           (is (includes? (mcpt-shapes-text root)
+                                 "\n(defn area (w h) (* w h 10))\n"))
+                           (assert= 60 (reflect/eval-string "(mcpt-shapes/area 2 3)"))))))
+  :isolated (test "replace-form refuses text that does not read, and writes nothing"
+    (mcpt-with-project (fn (root)
+                         (let (before (mcpt-shapes-text root)
+                               result (mcp/replace-form-tool {:path "src/shapes.blsp"
+                                                              :name "area"
+                                                              :text "(defn area (w h)\n  (* w h)"}))
+                           (refute (get result :ok))
+                           (is (includes? (get result :error) "unclosed list"))
+                           (assert= before (mcpt-shapes-text root))))))
+  :isolated (test "insert-form and delete-form add and remove whole forms"
+    (mcpt-with-project (fn (root)
+                         (is (get (mcp/insert-form-tool {:path "src/shapes.blsp"
+                                                         :after "area"
+                                                         :text "(defn square (side) (area side side))"})
+                               :ok))
+                         (is (get (mcp/delete-form-tool {:path "src/shapes.blsp" :name "perimeter"})
+                               :ok))
+                         (assert= "(defmodule mcpt-shapes)\n\n(defn area (w h)\n  (* w h))\n\n(defn square (side) (area side side))\n"
+                           (mcpt-shapes-text root)))))
+  :isolated (test "edit refuses an edit that unbalances a .blsp, naming where in the new text"
+    (mcpt-with-project (fn (root)
+                         (let (before (mcpt-shapes-text root)
+                               result (mcp/edit-tool {:path "src/shapes.blsp"
+                                                      :old "(* w h))"
+                                                      :new "(* w h)"}))
+                           (refute (get result :ok))
+                           (assert= "src/shapes.blsp:3:1: unclosed list: `(defn area` opened at 3:1 is still open when line 6 starts `(defn perimeter` at column 1 — a `)` is missing before line 6"
+                             (get result :error))
+                           (assert= [3 1] [(get result :line) (get result :col)])
+                           (is (includes? (get result :hint) "replace-form"))
+                           (assert= before (mcpt-shapes-text root))))))
+  :isolated (test "write refuses unreadable .blsp text but writes any other file as given"
+    (mcpt-with-project (fn (root)
+                         (refute (get (mcp/write-tool {:path "src/new.blsp"
+                                                       :content "(defn f (x)\n  [x)\n"})
+                                   :ok))
+                         (refute (file/exists? (path/join root "src/new.blsp")))
+                         (is (get (mcp/write-tool {:path "notes.txt" :content "(unbalanced"}) :ok))
+                         (file/rm (path/join root "notes.txt")))))
+  (test "the form tools are in the catalogue"
+    (let (names (map (mcp/tools) (fn (tool) (get tool :name))))
+      (doseq (name ["list-forms" "read-form" "replace-form" "insert-form" "delete-form"])
+        (is (includes? names name))))))

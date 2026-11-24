@@ -229,3 +229,85 @@ pub(crate) fn operands_below_calls(code: &[Inst]) -> Option<usize> {
     }
     Some(total)
 }
+
+/// May a decoded vector storage pointer (`Frame::slot_vec_cache`) stay valid across `inst`?
+///
+/// The pointer is into storage an allocation can move: a small vector's elements live in its
+/// `local.vectors` slab slot, which a push grows, and a collection relocates. So only
+/// instructions that provably neither allocate nor call keep it: frame traffic, an inline
+/// atom, the fused element read itself (whose fallback, `brood_rt_vector_ref`, only reads),
+/// `count` (`Heap::count_inline`, a read), and the arithmetic and comparison operators,
+/// which the lowering computes inline and deopts on anything they cannot (an overflow, a
+/// ratio, a bignum) rather than allocate. Everything else — a call, a literal that builds,
+/// a global read (which may load a module), `cons`, the table and map ops — clears it.
+pub(crate) fn keeps_vector_storage(inst: &Inst) -> bool {
+    let inline_operator = |op: &PrimOp| {
+        matches!(
+            op,
+            PrimOp::Add
+                | PrimOp::Sub
+                | PrimOp::Mul
+                | PrimOp::Lt
+                | PrimOp::Le
+                | PrimOp::Rem
+                | PrimOp::Div
+                | PrimOp::Quot
+                | PrimOp::Max
+                | PrimOp::Min
+                | PrimOp::BitAnd
+                | PrimOp::BitOr
+                | PrimOp::BitXor
+        )
+    };
+    match inst {
+        Inst::Local(_) | Inst::SetLocal(_) | Inst::Pop => true,
+        Inst::Const(ConstVal::Atom(_)) => true,
+        Inst::Prim1 {
+            op: PrimOp1::Count, ..
+        } => true,
+        Inst::Prim2SlotInt {
+            op: PrimOp::VectorRef,
+            ..
+        } => true,
+        Inst::Prim2 { op, .. } | Inst::Prim2SlotSlot { op, .. } | Inst::Prim2SlotInt { op, .. } => {
+            inline_operator(op)
+        }
+        _ => false,
+    }
+}
+
+/// For each instruction, whether it is a fused `(nth slot k)` that opens a run reading the
+/// same slot's vector again — a destructuring `let`, or `(nth v 0)` … `(nth v 2)` written
+/// out — before the run ends (a leader, an instruction [`keeps_vector_storage`] does not
+/// vouch for, or a store to the slot). Those reads decode the storage once and the rest of
+/// the run reuses it; a lone read keeps its own inline path, so a single `(nth v 0)` costs
+/// what it did. Indexed by ip, length `code.len()`.
+pub(crate) fn vector_reads_reused(code: &[Inst], is_leader: &[bool]) -> Vec<bool> {
+    let read_slot = |inst: &Inst| match inst {
+        Inst::Prim2SlotInt {
+            op: PrimOp::VectorRef,
+            slot_a,
+            ..
+        } => Some(*slot_a),
+        _ => None,
+    };
+    let mut reused = vec![false; code.len()];
+    for (start, inst) in code.iter().enumerate() {
+        let Some(slot) = read_slot(inst) else {
+            continue;
+        };
+        for (ip, next) in code.iter().enumerate().skip(start + 1) {
+            if is_leader[ip] || !keeps_vector_storage(next) {
+                break;
+            }
+            if matches!(next, Inst::SetLocal(target) if *target == slot) {
+                break;
+            }
+            if read_slot(next) == Some(slot) {
+                reused[start] = true;
+                break;
+            }
+        }
+    }
+    reused
+}

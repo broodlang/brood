@@ -395,18 +395,81 @@ test discovery, lints, release, config)."
     "in the same call), `load`, `check`, `run-tests`, `lookup` for a function's real\n"
     "argument order, `apropos`/`doc-search`/`find-pattern` to find what exists, and\n"
     "`error` to explain an error code. A project `mcp.blsp` defining `mcp-tools` adds\n"
-    "tools of its own.\n"))
+    "tools of its own.\n" "\n" "## Editing Brood\n" "\n"
+    "Change a function with `replace-form` (MCP) or `nest form replace FILE NAME`\n"
+    "(shell, the new form on stdin): whole top-level forms, so brackets cannot drift.\n"
+    "`list-forms` / `read-form` (`nest form list` / `nest form read`) show it first.\n"
+    "Never sed or perl Brood source. `.claude/settings.json` runs\n"
+    "`nest check-syntax` after every edit and reports a file left unreadable.\n"))
 
-;; `.mcp.json` for a fresh project — points Claude Code (and other MCP-aware
-;; agents) at this project's `nest mcp` server. The dispatcher runs from the
-;; project root (which is wherever the agent invoked `claude`), so a relative
-;; `command: nest` works as long as `nest` is on PATH. Keeping the file
-;; minimal: a single `brood` server entry. Users can add more (their own
-;; MCP servers) without losing the scaffold.
-(defn- project-mcp-json-template (nm)
-  (str "{\n"
-    "  \"mcpServers\": {\n" "    \"brood\": {\n" "      \"command\": \"nest\",\n"
-    "      \"args\": [\"mcp\"]\n" "    }\n" "  }\n" "}\n"))
+;; `.mcp.json` — points Claude Code (and other MCP-aware agents) at this project's `nest
+;; mcp` server, and `.claude/settings.json` — a hook that runs `nest check-syntax` after
+;; every Edit/Write, so a `.blsp` left with unbalanced brackets is reported to the model the
+;; moment it is written (exit 2 feeds the message back). Both are MERGED into what a project
+;; already has: other servers, hooks and settings stay, and a second run changes nothing.
+;; The server runs from the project root (wherever `claude` was started), so `command:
+;; nest` works as long as `nest` is on PATH.
+
+(def- *syntax-hook-command* "nest check-syntax --claude-hook")
+
+(defn mcp-config (existing:any -> map)
+  "The decoded `.mcp.json` `existing` (nil when there is none) with the `brood` server
+added — an entry of that name already there is the project's own and stays.
+
+    (scaffold/mcp-config nil)   ;=> {:mcpServers {:brood {:command \"nest\" :args [\"mcp\"]}}}"
+  (let (config (if (map? existing) existing {})
+        servers (get config :mcpServers {}))
+    (if (contains? servers :brood)
+      config
+      (assoc config :mcpServers (assoc servers :brood {:command "nest" :args ["mcp"]})))))
+
+(defn claude-settings (existing:any -> map)
+  "The decoded `.claude/settings.json` `existing` (nil when there is none) with a
+PostToolUse hook that runs `nest check-syntax --claude-hook` after Edit, Write and MultiEdit
+— unless a hook already runs that command. Every other setting and hook stays.
+
+    (map/get-in (scaffold/claude-settings nil) [:hooks :PostToolUse 0 :matcher])   ;=> \"Edit|Write|MultiEdit\""
+  (let (settings (if (map? existing) existing {})
+        hooks (get settings :hooks {})
+        post (vec (get hooks :PostToolUse []))
+        present? (any? post
+                   (fn (entry)
+                     (any? (if (map? entry) (get entry :hooks []) [])
+                       (fn (hook) (and (map? hook) (= (get hook :command) *syntax-hook-command*)))))))
+    (if present?
+      settings
+      (assoc settings
+        :hooks
+          (assoc hooks
+            :PostToolUse
+              (conj post
+                {:matcher "Edit|Write|MultiEdit"
+                 :hooks [{:type "command" :command *syntax-hook-command*}]}))))))
+
+(defn merge-json-file (path:string merge:fn -> keyword)
+  "Pass the JSON file at `path` (nil when missing) through `merge` and write the result
+back, indented: `:created`, `:updated`, `:unchanged` (then the file is not rewritten, so
+its own layout stays) or `:unreadable` (not JSON — left alone rather than clobbered).
+
+    (scaffold/merge-json-file \".mcp.json\" scaffold/mcp-config)   ;~> :created, :updated or :unchanged"
+  (let (exists (file/exists? path)
+        decoded (when exists
+                  (check-allow :discarded-catch
+                    (try [(json/decode (file/slurp path))] (catch _ nil)))))
+    (if (and exists (nil? decoded))
+      :unreadable (let (before (when decoded (first decoded)) after (merge before))
+        (if (and exists (= before after))
+          :unchanged (do
+            (file/mkdir (path/dirname path))
+            (file/spit path (str (mcp-server/pretty-json after) "\n"))
+            (if exists :updated :created)))))))
+
+(defn- agent-config-files (root)
+  "Merge the MCP server and the syntax hook into the project at `root`, as `[path status]`
+pairs for the summary."
+  [[(path/join root ".mcp.json") (merge-json-file (path/join root ".mcp.json") mcp-config)]
+    [(path/join root ".claude/settings.json")
+      (merge-json-file (path/join root ".claude/settings.json") claude-settings)]])
 
 ;; The scaffolded .gitignore: the package cache is regenerable from the lock
 ;; file (which IS committed), so it's ignored (ADR-037). So is `.brood/`, the
@@ -665,7 +728,7 @@ only one, else the one called \"default\"."
       (file/spit (path/join nm ".gitignore") (project-gitignore-template))
       (file/spit (path/join nm ".gitattributes") (project-gitattributes-template))
       (file/spit (path/join nm "CLAUDE.md") (project-claude-md-template actual-name))
-      (file/spit (path/join nm ".mcp.json") (project-mcp-json-template actual-name))
+      (agent-config-files nm)
       (file/spit (path/join docs-dir "brood-for-claude.md") (%builtin-doc 'brood-for-claude))
       (file/spit (path/join skill-dir "SKILL.md") (%builtin-doc 'writing-brood-skill))
       (let (manifest (str nm "/project.blsp")
@@ -686,6 +749,7 @@ only one, else the one called \"default\"."
         (io/puts (str "  " nm "/.gitattributes"))
         (io/puts (str "  " nm "/CLAUDE.md"))
         (io/puts (str "  " nm "/.mcp.json"))
+        (io/puts (str "  " nm "/.claude/settings.json"))
         (io/puts (str "  " nm "/docs/brood-for-claude.md"))
         (io/puts (str "  " nm "/.claude/skills/writing-brood/SKILL.md"))
         (doseq (f code-files) (io/puts (str "  " f))))
@@ -698,13 +762,15 @@ only one, else the one called \"default\"."
 
 ;; `nest update-tooling` — rewrite the AI-assistant files `nest new` drops into a
 ;; project (the language reference + the writing-brood skill) from THIS `brood`
-;; binary. They are baked in via `%builtin-doc`, so they drift as the language
-;; evolves; this re-syncs them to the installed version. Everything else the project
-;; owns (its code, manifest, CLAUDE.md) is left alone.
+;; binary, and merge the agent configuration (the `brood` MCP server in `.mcp.json`, the
+;; syntax hook in `.claude/settings.json`) into what the project has. The documents are
+;; baked in via `%builtin-doc`, so they drift as the language evolves; this re-syncs them
+;; to the installed version. Everything else the project owns (its code, manifest,
+;; CLAUDE.md, its other servers and settings) is left alone.
 (defn update-tooling ()
-  "Rewrite this project's AI-assistant tooling — `docs/brood-for-claude.md` and the `.claude/skills/writing-brood` skill — from THIS `brood` binary, so the shipped language reference matches the installed language. Run it after upgrading Brood. Backs `nest update-tooling`.
+  "Rewrite this project's AI-assistant tooling — `docs/brood-for-claude.md` and the `.claude/skills/writing-brood` skill — from THIS `brood` binary, so the shipped language reference matches the installed language, and merge the `brood` MCP server into `.mcp.json` and the `nest check-syntax` hook into `.claude/settings.json` (other servers and settings kept; a second run changes nothing). Run it after upgrading Brood. Backs `nest update-tooling`.
 
-    (scaffold/update-tooling)   ;~> docs/brood-for-claude.md and .claude/skills/writing-brood/SKILL.md rewritten, both paths printed"
+    (scaffold/update-tooling)   ;~> the two documents rewritten, the two configs merged, every path printed"
   ;; `nest update-tooling` runs `require-project` first, so the CLI never reaches here
   ;; without a project — but guard directly too, so a bare `(scaffold/update-tooling)`
   ;; at the REPL errors clearly instead of writing into the cwd.
@@ -717,7 +783,10 @@ only one, else the one called \"default\"."
     (file/spit (path/join skill-dir "SKILL.md") (%builtin-doc 'writing-brood-skill))
     (io/puts "Refreshed AI tooling from this brood build:")
     (io/puts (str "  " (path/join docs-dir "brood-for-claude.md")))
-    (io/puts (str "  " (path/join skill-dir "SKILL.md")))))
+    (io/puts (str "  " (path/join skill-dir "SKILL.md")))
+    (doseq (written (agent-config-files root))
+      (let ([path status] written)
+        (io/puts (str "  " path " (" (->string status) ")"))))))
 
 ;; What to do next: the template's own `:next` commands when it declares them (a database to
 ;; create first, say), else test and run — which every built-in starter and a package

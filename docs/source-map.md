@@ -83,7 +83,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `diagnostics/coverage.rs` — Line-coverage recording — the second tier of ADR-148.
   - `diagnostics/debug_flags.rs` — The `BROOD_*` diagnostic-flag catalogue — what `brood --debug-flags` prints.
   - `diagnostics/perf.rs` — VM work-attribution counters — the `perf-stats` feature (see `docs/benchmarking.md`).
-  - `diagnostics/profile.rs` — Sampling CPU profiler over the VM's reified frame stacks — the "no Brood-level CPU profile" half of the observability timing tier (ROADMAP survey gap #4; .NET has dotnet-trace).
+  - `diagnostics/profile.rs` — Sampling CPU profiler over the reified call stacks of the VM and the native tier: the mechanism under `std/tool/profile.blsp` (ADR-791; first shipped in the observability timing tier, ROADMAP survey gap #4).
 - `dist.rs` — Distributed nodes: connect two Brood runtimes and route messages between them.
   - `dist/admission.rs` — Bounding unauthenticated peers before a handshake completes: the whole-handshake [`Deadline`] a trickling peer cannot restart, the [`HandshakeSlot`] permit that caps handshakes in flight, and the rate-limited warning when connections are shed at that cap.
   - `dist/couplings.rs` — Monitors and links across nodes: the control frames that set up and tear down a process monitor or link whose other end lives on a peer (ADR-067), and node monitors (`monitor-node`) with their `[:nodedown name]` message.
@@ -300,6 +300,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `tool/doctest.blsp` (`doctest`) — Run the examples in docstrings and report the ones that do not hold.
 - `tool/eval-server.blsp` (`eval-server`) — A line-protocol eval server for a dedicated runtime, plus the pure codec its client shares.
 - `tool/explain.blsp` (`explain`) — Teach-the-error and intent→idiom lookup for agents and the REPL: `(error "E0030")` explains an error code (or a caught error map); `(find-pattern "loop")` returns the idiomatic Brood pattern for a task.
+- `tool/form-edit.blsp` (`form-edit`) — Edit Brood source by whole top-level forms named by what they define: `list-forms`, `read-form`, `replace-form`, `insert-form`, `delete-form`, and `read-error` (the reader's complaint about a text).
 - `tool/grammar.blsp` (`grammar`) — Generate editor syntax grammars from `(reflect/special-forms)` — one source of truth, no drift across editors.
 - `tool/mcp.blsp` (`mcp`) — The `nest mcp` server: the Model Context Protocol over stdio (ADR-036, docs/mcp.md) — the JSON-RPC loop, its dispatch and error mapping, and the tool catalogue it serves.
 - `tool/module-graph.blsp` (`module-graph`) — `nest deps` — a project's module dependencies, read as CONTEXTS (ADR-752).
@@ -311,6 +312,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `tool/package-publish.blsp` (`package-publish`) — The registry verbs behind `nest search`, `nest publish`, `nest release` and `nest key-gen`: search the hive registry, build and post a release (signed when a key exists), bump the manifest's version and tag it.
 - `tool/perf.blsp` (`perf`) — One-call performance triage: `(perf/report)` answers *where the time goes*.
 - `tool/proctree.blsp` (`proctree`) — Order a flat `proc/info` list as a parent→child forest.
+- `tool/profile.blsp` (`profile`) — Find what is slow in a running program, by function, without changing it.
 - `tool/project.blsp` (`project`) — The project model behind `nest` (ADR-020), written in Brood: the manifest and its dependencies, finding the root, discovering sources and tests, `setup`, and the user-config loader.
 - `tool/project-check.blsp` (`project-check`) — The `nest check` driver: which files to check, the per-file result cache (ADR-129), the parallel fold over file chunks, the whole-project lints (duplicate globals, unused module-private defns) and the two migration aids, `--fix-renames` (ADR-304) and `--suggest-sigs`.
 - `tool/project-image.blsp` (`project-image`) — The project startup image (ADR-218 for a project): fingerprint the project's sources, write every module's bindings to one sectioned image, and materialise them on the next run instead of re-evaluating source.

@@ -93,16 +93,13 @@ pub(crate) enum DeoptReason {
     VectorLengthNotVector = 40,
     /// Float pair, both operands provably never floats.
     FloatPairNeverFloat = 41,
-    /// Float pair, the right operand beside a float is neither float nor int.
-    FloatPairRightBesideFloat = 42,
-    /// Float pair, the left operand beside a float is neither float nor int.
-    FloatPairLeftBesideFloat = 43,
-    /// Float pair, both tagged: the second operand beside a float is neither float nor int.
-    FloatPairSecondBesideFloat = 44,
-    /// Float pair, both tagged: the first operand is neither float nor int.
-    FloatPairFirstNotNumber = 45,
-    /// Float pair, both tagged: the first is an int and the second is not a float.
-    FloatPairSecondBesideInt = 46,
+    /// Float pair: the right operand, not certainly a float, is neither float nor int.
+    FloatPairRightNotNumber = 42,
+    /// Float pair: the left operand, not certainly a float, is neither float nor int.
+    FloatPairLeftNotNumber = 43,
+    /// Float pair, neither operand certainly a float: both were ints, which the VM adds as
+    /// ints.
+    FloatPairBothInt = 46,
     /// Mixed comparison: the first operand is neither float nor promotable int.
     CompareFirstOperand = 47,
     /// Mixed comparison: the second operand is neither float nor promotable int.
@@ -122,6 +119,11 @@ pub(crate) enum DeoptReason {
     /// A self-tail call passed a register-carried parameter a value of another type;
     /// payload = the slot.
     SelfCallCarryTag = 55,
+    /// A slot read as a number earlier in the run was an int where only a float may stand
+    /// (the float path entered on a guess, so promoting would change the answer).
+    SlotNumberNotFloat = 56,
+    /// A run of element reads over one decoded vector storage: index out of range.
+    CachedVectorRefOutOfRange = 57,
     /// Native recursion past the depth cap: drain the subtree on the VM.
     NativeDepthExceeded = 101,
     /// Entry hoist: a vector slot's element base was null (not a vector).
@@ -182,11 +184,9 @@ impl DeoptReason {
         DeoptReason::MapAssocDeclined,
         DeoptReason::VectorLengthNotVector,
         DeoptReason::FloatPairNeverFloat,
-        DeoptReason::FloatPairRightBesideFloat,
-        DeoptReason::FloatPairLeftBesideFloat,
-        DeoptReason::FloatPairSecondBesideFloat,
-        DeoptReason::FloatPairFirstNotNumber,
-        DeoptReason::FloatPairSecondBesideInt,
+        DeoptReason::FloatPairRightNotNumber,
+        DeoptReason::FloatPairLeftNotNumber,
+        DeoptReason::FloatPairBothInt,
         DeoptReason::CompareFirstOperand,
         DeoptReason::CompareSecondOperand,
         DeoptReason::VectorRefDeclined,
@@ -196,6 +196,8 @@ impl DeoptReason {
         DeoptReason::ArithDispatchFirstOperand,
         DeoptReason::ArithDispatchSecondOperand,
         DeoptReason::SelfCallCarryTag,
+        DeoptReason::SlotNumberNotFloat,
+        DeoptReason::CachedVectorRefOutOfRange,
         DeoptReason::NativeDepthExceeded,
         DeoptReason::HoistedSlotVectorBaseNull,
         DeoptReason::HoistedGlobalUnbound,
@@ -270,11 +272,9 @@ impl DeoptReason {
             DeoptReason::MapAssocDeclined => "map-assoc-declined",
             DeoptReason::VectorLengthNotVector => "vector-length-not-vector",
             DeoptReason::FloatPairNeverFloat => "float-pair-never-float",
-            DeoptReason::FloatPairRightBesideFloat => "float-pair-right-beside-float",
-            DeoptReason::FloatPairLeftBesideFloat => "float-pair-left-beside-float",
-            DeoptReason::FloatPairSecondBesideFloat => "float-pair-second-beside-float",
-            DeoptReason::FloatPairFirstNotNumber => "float-pair-first-not-number",
-            DeoptReason::FloatPairSecondBesideInt => "float-pair-second-beside-int",
+            DeoptReason::FloatPairRightNotNumber => "float-pair-right-not-number",
+            DeoptReason::FloatPairLeftNotNumber => "float-pair-left-not-number",
+            DeoptReason::FloatPairBothInt => "float-pair-both-int",
             DeoptReason::CompareFirstOperand => "compare-first-operand",
             DeoptReason::CompareSecondOperand => "compare-second-operand",
             DeoptReason::VectorRefDeclined => "vector-ref-declined",
@@ -284,6 +284,8 @@ impl DeoptReason {
             DeoptReason::ArithDispatchFirstOperand => "arith-dispatch-first-operand",
             DeoptReason::ArithDispatchSecondOperand => "arith-dispatch-second-operand",
             DeoptReason::SelfCallCarryTag => "self-call-carry-tag",
+            DeoptReason::SlotNumberNotFloat => "slot-number-not-float",
+            DeoptReason::CachedVectorRefOutOfRange => "cached-vector-ref-out-of-range",
             DeoptReason::NativeDepthExceeded => "native-depth-exceeded",
             DeoptReason::HoistedSlotVectorBaseNull => "hoisted-slot-vector-base-null",
             DeoptReason::HoistedGlobalUnbound => "hoisted-global-unbound",
@@ -382,11 +384,9 @@ mod tests {
                 | DeoptReason::MapAssocDeclined
                 | DeoptReason::VectorLengthNotVector
                 | DeoptReason::FloatPairNeverFloat
-                | DeoptReason::FloatPairRightBesideFloat
-                | DeoptReason::FloatPairLeftBesideFloat
-                | DeoptReason::FloatPairSecondBesideFloat
-                | DeoptReason::FloatPairFirstNotNumber
-                | DeoptReason::FloatPairSecondBesideInt
+                | DeoptReason::FloatPairRightNotNumber
+                | DeoptReason::FloatPairLeftNotNumber
+                | DeoptReason::FloatPairBothInt
                 | DeoptReason::CompareFirstOperand
                 | DeoptReason::CompareSecondOperand
                 | DeoptReason::VectorRefDeclined
@@ -396,6 +396,8 @@ mod tests {
                 | DeoptReason::ArithDispatchFirstOperand
                 | DeoptReason::ArithDispatchSecondOperand
                 | DeoptReason::SelfCallCarryTag
+                | DeoptReason::SlotNumberNotFloat
+                | DeoptReason::CachedVectorRefOutOfRange
                 | DeoptReason::NativeDepthExceeded
                 | DeoptReason::HoistedSlotVectorBaseNull
                 | DeoptReason::HoistedGlobalUnbound

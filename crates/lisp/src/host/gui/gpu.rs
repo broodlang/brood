@@ -393,14 +393,15 @@ impl GpuWindow {
         self.last_fragments
     }
 
-    /// An empty `w`×`h` RGBA8 texture on the device, with the bind group the textured
-    /// pipeline samples it through — by the nearest sampler, or the linear one for a
-    /// smooth `filter`.
+    /// An empty `w`×`h` RGBA8 texture on the device, `mip_levels` levels deep, with the bind
+    /// group the textured pipeline samples it through — by the nearest sampler, or the linear
+    /// one for a smooth `filter`.
     fn create_texture(
         &self,
         w: u32,
         h: u32,
         filter: TextureFilter,
+        mip_levels: u32,
     ) -> (wgpu::Texture, wgpu::BindGroup) {
         let sampler = match filter {
             TextureFilter::Nearest => &self.sampler,
@@ -413,7 +414,7 @@ impl GpuWindow {
                 height: h,
                 depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
+            mip_level_count: mip_levels.max(1),
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
@@ -438,12 +439,25 @@ impl GpuWindow {
         (texture, bind_group)
     }
 
-    /// Write a straight-alpha RGBA bitmap into `texture` at `(x, y)`.
+    /// Write a straight-alpha RGBA bitmap into `texture` at `(x, y)` of its own size.
     fn write_rgba(&self, texture: &wgpu::Texture, x: u32, y: u32, rgba: &[u8], w: u32, h: u32) {
+        self.write_level(texture, 0, rgba, w, h, (x, y));
+    }
+
+    /// Write an RGBA bitmap into mip level `level` of `texture`, at `at`.
+    fn write_level(
+        &self,
+        texture: &wgpu::Texture,
+        level: u32,
+        rgba: &[u8],
+        w: u32,
+        h: u32,
+        (x, y): (u32, u32),
+    ) {
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture,
-                mip_level: 0,
+                mip_level: level,
                 origin: wgpu::Origin3d { x, y, z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
@@ -469,11 +483,42 @@ impl GpuWindow {
         if w == 0 || h == 0 || rgba.len() as u64 != w as u64 * h as u64 * 4 {
             return;
         }
-        let (texture, bind_group) = self.create_texture(w, h, filter);
         match filter {
-            TextureFilter::Nearest => self.write_rgba(&texture, 0, 0, rgba, w, h),
-            TextureFilter::Smooth => self.write_rgba(&texture, 0, 0, &premultiplied(rgba), w, h),
+            TextureFilter::Nearest => {
+                let (texture, bind_group) = self.create_texture(w, h, filter, 1);
+                self.write_rgba(&texture, 0, 0, rgba, w, h);
+                self.keep_texture(tex, texture, bind_group, filter);
+            }
+            // with its mip chain, which a scene's meshes sample (`mesh::mip_chain`, as the CPU
+            // painter keeps it)
+            TextureFilter::Smooth => {
+                let levels = crate::host::gui::mesh::mip_chain(rgba, w, h);
+                let (texture, bind_group) =
+                    self.create_texture(w, h, filter, levels.len() as u32 + 1);
+                self.write_rgba(&texture, 0, 0, &premultiplied(rgba), w, h);
+                for (index, level) in levels.iter().enumerate() {
+                    self.write_level(
+                        &texture,
+                        index as u32 + 1,
+                        &premultiplied(&level.rgba),
+                        level.w,
+                        level.h,
+                        (0, 0),
+                    );
+                }
+                self.keep_texture(tex, texture, bind_group, filter);
+            }
         }
+    }
+
+    /// Keep `texture` as the app's texture `tex`.
+    fn keep_texture(
+        &mut self,
+        tex: u32,
+        texture: wgpu::Texture,
+        bind_group: wgpu::BindGroup,
+        filter: TextureFilter,
+    ) {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.textures.insert(
             tex,
@@ -522,7 +567,7 @@ impl GpuWindow {
             return Some(*id);
         }
         // resampled to exactly the drawn pixels already, so nearest maps texel to pixel
-        let (texture, bind_group) = self.create_texture(width, height, TextureFilter::Nearest);
+        let (texture, bind_group) = self.create_texture(width, height, TextureFilter::Nearest, 1);
         self.write_rgba(&texture, 0, 0, scaled.as_raw(), width, height);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let pictures = &mut self.pictures;

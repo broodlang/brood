@@ -2613,7 +2613,129 @@ across the picture; checked on both adapters here, red with the GPU's morph flag
 the timings `morph_cost_at_her_size` and `gpu_morph_cost_at_her_size` (ignored, run by hand).
 Run here: fmt, clippy, the 267 `gui` unit tests including the device test; suites are CI's.
 
-2026-11-24. **Soft shadows, an SH ambient, Fresnel and dual-lobe skin (ADR-791).** For the
+2026-11-24 (ADR-789). **Editing Brood is safe for an LLM: bracket errors say where, and edits
+take whole forms.** The recurring agent failure is a string-replace edit inside a function that
+leaves a `)` too many or too few. The reader now names the other end: an unclosed delimiter
+re-scans the source (only on failure) and reads its indentation parinfer-style, so
+`missing.blsp:2:3: unclosed list (opened here)` became ``unclosed list: `(let` opened at 2:3 is
+still open when line 5 starts `(defn b` at column 1 — `))` are missing before line 5``; `[1 2)`'s
+bare `unexpected ')'` became `unexpected ')' — expected ']' to close the vector opened at 2:8`; an
+extra closer names the form it falls after (``nothing is open here: the form `(defn a` that
+started at 1:1 closed at 3:13``), or the margin form that closed early when indented forms follow
+it. Still `E0002` for unclosed input, so the REPL's continuation is unchanged; a map left open
+after a key is now incomplete input too. On top, in Brood: `form-edit` (`list-forms`,
+`read-form`, `replace-form`, `insert-form`, `delete-form` over `sexp`'s positioned CST, a form
+named by what it defines), served as `nest mcp` tools and as `nest form …`; `nest mcp`'s
+`write`/`edit` refuse to leave a `.blsp` that read unreadable; `nest check-syntax` (the reader
+alone, `--claude-hook` for a Claude Code PostToolUse payload, exit 2); and `nest new` /
+`nest update-tooling` merge the `brood` server into `.mcp.json` and the hook into
+`.claude/settings.json` without clobbering, idempotently. The skill, `brood-for-claude.md` and the
+`brood-task` prompt lead with "change a function with `replace-form`". The new message caught a
+typo of mine in `scaffold.blsp` while writing this (`unexpected ']' — expected ')' to close the
+list opened at 427:8`). Guards: `syntax::reader::tests` (seven), `tests/form_edit_test.blsp`, the
+form-tool block of `tests/mcp_test.blsp` (sabotaged: the edit guard disabled turns two red),
+`crates/nest/tests/form_command.rs`, `update_tooling.rs`. Run here: fmt, clippy, `nest format
+--check`, `nest check` and `--strict` over std/tests/examples, banned-names, `source_map`,
+`embedded_paths_tracked`, `doc_refs`, `error_format_parity`, the reader unit tests and the
+touched test files one by one; the suites are CI's (desktop rule).
+
+2026-11-24 (ADR-788 follow-up). **Soft shadows: `:shadow {:softness metres}`.** A shadow's edge
+was a 3×3 PCF of bilinear taps, a texel or two wide, so hair cards and a figure's own forms
+cast hard, stair-stepped edges (womanblend: under the breasts, on the forearm, strands on the
+chest). `:softness` is the radius, in metres at the receiver, over which the edge is filtered:
+16 bilinear taps of a Poisson disc, turned per point by a hash of where it is (`soft_turn`, the
+same on both painters) so the edge reads as grain, not rings; the reach in texels is the
+softness over the texel's size there, held to 1 … 24. The receiver is also moved toward the
+light by the softness times its slope to the light (held at 2), since taps that far out read the
+surface deeper. Default 0 keeps the tight filter. The disc's classic points lie out to 1.234; it
+is scaled by 0.81 into the unit circle, without which the outer taps outran the slope bias and a
+lit floor shadowed itself by 4% (found by the acne check). The GPU target packs the softness into
+the light colour's spare fourth. Guards: `a_soft_shadow_grades_its_edge_and_keeps_its_middle_dark_without_acne`
+(CPU) and `a_soft_shadow_draws_on_the_gpu_as_on_the_cpu` (both adapters here, within 11 of 255).
+Run here: fmt, clippy, the 268 `gui` unit tests; suites are CI's.
+
+2026-11-24. **Matrix math stays on the fast path: the straight-line vector hoist (ADR-790).**
+A 3D kernel benchmark (mat4 multiply, point transform, projection, a 1 000-point frame) found
+`mat4-mul` making 100 runtime calls a product: the JIT's vector-base hoist served only loops
+that allocate nothing, and a matrix multiply is straight-line code ending in `MakeVector`. An
+arm whose control only moves forward now hoists a parameter vector read four or more times
+before its first allocation. `mat4-mul` ~385 → 256 ns, transform 171 → 109 ns, the frame
+~345 → ~280 µs; `make ab` noise on every row (a control build shows the +1–4% leaners are
+layout). Also measured on the way: the published `ring` +6.3% between 0.57 and 0.59 is +0.9%
+against a 2.6% floor under `make ab` — session drift, not a regression.
+
+2026-11-24. **A `:path` dependency is locked without a hash.** `project.lock.blsp` recorded a
+tree hash of every path dependency, which nothing read; a path dep loads live from outside the
+project, so the hash pinned nothing and rewrote the committed lock whenever that tree changed
+(bedit-agent's lock, after every bedit commit). Path entries are now `[name :path P :deps […]]`,
+and `nest` no longer hashes the tree on every resolve. Guard: `package_test` "editing a path
+dep's source leaves the lock as it was" (red with the hash back, as are two shape assertions).
+
+2026-11-24 (ADR-788 follow-up). **Ambient occlusion: `:ambient-occlusion {:radius m :strength s}`.**
+The ambient light lit every point alike, so folds forming as a figure moves read flat (womanblend:
+the corners of her mouth and the seam between her lips in a smile, the creases beside her nose).
+The camera's own depth becomes one more view of the shadow plan, drawn by the shadow pass; each
+lit fragment tests 16 fixed hemisphere taps (`occlusion_tap`) against it and darkens its ambient
+term by what encloses it, weighted down for surfaces far in front (`ambient_occlusion`, the same on
+both painters; `view_distance` compares depths along the view for perspective and orthographic
+cameras alike). Radius, strength and view ride in the scene uniform's spare fourths. Guards: a
+card 10 cm over a floor darkens the floor beside its edge and leaves open floor and its own top
+untouched to the byte (CPU), and the GPU draws it as the CPU does (`backend/gpu_scene`). Run here:
+fmt, clippy (`--all-features`); the tests are CI's (desktop rule).
+
+2026-11-24 (ADR-788 follow-up). **Mip chains for smooth textures, and a `:hair` surface.** Strand
+cards crimped and glittered at mid distance (womanblend), smooth up close: no texture had mips,
+so a fine texture seen small read as whichever texels landed on a pixel. Every `:smooth` texture
+now carries a chain (`mip_chain`, alpha-weighted), sampled trilinearly by both painters (the CPU
+one at a level per triangle, `triangle_lod`); sprites still read level 0. `:surface :hair`
+lights strands along the bitangent (Kajiya-Kay with Scheuermann's two shifted highlights) and
+turns alpha into coverage: a sample mask on the GPU, the same steps as a 2×2 dither on the CPU.
+Guards: mip averaging, a fine checker seen small reading as an even grey, the highlight across
+and not along a strand, half coverage drawing half a pixel, and the GPU drawing hair as the CPU
+does. Run here: fmt, clippy (`--all-features`); the tests are CI's (desktop rule).
+
+2026-11-24. **The sampling profiler answers "which function" (ADR-791).** A game's author wrote
+a tool that redefined ~25 functions with timing wrappers to find where a 20 ms frame went; it
+could not wrap reserved names and inflated a recursive 4 ms layer to 129 ms. The profiler that
+existed since July could not have answered either: on a 160 ms smoke run (a JIT loop, a native
+call chain, a builtin calling back) it charged **831 ticks at 997 Hz** — a fresh nested driver
+sampled at its first boundary, tick or no tick, so 685 went to one function called 3000 times
+from native code — and every stack was one frame deep. Now a process samples when the epoch
+moved since *its* last sample (a mark on its heap) and is charged the ticks between; the driver
+samples where the frame that ran is still current; native activations link to their callers
+through `JitCallCtx::parent` (one store per native call) and sample at their reduction poll;
+every open driver links itself into a thread-local chain and publishes its frames while it runs
+its interpreter or a native activation, so a sample walks out through the drivers around it and
+is committed at once. (A first version held such samples until the outermost driver got control
+back; CI showed the flaw — the test runner, like `proc/interruptible`, keeps the outermost driver
+inside one call-out for the whole profile, so four profiler tests read empty profiles. A runner-
+shaped smoke run reproduced it: 0 ticks before, 83 after.) The same run: **147 ticks in 160 ms**, stacks
+`inner-loop < middle < top < frame` and `churn < nested-churn` across `%isolate`. Policy is
+the new DEV module `profile`: `profile/run`, `start`/`stop`, `sample`, `functions` (self and
+total), `report` (two ranked tables), `folded`; `nest profile` prints the report.
+`dev/profile->folded` moved to `profile/folded` (ledgered). Run here: the release build, one
+seconds-long smoke run on old and new binaries, and the static gates; the suites, `make ab` and
+`make ab-vm` (owed for the native call store) are CI's and the test machine's (desktop rule).
+
+2026-11-24. **Float-heavy code: a JIT run keeps what it has read; long float vectors cross
+processes packed (ADR-792).** b3d's `mat4-multiply` (two destructured 16-vectors, 112 ops, a
+fresh vector) cost ~680 ns native. Profiled, it was not boxing: ~185 ns was the destructure —
+each of sixteen `(nth a k)` re-checked tag, region and storage and called for the slab base —
+and ~270 ns re-reading and re-tag-testing each destructured element at each of its four uses.
+Two caches beside the existing f64/i64 slot caches, scoped to a straight-line run: a slot read
+as a number keeps its `f64` and whether it really was a float (so two ints still deopt, KI-114),
+and a vector slot read element by element decodes its storage once (`brood_rt_vector_base`),
+dropped before anything that could allocate or call. The product now runs in ~317 ns (2.1×), a
+16-element destructure 190 → 93 ns; b3d's 296-joint FK 630 → 520 µs, palette 400 → 280 µs
+(FK is now calls, map reads and allocation). Messages: a vector of 16+ floats crosses as
+`Message::FloatVector(Vec<f64>)` (the wire still spells it as a vector of floats), and a mixed
+vector's numbers are copied without a recursive call each — a 6000-float round trip 280 → 20 µs.
+Still open: the fresh vector's `malloc`/`free` (~85 ns for 16 elements), which wants nursery
+element storage. Run here: `cargo check`/clippy/fmt and short single timing runs only; the new
+`jit_float_run_cache_test`, the extended `message_roundtrip_test` and
+`process::message::float_vector_tests` are CI's (desktop rule).
+
+2026-11-24. **Soft shadows, an SH ambient, Fresnel and dual-lobe skin (ADR-793).** For the
 game's woman under a lamp: ADR-788's shadows all had the same texel-wide edge, the ambient was a
 two-colour hemisphere and the specular had no Fresnel. A shadow's `:softness` (texels) filters
 it over a 16-tap golden-angle disc turned per pixel by interleaved gradient noise; a light's
@@ -2628,3 +2750,12 @@ A material's `:occlusion` texture multiplies the ambient. Malformed `:ambient-sh
 `:softness`/`:size`/`:angle` are refused. Both painters, mirrored function for function; the
 scene uniform grows to 3072 bytes. Built (default and `gui-gpu`), clippy clean; tests written
 (`host::gui::mesh`, `gui_scene_light_tests`) and left to CI (desktop rule) — none run here.
+Merged onto main after the profiler (ADR-791) and float work (ADR-792), so renumbered 793; on
+the way it met ADR-788's later follow-ups and keeps them: `:softness` stays in metres at the
+receiver (what main's soft shadows and the womanblend viewer give it), turned into texels where
+the receiver stands (`shadow_softness`) and held to `DEFAULT_SOFTNESS`; with a `:size`/`:angle`
+it is the most the penumbra grows to. This branch's receiver-plane bias and golden-angle filter
+replace main's Poisson disc and its softness slope bias. The ambient occlusion multiplies the
+ambient with the `:occlusion` map's, `:hair` keeps its own highlights (shadowed by the light's
+visibility), and the ambient occlusion's settings move from the ambient's spare fourths (now
+the SH flag's) to an `occlusion` vec4 at the scene uniform's end.

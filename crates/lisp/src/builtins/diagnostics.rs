@@ -75,14 +75,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::range(0, 2),
         Sig::new(vec![any, any], nil_ty),
         &["&optional", "hz", "pid"],
-        "Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram — only process `pid` when one is given, else every process. Sampling walks each process's reified call stack (named frames) at its next VM frame boundary after every tick — no signals, near-zero cost when off (one relaxed load per frame boundary). A JIT-resident loop is attributed when it yields at its reduction-budget preempt (~once a quantum); the legacy tree-walker isn't sampled. Stop and read with (dev/profile-stop).",
+        "Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram — only process `pid` when one is given, else every process. A running process samples its whole call stack — interpreted frames, native (JIT) activations and the frames of the drivers around a nested one — at its next frame boundary or native reduction poll after each tick, charged with the ticks since its last sample (ADR-791). No signals; off, one relaxed load per frame boundary. The legacy tree-walker is not sampled. Stop and read with (dev/profile-stop); `profile/run` and `profile/report` are the policy over it.",
         profile_start);
     primitives.def(
         "%profile-stop",
         Arity::exact(0),
         Sig::nullary(list_ty),
         &[],
-        "Disarm the sampling profiler and return the histogram: a list of {:stack (fn-names... innermost-first) :count n} maps, most-sampled first. Empty list if never armed. A sample whose frames were all anonymous appears with :stack (\"<anonymous>\").",
+        "Disarm the sampling profiler and return the histogram: a list of {:stack (fn-names... innermost-first) :count ticks} maps, most-sampled first — a tick is 1/hz s of one process's running time. Empty list if never armed. A sample whose frames were all anonymous appears with :stack (\"<anonymous>\").",
         profile_stop);
     // memory
     primitives.def(

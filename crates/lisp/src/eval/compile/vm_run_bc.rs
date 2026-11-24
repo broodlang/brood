@@ -864,6 +864,18 @@ fn rebuild_unwound_frames(heap: &mut Heap, frames: &mut Vec<BcFrame>) -> BcFrame
     cur.expect("the innermost unwound activation")
 }
 
+/// The sampling profiler's reader of a driver's pending frames (ADR-791): the names of the
+/// frames under the current one, innermost first, from the pointer `vm_run_bc` publishes.
+///
+/// # Safety
+/// `frames` is the `&raw const` of a driver's `frames`, published for the run now in progress;
+/// the driver does not touch its frames until that run returns.
+unsafe fn profile_frame_names(frames: *const (), stack: &mut Vec<value::Symbol>) {
+    // SAFETY: as this fn's contract — a live `Vec<BcFrame>` nobody is changing.
+    let frames = unsafe { &*frames.cast::<Vec<BcFrame>>() };
+    stack.extend(frames.iter().rev().filter_map(|frame| frame.arm.fn_name));
+}
+
 pub(crate) fn vm_run_bc(
     heap: &mut Heap,
     arm0: Arc<ArmHandle>,
@@ -891,6 +903,15 @@ pub(crate) fn vm_run_bc(
             crate::process::set_capture_top_level(previous);
         },
     );
+    // The sampling profiler's link for this driver in the thread's chain of open drivers
+    // (ADR-791): a sample taken in what this driver calls walks outward through it, reading the
+    // frames it publishes around each run below. A top-level entry starts the process's charge
+    // afresh, so the time it spent parked or queued is not charged to its frames.
+    let profile_level = crate::diagnostics::profile::Level::new(profile_frame_names);
+    let _profile_link = profile_level.link();
+    if top_level && crate::diagnostics::profile::armed() {
+        crate::diagnostics::profile::restart(&mut heap.profile_mark);
+    }
     // Loop-top **preempt/kill capture** is done only by the *top-level* body driver
     // (`run_process_body`) of a capture-mode green process (ADR-100 §8). A nested
     // `vm_apply` run (a `map`/`try`/`binding` native callback) is NOT top-level: it
@@ -1026,10 +1047,6 @@ pub(crate) fn vm_run_bc(
     let native_ceiling = tier_ceiling() >= Tier::Native;
     #[cfg(not(feature = "jit"))]
     let _ = fresh; // silence unused warning when the JIT is off
-
-    // Sampling profiler (observability timing tier): the epoch this driver last
-    // sampled at. Loop-local — a resume simply re-samples on its next epoch tick.
-    let mut profiled_epoch: u64 = 0;
 
     // Set by a `Done` that handed its value back to a caller frame: the caller resumes
     // mid-body, so the loop-top safepoint has nothing to do that the CALL did not already
@@ -1187,25 +1204,6 @@ pub(crate) fn vm_run_bc(
             if std::mem::take(&mut returned_to_caller) {
                 break 'safepoint;
             }
-            // Profiler sample: when armed and the ticker's epoch moved, record this
-            // driver's named-frame stack (cur + pending callers, innermost first).
-            // Off (the default): one relaxed bool load per frame boundary.
-            if crate::diagnostics::profile::armed() {
-                let ep = crate::diagnostics::profile::epoch();
-                if ep != profiled_epoch {
-                    profiled_epoch = ep;
-                    let mut stack: Vec<value::Symbol> = Vec::with_capacity(frames.len() + 1);
-                    if let Some(n) = cur_arm.fn_name {
-                        stack.push(n);
-                    }
-                    for f in frames.iter().rev() {
-                        if let Some(n) = f.arm.fn_name {
-                            stack.push(n);
-                        }
-                    }
-                    crate::diagnostics::profile::record(&stack);
-                }
-            }
             // Per-iteration safepoint / preemption / deadline — relocates every frame's
             // slots and env in place (all on `Heap::roots`/`env_roots`). Mirrors the
             // `Node` trampoline's loop top.
@@ -1295,6 +1293,10 @@ pub(crate) fn vm_run_bc(
         // Either run the arm natively (if it's flagged for a tier check) or interpret it.
         // Both yield a `Result<ChunkExit, _>` handled uniformly below. A tail-position
         // interrupt region that ended returns its answer from this frame (ADR-491).
+        // ADR-791: while the arm runs, what it calls may sample, and reads this driver's pending
+        // frames through the published pointer; nothing below changes `frames` before the
+        // `unpublish` after it.
+        profile_level.publish(&raw const frames as *const (), cur_arm.fn_name);
         let exit = if std::mem::take(&mut return_top) {
             let n = heap.roots_len();
             Ok(ChunkExit::Done(heap.root_at(n - 1)))
@@ -1461,6 +1463,7 @@ pub(crate) fn vm_run_bc(
                                 // leaf-spliced native the derivation's resume arm, whose
                                 // chunk and frame layout are the spliced ones.
                                 cur_arm = ArmHandle::new(ra);
+                                profile_level.set_current(cur_arm.fn_name);
                             }
                             if jit_outcome == Some(outcome::PREEMPT) && capture {
                                 // A native PREEMPT: the reduction budget is spent, so yield
@@ -1516,6 +1519,18 @@ pub(crate) fn vm_run_bc(
                 )
             }
         };
+        profile_level.unpublish();
+        // Profiler sample (ADR-791), at the boundary where the frame that just ran is still
+        // current: what ran since the last boundary is charged to it. Off (the default): one
+        // relaxed load per boundary.
+        if crate::diagnostics::profile::armed() {
+            crate::diagnostics::profile::driver_sample(
+                &profile_level,
+                &mut heap.profile_mark,
+                cur_arm.fn_name,
+                frames.iter().rev().map(|frame| frame.arm.fn_name),
+            );
+        }
         match exit {
             Ok(ChunkExit::Done(v)) => {
                 // The result checks this frame owes (ADR-748), innermost first: a value the

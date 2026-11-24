@@ -2514,6 +2514,7 @@ mod cell_region_tests {
                     0, 0, 0, 0, 0, 0, 255, 255,
                 ],
                 filter: TextureFilter::Nearest,
+                mips: Vec::new(),
             },
         );
         let ops = vec![
@@ -2633,15 +2634,9 @@ mod cell_region_tests {
     ) -> Vec<u32> {
         let mut renderer = Renderer::new(1.0, default_families(), 14.0);
         let (cell_width, cell_height) = (renderer.cell_w.max(1), renderer.cell_h.max(1));
-        renderer.textures.insert(
-            1,
-            CpuTexture {
-                w: texture_width,
-                h: 1,
-                rgba,
-                filter,
-            },
-        );
+        renderer
+            .textures
+            .insert(1, CpuTexture::new(texture_width, 1, rgba, filter));
         let mut pixels = vec![ground; width];
         let mut canvas = Canvas::full(&mut pixels, width, 1);
         let sprite = Op::Sprite {
