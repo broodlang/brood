@@ -5,6 +5,36 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-411 — a loop running native never ran a collection its builtin calls made due ✅ fixed 2026-11-25
+
+**Symptom.** `make test-eager` (every arm tiering after 2 calls, ADR-809) failed
+`gc_byte_trigger_test`'s `str` case: a string grown by `str` in a `fold` collected once where at
+least two collections were due. Reproduced at the default tier with the path warmed first: a
+3 000-step `str` build collected once native, three times on the VM (`BROOD_TIER=1`).
+
+**Cause.** The byte trigger (KI-307) makes a collection due when a process has made enough fresh
+buffer bytes, and the VM runs a due collection at its safepoints. Native code calls a builtin
+directly (`brood_rt_call_native_fl`, `jit_dispatch_call`'s `call_native_direct`), and no VM
+safepoint follows, so a loop that stayed native never collected however many bytes its builtins
+made: KI-307's unbounded growth, back for native loops.
+
+**Why it survived.** The suite runs with contracts armed under `nest test`, where `str` is a
+contract shim whose VM frames do collect; the cargo suite runs unarmed, but its loops tier late
+enough that the case's first build ran on the VM. Only the eager tier ran the build native from
+its first iteration.
+
+**Fix.** The allocator flags the crossing of the byte budget (`byte_budget_spent`, set in
+`note_fresh_buffer`, cleared by the refill), and `Heap::collect_if_bytes_spent` acts on it after
+each builtin called from native code, holding the fresh result across the collection. One flag
+load a call: asking `gc_due` every call had cost wordcount 13%; this costs it ~4% against a
+control build, the other rows flat.
+
+**Guard.** `gc_byte_trigger_test` "a str build already running native collects too" (warms the
+path, then asserts at least two collections); red unarmed with the fix removed. Run it both ways
+with `make test-file`.
+
+---
+
 ## KI-410 — arithmetic on a number that is an int one time and a float the next deopted for good ✅ fixed 2026-11-23
 
 **Symptom.** `BROOD_JIT_BAIL_TRACE=1` over the dino game: `[jit-deopt] arm=b2d-scenery/block-walk
