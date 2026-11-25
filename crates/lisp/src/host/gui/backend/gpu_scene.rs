@@ -889,3 +889,101 @@ fn loose_flesh_follows_its_lagging_bones_alike_on_both_painters() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// E1, on trial: a `:fibres` strand seen from above, at its real width. Half a pixel wide it
+/// covers about half its pixel, blended over the black behind (no hash, no mask); sixteen
+/// pixels wide it covers its pixel wholly; and nothing is drawn beside it. Its passes'
+/// pipelines (`fibres.rs`, `fs_fibre_*`) are made and validated here.
+#[test]
+fn a_fibre_strand_covers_its_pixel_by_its_real_width() {
+    let side = 128u32;
+    // one strand along z through the middle, from z = −2 (its root) to z = 2 (its tip): two
+    // vertices a point, its normal its direction, uv.x its side, uv.y 1 at the root
+    let strand = Arc::new(
+        Mesh::from_parts(MeshParts {
+            positions: bytes_of(&[0.0, 0.0, -2.0, 0.0, 0.0, -2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 2.0]),
+            normals: bytes_of(&[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
+            uvs: bytes_of(&[-0.5, 1.0, 0.5, 1.0, -0.5, 0.0, 0.5, 0.0]),
+            indices: [0u16, 1, 2, 1, 3, 2]
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect(),
+            ..MeshParts::default()
+        })
+        .expect("a strand"),
+    );
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    // seen straight down: 0.25 of the picture's half a metre, so 16 pixels a metre
+    scene.view_proj = [
+        0.25, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1, 0.0, 0.0, -0.25, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0,
+    ];
+    scene.eye = [0.0, 10.0, 0.0];
+    scene.lights = vec![Light::directional([0.0, -1.0, 0.0], [1.0, 1.0, 1.0])];
+    let fibre = |width: f32| Draw {
+        loose: None,
+        mesh: 1,
+        model: [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+        palette: None,
+        morphs: vec![],
+        material: Material {
+            surface: Surface::Strands,
+            fibres: true,
+            double_sided: true,
+            strand_width: [width, width],
+            roughness: 0.6,
+            specular: 0.0,
+            color: [0.9, 0.6, 0.3, 1.0],
+            ..Material::default()
+        },
+    };
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let mut reds = Vec::new();
+        for width in [1.0f32 / 32.0, 1.0] {
+            let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+                continue;
+            };
+            gpu.upload_mesh(1, &strand);
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            renderer.set_bg(Some([0, 0, 0]));
+            scene.draws = vec![fibre(width)];
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            let pixels = gpu.read_pixels();
+            let red = |x: u32| i32::from(pixels[((64 * side + x) * 3) as usize]);
+            // the strand's column (it runs between pixels 63 and 64) and well beside it
+            let across = (red(63) + red(64), red(40));
+            eprintln!(
+                "{name}: a fibre {width} m wide: red in its column {}, beside it {}",
+                across.0, across.1
+            );
+            reds.push(across);
+        }
+        if reds.len() < 2 {
+            continue;
+        }
+        let (thin, wide) = (reds[0], reds[1]);
+        assert!(
+            wide.0 > 100,
+            "{name}: a wide fibre covers its pixels: {wide:?}"
+        );
+        assert!(
+            thin.0 > 10 && thin.0 * 10 < wide.0 * 7,
+            "{name}: half a pixel wide covers part: {thin:?} against {wide:?}"
+        );
+        assert!(
+            thin.1 < 3 && wide.1 < 3,
+            "{name}: nothing beside it: {thin:?} {wide:?}"
+        );
+    }
+}

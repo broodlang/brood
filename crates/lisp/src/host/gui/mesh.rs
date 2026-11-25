@@ -872,6 +872,10 @@ pub struct Material {
     pub sheen: Option<[f32; 3]>,
     /// Its skin pressed by the scene's contacts (`:deform`, ADR-805).
     pub deform: bool,
+    /// A `:fibres` surface (E1, on trial): a `:strands` mesh at its real width, its coverage of a
+    /// pixel worked out exactly and blended, the three nearest layers a pixel lit (TressFX
+    /// ShortCut). The GPU painter alone draws it so; the CPU painter draws it as `:strands`.
+    pub fibres: bool,
 }
 
 impl Default for Material {
@@ -899,6 +903,7 @@ impl Default for Material {
             hair_shift: [HAIR_SHIFT_PRIMARY, HAIR_SHIFT_SECONDARY],
             sheen: None,
             deform: false,
+            fibres: false,
         }
     }
 }

@@ -1618,10 +1618,11 @@ fn scene_spec(
                 "cutout" => Surface::Cutout,
                 "blend" => Surface::Blend,
                 "hair" => Surface::Hair,
-                "strands" => Surface::Strands,
+                "strands" | "fibres" => Surface::Strands,
                 "eye" => Surface::Eye,
                 _ => Surface::Standard,
             };
+            material.fibres = value::symbol_name_ref(surface) == "fibres";
         }
         material.base = handle("base");
         material.normal = handle("normal");

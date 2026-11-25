@@ -53,6 +53,7 @@
 mod atlas;
 mod effects;
 mod expand;
+mod fibres;
 mod fragment_cache;
 mod frame_builder;
 mod frame_dump;

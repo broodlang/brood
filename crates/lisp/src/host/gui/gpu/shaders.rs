@@ -971,6 +971,8 @@ struct VertexOut {
     @location(5) eye_centre: vec4<f32>,
     @location(6) eye_axis: vec3<f32>,
     @location(7) eye_up: vec3<f32>,
+    // a `:fibres` strand (E1): its real width and its drawn width, in pixels, for its coverage
+    @location(8) strand_px: vec2<f32>,
 };
 
 // a vertex morphed, and the matrix that skins and places it
@@ -1040,6 +1042,7 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
     out.eye_centre = vec4<f32>(0.0);
     out.eye_axis = vec3<f32>(0.0);
     out.eye_up = vec3<f32>(0.0);
+    out.strand_px = vec2<f32>(0.0);
     if (draw.flags.x == 6u && draw.eye_centres[0].w > 0.0) {
         // `mesh::eye_frame`: the eye whose centre at rest is nearest, moved as this vertex is
         var index = 0u;
@@ -1061,6 +1064,7 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
         out.world = ribbon.world;
         out.normal = ribbon.normal;
         out.tangent = vec4<f32>(direction, ribbon.coverage);
+        out.strand_px = ribbon.pixels;
     }
     return out;
 }
@@ -1094,6 +1098,8 @@ struct StrandVertex {
     world: vec3<f32>,
     normal: vec3<f32>,
     coverage: f32,
+    // its real width and its drawn width in pixels (a `:fibres` strand reads them, E1)
+    pixels: vec2<f32>,
 };
 
 // `mesh::strand_vertex`: a strand's point on its ribbon's side `uv.x`, the ribbon `widths`
@@ -1116,7 +1122,12 @@ fn strand_vertex(centre: vec3<f32>, direction: vec3<f32>, uv: vec2<f32>, widths:
             pixel = 0.01 / pixels;
         }
     }
-    let drawn = max(width, pixel);
+    var drawn = max(width, pixel);
+    // a `:fibres` strand (E1) is drawn at its real width and 0.7 of a pixel more each side: room for
+    // its exact coverage, worked out in the fragment stage
+    if ((draw.flags.y & 512u) != 0u) {
+        drawn = width + 1.4 * pixel;
+    }
     var coverage = 0.0;
     if (drawn > 0.0) {
         coverage = clamp(width / drawn, 0.0, 1.0);
@@ -1126,6 +1137,7 @@ fn strand_vertex(centre: vec3<f32>, direction: vec3<f32>, uv: vec2<f32>, widths:
     out.world = centre + across * (drawn * 0.5 * side);
     out.normal = safe_normalize(across * side + facing);
     out.coverage = coverage;
+    out.pixels = vec2<f32>(width / max(pixel, 1e-12), drawn / max(pixel, 1e-12));
     return out;
 }
 
@@ -2184,6 +2196,56 @@ fn fs_hair_front(fragment: VertexOut, @builtin(front_facing) front: bool) -> @lo
         return vec4<f32>(linear_to_srgb(srgb_to_linear(texel.rgb) * draw.color.rgb), 1.0);
     }
     return mesh_lit(fragment, front, texel, normal_texel, occlusion_texel, detail_texel, uv_dx, uv_dy, 1.0);
+}
+
+// E1, on trial (`fibres.rs`): a `:fibres` strand's three nearest depths a pixel, each kept as
+// 0xFFFFFFFF − its bits, so the nearest is the largest and a cleared slot (0) is empty
+@group(0) @binding(6) var<storage, read_write> fibre_layers: array<atomic<u32>>;
+
+// how much of its pixel a `:fibres` fragment covers: a pixel-wide box against the strand's real
+// width, from the fragment's distance off the strand's middle (in pixels), times its colour's alpha
+fn fibre_coverage(fragment: VertexOut) -> f32 {
+    let off = fragment.uv.x * fragment.strand_px.y;
+    let half = 0.5 * fragment.strand_px.x;
+    let covered = clamp(min(off + 0.5, half) - max(off - 0.5, -half), 0.0, 1.0);
+    return covered * draw.color.a;
+}
+
+// the fibres' layer pass: the fragment's depth among its pixel's three nearest, and its
+// coverage multiplied out of the pixel's transmittance
+@fragment
+fn fs_fibre_layers(fragment: VertexOut) -> @location(0) vec4<f32> {
+    let coverage = fibre_coverage(fragment);
+    if (coverage < 0.002) {
+        return vec4<f32>(1.0);
+    }
+    let pixel = vec2<u32>(floor(fragment.clip.xy));
+    let base = (pixel.y * u32(scene.picture.x) + pixel.x) * 3u;
+    var kept = 0xFFFFFFFFu - bitcast<u32>(fragment.clip.z);
+    for (var slot = 0u; slot < 3u; slot = slot + 1u) {
+        let before = atomicMax(&fibre_layers[base + slot], kept);
+        if (before == 0u) {
+            break;
+        }
+        kept = min(kept, before);
+    }
+    return vec4<f32>(1.0 - coverage);
+}
+
+// the fibres' front pass: shaded only at or before the pixel's third nearest depth (the depth
+// test, early: no `discard` here), their colour and coverage added up
+@fragment
+fn fs_fibre_front(fragment: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let base_texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
+    let normal_texel = straight(textureSample(normal_texture, texture_sampler, fragment.uv), (draw.flags.y & 8u) != 0u);
+    let occlusion_texel = straight(textureSample(occlusion_texture, texture_sampler, fragment.uv), (draw.flags.y & 32u) != 0u);
+    let detail_texel = straight(textureSample(detail_texture, texture_sampler, fragment.uv * draw.detail.xy), (draw.flags.y & 128u) != 0u);
+    let texel = select(vec4<f32>(1.0), base_texel, (draw.flags.y & 1u) != 0u);
+    let uv_dx = dpdx(fragment.uv);
+    let uv_dy = dpdy(fragment.uv);
+    let coverage = fibre_coverage(fragment);
+    let lit = mesh_lit(fragment, front, texel, normal_texel, occlusion_texel, detail_texel, uv_dx, uv_dy, 1.0);
+    return vec4<f32>(lit.rgb * coverage, coverage);
 }
 
 struct ShadowOut {
