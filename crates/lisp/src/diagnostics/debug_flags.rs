@@ -644,7 +644,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_GUI_SAMPLES",
         HOST,
-        "`=4`: the GPU painter draws 3D scenes with 4× multisampling even where the adapter can do 8× (ADR-799) — the earlier picture, to compare a hair surface's coverage in five steps against nine.",
+        "`=8`: the GPU painter draws 3D scenes with 8× multisampling where the adapter can (4× by default; ADR-799) — a hair surface's coverage in nine steps rather than five, every edge a little smoother, the scene targets twice the memory.",
     ),
     f(
         "BROOD_GUI_DUMP",

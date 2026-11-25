@@ -218,13 +218,14 @@ fn one_pixel(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> wgpu:
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
-/// The samples a pixel scenes are drawn with on `adapter`'s `device`: eight where both the
-/// scene's colour and depth formats can be multisampled 8× (the device asked for the
-/// adapter's own format features), so a `:hair` or `:strands` surface's coverage has nine
-/// levels, not five; four, as before, otherwise (ADR-799). `BROOD_GUI_SAMPLES=4` keeps four, to
-/// compare.
+/// The samples a pixel scenes are drawn with on `adapter`'s `device`: four; eight when asked
+/// (`BROOD_GUI_SAMPLES=8`) and both the scene's colour and depth formats can be multisampled 8×
+/// (the device asked for the adapter's own format features), so a `:hair` or `:strands`
+/// surface's coverage has nine levels, not five (ADR-799). Four is the default: on the game
+/// that asked for eight, its figure's hair looked the same at eight, and its cost could not
+/// be measured cleanly.
 pub(super) fn scene_samples(adapter: &wgpu::Adapter, device: &wgpu::Device) -> u32 {
-    if std::env::var("BROOD_GUI_SAMPLES").as_deref() == Ok("4")
+    if std::env::var("BROOD_GUI_SAMPLES").as_deref() != Ok("8")
         || !device
             .features()
             .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
