@@ -2876,6 +2876,8 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         indices_wide,
         morphs: Vec::new(),
         softness: mesh_bytes(heap, map, "softness")?,
+        strand: mesh_bytes(heap, map, "strand")?,
+        visibility: mesh_bytes(heap, map, "visibility")?,
     };
     if let Some(Value::Vector(morphs)) = heap.map_get(map, value::kw("morphs")) {
         let targets = heap.vector(morphs).to_vec();

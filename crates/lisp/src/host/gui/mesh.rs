@@ -501,6 +501,12 @@ pub struct MeshParts {
     /// How soft its flesh is a vertex, f32 0 (bone) … 1 (soft), for the ring round a contact
     /// (ADR-805); empty: none.
     pub softness: Vec<u8>,
+    /// A strand mesh's value a vertex (`_STRAND`, E1, on trial): one f32 each, constant along a
+    /// strand; carried in the curvature slot, which strands never read.
+    pub strand: Vec<u8>,
+    /// A strand mesh's baked self-shadow a vertex (E2, on trial): four f32, `[a bx by bz]`, the hairs
+    /// crossed toward a unit direction L being max(0, a + b·L); carried in the tangent slot.
+    pub visibility: Vec<u8>,
 }
 
 fn floats<const N: usize>(name: &str, bytes: &[u8], count: usize) -> Result<Vec<[f32; N]>, String> {
@@ -555,7 +561,12 @@ impl Mesh {
             floats::<2>("uvs", &parts.uvs, count)?
         };
         let tangents = if parts.tangents.is_empty() {
-            None
+            // (a strand mesh's baked self-shadow in their place, E2: strands never read tangents)
+            if parts.visibility.is_empty() {
+                None
+            } else {
+                Some(floats::<4>("visibility", &parts.visibility, count)?)
+            }
         } else {
             Some(floats::<4>("tangents", &parts.tangents, count)?)
         };
@@ -674,7 +685,15 @@ impl Mesh {
                 .map(|[value]| value.clamp(0.0, 1.0))
                 .collect()
         };
-        let curvature = vertex_curvature(&positions, &normals, &indices);
+        // (a strand mesh's `_STRAND` in its place, E1: strands never read curvature)
+        let curvature = if parts.strand.is_empty() {
+            vertex_curvature(&positions, &normals, &indices)
+        } else {
+            floats::<1>("strand", &parts.strand, count)?
+                .into_iter()
+                .map(|[value]| value)
+                .collect()
+        };
         Ok(Mesh {
             positions,
             normals,
@@ -8775,5 +8794,37 @@ mod tests {
             lit_at(&flat, 0.8, Some(&under)),
             lit_at(&flat, -0.8, Some(&under))
         );
+    }
+    #[test]
+    fn a_strand_meshs_value_and_bake_ride_in_its_curvature_and_tangent_slots() {
+        // E1/E2, on trial: `_STRAND` in the curvature slot, the baked self-shadow in the tangent
+        // slot, which a strand surface never reads otherwise; a mesh without them is as before
+        let floats_bytes = |values: &[f32]| -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        };
+        let triangle = floats_bytes(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let mesh = Mesh::from_parts(MeshParts {
+            positions: triangle.clone(),
+            strand: floats_bytes(&[0.25, 0.25, 0.75]),
+            visibility: floats_bytes(&[
+                10.0, 0.0, 1.0, 0.0, 10.0, 0.0, 1.0, 0.0, 27.0, 1.0, 0.0, 0.0,
+            ]),
+            ..MeshParts::default()
+        })
+        .expect("a strand triangle");
+        assert_eq!(mesh.curvature, vec![0.25, 0.25, 0.75]);
+        assert_eq!(
+            mesh.tangents.as_ref().map(|tangents| tangents[2]),
+            Some([27.0, 1.0, 0.0, 0.0])
+        );
+        let plain = Mesh::from_parts(MeshParts {
+            positions: triangle,
+            ..MeshParts::default()
+        })
+        .expect("a triangle");
+        assert!(plain.tangents.is_none());
     }
 }

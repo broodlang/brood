@@ -325,6 +325,12 @@ pub(super) fn hair_prepass() -> bool {
     *ON.get_or_init(|| std::env::var("BROOD_GUI_HAIR_PREPASS").as_deref() != Ok("0"))
 }
 
+/// Whether a `:fibres` strand's baked self-shadow is used (E2, on trial): `BROOD_GUI_FIBRE_BAKE=0`
+/// shades it by the shadow maps alone, to compare. The shader's `FIBRE_BAKE`.
+pub(super) fn fibre_bake() -> u32 {
+    u32::from(std::env::var("BROOD_GUI_FIBRE_BAKE").as_deref() != Ok("0"))
+}
+
 /// A trial of what a scene's hair costs on the card, for measuring only
 /// (`BROOD_GUI_HAIR_TRIAL`): 0 drawn as ever (the default), 1 its coverage alone, lit by
 /// nothing, 2 without its hair-on-hair shadow. The shader's `HAIR_TRIAL`.
@@ -687,6 +693,7 @@ impl MeshGpu {
                         constants: &[
                             ("SAMPLES", f64::from(samples)),
                             ("HAIR_TRIAL", f64::from(hair_trial())),
+                            ("FIBRE_BAKE", f64::from(fibre_bake())),
                         ],
                         ..Default::default()
                     },

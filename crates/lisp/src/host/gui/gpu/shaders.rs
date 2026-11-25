@@ -973,6 +973,9 @@ struct VertexOut {
     @location(7) eye_up: vec3<f32>,
     // a `:fibres` strand (E1): its real width and its drawn width, in pixels, for its coverage
     @location(8) strand_px: vec2<f32>,
+    // a `:fibres` strand's baked self-shadow (E2): the hairs crossed toward L are max(0, x + yzw·L),
+    // yzw turned into the world
+    @location(9) visibility: vec4<f32>,
 };
 
 // a vertex morphed, and the matrix that skins and places it
@@ -1043,6 +1046,7 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
     out.eye_axis = vec3<f32>(0.0);
     out.eye_up = vec3<f32>(0.0);
     out.strand_px = vec2<f32>(0.0);
+    out.visibility = vec4<f32>(0.0);
     if (draw.flags.x == 6u && draw.eye_centres[0].w > 0.0) {
         // `mesh::eye_frame`: the eye whose centre at rest is nearest, moved as this vertex is
         var index = 0u;
@@ -1065,6 +1069,8 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
         out.normal = ribbon.normal;
         out.tangent = vec4<f32>(direction, ribbon.coverage);
         out.strand_px = ribbon.pixels;
+        // (its tangent slot carries its baked self-shadow, E2: a strand's direction is its normal)
+        out.visibility = vec4<f32>(input.tangent.x, (posed.matrix * vec4<f32>(input.tangent.yzw, 0.0)).xyz);
     }
     return out;
 }
@@ -1076,6 +1082,11 @@ override SAMPLES: u32 = 4u;
 // a trial of what hair costs (`BROOD_GUI_HAIR_TRIAL`): 0 drawn as ever, 1 its coverage
 // alone (lit by nothing: its base colour), 2 with no hair-on-hair shadow
 override HAIR_TRIAL: u32 = 0u;
+// a `:fibres` strand's baked self-shadow used (E2, `BROOD_GUI_FIBRE_BAKE`: 1, the default) or not (0)
+override FIBRE_BAKE: u32 = 1u;
+// a `:fibres` fragment's strand value and baked self-shadow, set by `mesh_lit` for `shade`
+var<private> fibre_strand: f32 = 0.0;
+var<private> fibre_visibility: vec4<f32> = vec4<f32>(0.0);
 
 // a `:hair` surface's coverage step at `sample`, as `mesh::HAIR_COVERAGE_STEPS` holds them:
 // eight, (k + 0.5) / 8 in an order that spreads them; with four samples the four of them that
@@ -1868,6 +1879,68 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
     return seen;
 }
 
+
+// E1, on trial: hair lit as Karis 2016 does it (UE4's `HairShading`): Marschner's three paths
+// made cheap. R, the white shine off the cuticle, shifted toward the root; TT, light through the
+// fibre, tinted by its colour (lights her outline from behind); TRT, the second, coloured shine;
+// and Karis's stand-in for light scattered through many fibres, a wrapped Lambert about a normal
+// facing the viewer, tinted deeper the more it was shadowed. `tangent` the strand's direction,
+// `seen` how much of the light its shadow lets through. Brood's lights put no 1/π on diffuse,
+// so the whole is π times UE's.
+fn hair_gaussian(width: f32, angle: f32) -> f32 {
+    return exp(-0.5 * angle * angle / (width * width)) / (2.50662827 * width);
+}
+
+// Schlick at hair's index, 1.55
+fn hair_fresnel(cosine: f32) -> f32 {
+    return 0.0465 + 0.9535 * pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
+}
+
+fn karis_hair(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: vec3<f32>, seen: f32) -> vec3<f32> {
+    let roughness = clamp(draw.material.x, 1.0 / 255.0, 1.0);
+    // each strand a little rougher or smoother than the next (`_STRAND`, E1)
+    let width = roughness * roughness * (0.85 + 0.3 * fract(fibre_strand * 7.13));
+    let sin_light = clamp(dot(tangent, to_light), -1.0, 1.0);
+    let sin_view = clamp(dot(tangent, view), -1.0, 1.0);
+    let cos_difference = cos(0.5 * abs(asin(sin_view) - asin(sin_light)));
+    let light_across = to_light - sin_light * tangent;
+    let view_across = view - sin_view * tangent;
+    let cos_phi = dot(light_across, view_across)
+        * inverseSqrt(dot(light_across, light_across) * dot(view_across, view_across) + 1e-4);
+    let cos_half_phi = sqrt(clamp(0.5 + 0.5 * cos_phi, 0.0, 1.0));
+    // the cuticle's tilt (2°) and the index the fibre's cross-section shows (Karis's fit)
+    // (each strand's own, ±1°: `_STRAND`)
+    let tilt = 0.035 + (fract(fibre_strand) - 0.5) * 0.035;
+    let index = 1.19 / cos_difference + 0.36 * cos_difference;
+    let colour = max(base, vec3<f32>(1e-4));
+    let along = sin_light + sin_view;
+    // R
+    let shift = 2.0 * sin(-2.0 * tilt)
+        * (cos(-2.0 * tilt) * cos_half_phi * sqrt(max(1.0 - sin_view * sin_view, 0.0)) + sin(-2.0 * tilt) * sin_view);
+    let reflected = hair_gaussian(width * 1.41421356 * max(cos_half_phi, 1e-3), along - shift)
+        * 0.25 * cos_half_phi
+        * hair_fresnel(sqrt(clamp(0.5 + 0.5 * dot(view, to_light), 0.0, 1.0)));
+    // TT
+    let inverse = 1.0 / index;
+    let entry = cos_half_phi * (1.0 + inverse * (0.6 - 0.8 * cos_phi));
+    let entering = hair_fresnel(cos_difference * sqrt(clamp(1.0 - entry * entry, 0.0, 1.0)));
+    let through = pow(colour, vec3<f32>(0.5 * sqrt(max(1.0 - entry * entry * inverse * inverse, 0.0)) / cos_difference));
+    let transmitted = hair_gaussian(width * 0.5, along - tilt)
+        * exp(-3.65 * cos_phi - 3.98) * (1.0 - entering) * (1.0 - entering) * through;
+    // TRT
+    let inside = hair_fresnel(cos_difference * 0.5);
+    let twice = pow(colour, vec3<f32>(0.8 / cos_difference));
+    let second = hair_gaussian(width * 2.0, along - 4.0 * tilt)
+        * exp(17.0 * cos_phi - 16.78) * (1.0 - inside) * (1.0 - inside) * inside * twice;
+    // light scattered through many fibres
+    let facing = safe_normalize(view - tangent * sin_view);
+    let wrapped = clamp((dot(facing, to_light) + 1.0) * 0.25, 0.0, 1.0);
+    let scatter = 0.31830989 * mix(wrapped, 1.0 - abs(sin_light), 0.33);
+    let luminance = max(dot(colour, vec3<f32>(0.2126, 0.7152, 0.0722)), 1e-4);
+    let tint = pow(colour / luminance, vec3<f32>(1.0 - clamp(seen, 0.0, 1.0)));
+    let shine = vec3<f32>(reflected * draw.material.y * 2.0) + transmitted + second;
+    return 3.14159265 * (shine + sqrt(colour) * scatter * tint);
+}
 // (`diffuse_normal` is what the light falls on and `mirror_surface` the surface a reflection must
 // not go under: `normal` and `surface_normal` but for an `:eye` under its cornea, ADR-796)
 fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>, curvature: f32, specular_kept: f32, diffuse_normal: vec3<f32>, mirror_surface: vec3<f32>, under_cornea: vec4<f32>) -> vec3<f32> {
@@ -1926,6 +1999,21 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         }
         let mirror_lambert = max(dot(normal, to_light), 0.0);
         let half_vector = safe_normalize(to_light + view);
+        // a `:fibres` strand (E1, on trial): Karis's three paths and his scattered light, all of it
+        // under the hair's own shadow
+        if ((draw.flags.y & 512u) != 0u) {
+            // its baked self-shadow where it has one (E2): the hairs crossed toward this light, each
+            // passing some of it and tinting it (her ginger's one fibre (0.98, 0.86, 0.63), 39's
+            // starting numbers) and scattering a little away; the shadow maps' estimate otherwise
+            var through = vec3<f32>(seen);
+            if (dot(fibre_visibility, fibre_visibility) > 0.0) {
+                let crossed = max(0.0, fibre_visibility.x + dot(fibre_visibility.yzw, to_light));
+                through = pow(vec3<f32>(0.98, 0.86, 0.63), vec3<f32>(crossed)) * exp(-0.03 * crossed);
+            }
+            let shadowed = dot(through, vec3<f32>(0.2126, 0.7152, 0.0722));
+            out = out + light.color.rgb * arriving * through * karis_hair(base, strand, view, to_light, shadowed);
+            continue;
+        }
         if (draw.flags.x == 4u || draw.flags.x == 5u) {
             // the two highlights' shifts (`:shift`, ADR-799) and the second one's colour
             // (`:sheen`, else the hair's own)
@@ -2092,6 +2180,15 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
 // the hair's front pass (`fs_hair_front`) keeps the early depth test (ADR-802)
 fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: vec4<f32>, occlusion_texel: vec4<f32>, detail_texel: vec4<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>, alpha: f32) -> vec4<f32> {
     var base = srgb_to_linear(texel.rgb) * draw.color.rgb;
+    // a `:fibres` strand (E1, E2): its own lightness (`_STRAND`, ±20 %), darker toward its root, and
+    // its value and baked self-shadow handed to the light loop
+    let fibres = (draw.flags.y & 512u) != 0u;
+    if (fibres) {
+        fibre_strand = fragment.curvature;
+        fibre_visibility = select(vec4<f32>(0.0), fragment.visibility, FIBRE_BAKE == 1u);
+        let root = clamp(fragment.uv.y, 0.0, 1.0);
+        base = base * (0.8 + 0.4 * fract(fibre_strand)) * mix(1.0, 0.75, root * root);
+    }
     var normal = safe_normalize(fragment.normal);
     if (!front) {
         normal = -normal;
@@ -2151,7 +2248,8 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
     }
     // the ambient's occlusion: its map's, times the scene's screen-space ambient occlusion
     let occlusion = select(1.0, occlusion_texel.r, (draw.flags.y & 16u) != 0u)
-        * ambient_occlusion(fragment.world, surface_normal);
+        * ambient_occlusion(fragment.world, surface_normal)
+        * select(1.0, exp(-0.05 * max(fibre_visibility.x, 0.0)), fibres);
     // a soft shadow's taps turned by the pixel's noise, the CPU painter's at the same pixel
     let turn = 6.28318531 * pixel_noise(floor(fragment.clip.xy));
     // a hair's strand: the bitangent, as its UV v runs
