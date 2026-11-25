@@ -878,7 +878,12 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; `:cornea-radius` 0.0078 (the cornea is a cap of that sphere through the iris's edge),
 ;; `:iris-depth` 0.0033 (the flat iris under the cornea's top), `:ior` 1.376 (1 … 3; 1 bends
 ;; nothing), `:up [0 1 0]` (up in the iris's texture), `:pupil` 0.35 (its radius as a share
-;; of the iris's, 0 … 1; 0 draws none: set it as the light changes).
+;; of the iris's, 0 … 1; 0 draws none: set it as the light changes), `:concavity` 0.35 (the
+;; slope, at its edge, of the shallow bowl the iris is lit as, 0 … 4; 0 lights it flat).
+;; The light on the iris is bent toward the eye's axis on its way in, as the sight line is,
+;; so a lamp at the side still lights it (and none comes from behind the eye's front); with
+;; the bowl's slope, the side of the iris AWAY from a side light is the brighter one, as in
+;; a living eye, where a painted disc is evenly dim.
 ;; Under the cornea the sight line is bent (Snell) and followed to the iris's plane, and the
 ;; texture is read there: the iris is seen larger, and from the side it stays deep and shifts
 ;; under the cornea, where a painted ball's flattens. The pupil is drawn there too, a soft

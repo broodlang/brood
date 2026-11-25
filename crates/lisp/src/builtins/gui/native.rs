@@ -2081,7 +2081,7 @@ fn reflected_emitters_spec(
 /// A material's `:eye` (absent or nil: none) read into a `mesh::Eye` (ADR-796), or why it is
 /// not one: `{:eyes [{:centre [x y z] :axis [x y z] :iris-uv [u v]} …] :iris-uv-radius r}` —
 /// one or two eyes in the mesh's space at rest — with `:up [x y z]`, `:radius`,
-/// `:iris-radius`, `:cornea-radius`, `:iris-depth`, `:ior` and `:pupil` as it likes. A
+/// `:iris-radius`, `:cornea-radius`, `:iris-depth`, `:ior`, `:pupil` and `:concavity` as it likes. A
 /// mistake here is an eye drawn flat or looking the wrong way without a word, so each is
 /// refused with what it should be.
 fn eye_spec(
@@ -2090,8 +2090,9 @@ fn eye_spec(
     num: &dyn Fn(Value) -> f32,
 ) -> Result<Option<crate::host::gui::mesh::Eye>, String> {
     use crate::host::gui::mesh::{
-        DEFAULT_CORNEA_RADIUS, DEFAULT_EYE_IOR, DEFAULT_EYE_RADIUS, DEFAULT_IRIS_DEPTH,
-        DEFAULT_IRIS_RADIUS, DEFAULT_PUPIL, Eye, EyeAt, MAX_EYES,
+        DEFAULT_CORNEA_RADIUS, DEFAULT_EYE_IOR, DEFAULT_EYE_RADIUS, DEFAULT_IRIS_CONCAVITY,
+        DEFAULT_IRIS_DEPTH, DEFAULT_IRIS_RADIUS, DEFAULT_PUPIL, Eye, EyeAt, MAX_EYES,
+        MAX_IRIS_CONCAVITY,
     };
     let map = match given {
         None | Some(Value::Nil) => return Ok(None),
@@ -2273,6 +2274,18 @@ fn eye_spec(
             ));
         }
     };
+    let concavity = match heap.map_get(map, value::kw("concavity")) {
+        None | Some(Value::Nil) => DEFAULT_IRIS_CONCAVITY,
+        Some(given) if is_number(given) && (0.0..=MAX_IRIS_CONCAVITY).contains(&num(given)) => {
+            num(given)
+        }
+        Some(given) => {
+            return Err(format!(
+                "an :eye's :concavity is how steeply the iris, lit as a shallow bowl, slopes up at its edge, a number from 0 (lit flat) to {MAX_IRIS_CONCAVITY}, not {}",
+                print(given)
+            ));
+        }
+    };
     let iris_uv_radius = match heap.map_get(map, value::kw("iris-uv-radius")) {
         Some(given) if is_number(given) && num(given) > 0.0 && num(given) <= 1.0 => num(given),
         other => {
@@ -2292,6 +2305,7 @@ fn eye_spec(
         ior,
         iris_uv_radius,
         pupil,
+        concavity,
     }))
 }
 
@@ -4305,8 +4319,8 @@ mod gui_scene_light_tests {
     fn an_eyes_optics_read_and_default() {
         // ADR-796: where its eyes are in the mesh at rest, and their shape
         use crate::host::gui::mesh::{
-            DEFAULT_CORNEA_RADIUS, DEFAULT_EYE_IOR, DEFAULT_EYE_RADIUS, DEFAULT_IRIS_DEPTH,
-            DEFAULT_IRIS_RADIUS, DEFAULT_PUPIL, EyeAt, Surface,
+            DEFAULT_CORNEA_RADIUS, DEFAULT_EYE_IOR, DEFAULT_EYE_RADIUS, DEFAULT_IRIS_CONCAVITY,
+            DEFAULT_IRIS_DEPTH, DEFAULT_IRIS_RADIUS, DEFAULT_PUPIL, EyeAt, Surface,
         };
         let one = "{:centre [0.03 1.5 0.1] :axis [0 0 2] :iris-uv [0.3 0.7]}";
         let scene = scene_with(
@@ -4345,12 +4359,18 @@ mod gui_scene_light_tests {
             (eye.ior, eye.pupil, eye.iris_uv_radius),
             (DEFAULT_EYE_IOR, DEFAULT_PUPIL, 0.1)
         );
+        assert_eq!(eye.concavity, DEFAULT_IRIS_CONCAVITY);
+        assert_eq!(
+            (DEFAULT_EYE_IOR, DEFAULT_PUPIL, DEFAULT_IRIS_CONCAVITY),
+            (1.376, 0.35, 0.35),
+            "what std/gui.blsp says"
+        );
         // a pair, every key given
         let other = "{:centre [-0.03 1.5 0.1] :axis [0 0 1] :iris-uv [0.7 0.3]}";
         let scene = scene_with(
             "[]",
             &format!(
-                "{{:surface :eye :coat [1 0.04] :eye {{:eyes [{one} {other}] :iris-uv-radius 0.1 :up [0 3 0] :radius 0.016 :iris-radius 0.006 :cornea-radius 0.008 :iris-depth 0.003 :ior 1.3 :pupil 0}}}}"
+                "{{:surface :eye :coat [1 0.04] :eye {{:eyes [{one} {other}] :iris-uv-radius 0.1 :up [0 3 0] :radius 0.016 :iris-radius 0.006 :cornea-radius 0.008 :iris-depth 0.003 :ior 1.3 :pupil 0 :concavity 0.6}}}}"
             ),
         )
         .expect("two eyes");
@@ -4368,7 +4388,7 @@ mod gui_scene_light_tests {
             ),
             (0.016, 0.006, 0.008, 0.003)
         );
-        assert_eq!((eye.ior, eye.pupil), (1.3, 0.0));
+        assert_eq!((eye.ior, eye.pupil, eye.concavity), (1.3, 0.0, 0.6));
         assert_eq!(material.coat, Some([1.0, 0.04]), "an eye keeps its coat");
         // on another surface the optics are read and checked, and used by none
         let scene = scene_with(
@@ -4485,6 +4505,12 @@ mod gui_scene_light_tests {
             refused(
                 eye(&format!(":ior {given}")),
                 ":ior is the refractive index",
+            );
+        }
+        for given in ["-0.1", "4.5", ":deep"] {
+            refused(
+                eye(&format!(":concavity {given}")),
+                ":concavity is how steeply the iris",
             );
         }
         for given in ["-0.1", "1.5", "[0.3]"] {

@@ -126,6 +126,8 @@ set each frame. Under the cornea the sight line is bent (`:ior`, 1.376) and foll
 iris's plane, where the texture is read: the iris is seen larger and, from the side, deep under
 the cornea instead of flat on a ball. The pupil is drawn there (`:pupil`, its share of the
 iris), and the highlights — the material's and its `:coat`'s — are the cornea's sphere's. The
+iris is lit as a shallow bowl (`:concavity`, 0.35) by light bent toward the eye's axis on its
+way in: a lamp at the side still lights it, and the side away from the lamp is the brighter. The
 white is drawn as a `:cutout` is. `:radius`, `:iris-radius`, `:cornea-radius`, `:iris-depth`
 and `:up` shape it (a grown person's by default). A malformed `:eye`, or an `:eye` surface
 without one, is an error raised by `gui/draw`. Every other surface draws as before.

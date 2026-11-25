@@ -692,7 +692,7 @@ struct DrawU {
     eye_up: vec4<f32>,          // xyz: up in the iris's texture, at rest; the refractive index
     eye_shape: vec4<f32>,       // the eyeball's radius, the iris's, the cornea's, the iris's depth under the cornea's top
     eye_uv: vec4<f32>,          // the middle of the first eye's iris in the texture, then the second's
-    eye_iris: vec4<f32>,        // the iris's radius in the texture, the pupil's share of the iris
+    eye_iris: vec4<f32>,        // the iris's radius in the texture, the pupil's share of the iris, the slope of the bowl the iris is lit as
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
@@ -1473,6 +1473,8 @@ struct EyeSeen {
     normal: vec3<f32>,
     cornea: f32,
     curvature: f32,
+    iris_normal: vec3<f32>,
+    axis: vec3<f32>,
 };
 
 // `mesh::eye_seen` (ADR-796): the line through the fragment met with the cornea's sphere on the
@@ -1485,6 +1487,8 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
     seen.pupil = 0.0;
     seen.normal = normal;
     seen.cornea = 0.0;
+    seen.iris_normal = normal;
+    seen.axis = vec3<f32>(0.0);
     seen.curvature = curvature;
     let scale = sqrt(dot(frame_axis, frame_axis));
     if (scale <= 1e-12) {
@@ -1547,12 +1551,16 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
     seen.normal = safe_normalize(normal + (cornea_normal - normal) * cornea);
     seen.cornea = cornea;
     seen.curvature = curvature + (1.0 / cornea_radius - curvature) * cornea;
+    // the iris as a shallow bowl: its normal leans toward the axis, more the further out
+    let slope = draw.eye_iris.z / max(rim, 1.0);
+    seen.iris_normal = safe_normalize(axis - slope * (right * across + up * above));
+    seen.axis = axis;
     return seen;
 }
 
 // (`diffuse_normal` is what the light falls on and `mirror_surface` the surface a reflection must
 // not go under: `normal` and `surface_normal` but for an `:eye` under its cornea, ADR-796)
-fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>, curvature: f32, specular_kept: f32, diffuse_normal: vec3<f32>, mirror_surface: vec3<f32>) -> vec3<f32> {
+fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>, curvature: f32, specular_kept: f32, diffuse_normal: vec3<f32>, mirror_surface: vec3<f32>, under_cornea: vec4<f32>) -> vec3<f32> {
     var out = base * ambient(diffuse_normal) * occlusion;
     let f0 = draw.lobes.w;
     // a `:hair` surface's highlights: as sharp as its roughness asks
@@ -1585,8 +1593,27 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             }
         }
         let to_light = arrival.to_light;
-        let facing = dot(diffuse_normal, to_light);
-        let lambert = max(facing, 0.0);
+        // `mesh::light_under_cornea`: under a cornea the light is bent toward the eye's axis on
+        // its way in, and only what the eye's front does not reflect gets in
+        var falling = to_light;
+        var let_in = 1.0;
+        if (under_cornea.w > 0.0) {
+            let cosine = dot(under_cornea.xyz, to_light);
+            if (cosine <= 0.0) {
+                let_in = 0.0;
+            } else {
+                let ratio = under_cornea.w;
+                let inside = max(1.0 - ratio * ratio * (1.0 - cosine * cosine), 0.0);
+                falling = ratio * to_light + (sqrt(inside) - ratio * cosine) * under_cornea.xyz;
+                let head_on = (1.0 - ratio) / (1.0 + ratio);
+                let_in = 1.0 - fresnel(head_on * head_on, cosine);
+            }
+        }
+        let facing = dot(diffuse_normal, falling);
+        var lambert = max(facing, 0.0);
+        if (under_cornea.w > 0.0) {
+            lambert = lambert * let_in;
+        }
         let mirror_lambert = max(dot(normal, to_light), 0.0);
         let half_vector = safe_normalize(to_light + view);
         if (draw.flags.x == 4u || draw.flags.x == 5u) {
@@ -1764,7 +1791,8 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     // the bent sight line meets the iris, the pupil is drawn there, and the highlights are the
     // cornea's; the light still falls on the surface's own normal
     var curvature = fragment.curvature;
-    let diffuse_normal = normal;
+    var diffuse_normal = normal;
+    var under_cornea = vec4<f32>(0.0);
     var mirror_surface = surface_normal;
     if (draw.flags.x == 6u && draw.eye_centres[0].w > 0.0) {
         let seen = eye_seen(fragment.eye_centre, fragment.eye_axis, fragment.eye_up, fragment.world, view, fragment.uv, normal, curvature);
@@ -1774,6 +1802,8 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
             base = srgb_to_linear(under_texel.rgb) * draw.color.rgb * (1.0 - seen.pupil);
             normal = seen.normal;
             mirror_surface = seen.normal;
+            diffuse_normal = seen.iris_normal;
+            under_cornea = vec4<f32>(seen.axis, 1.0 / max(draw.eye_up.w, 1.0));
             curvature = seen.curvature;
         }
     }
@@ -1788,7 +1818,7 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     if (draw.flags.x == 5u) {
         strand = safe_normalize(fragment.tangent.xyz);
     }
-    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand, curvature, specular_kept, diffuse_normal, mirror_surface), scene.params.x);
+    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand, curvature, specular_kept, diffuse_normal, mirror_surface, under_cornea), scene.params.x);
     return MeshFragment(vec4<f32>(lit * alpha, alpha), mask);
 }
 

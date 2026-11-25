@@ -258,6 +258,7 @@ fn the_mesh_shader_validates() {
         ior: 1.4,
         iris_uv_radius: 0.1,
         pupil: 0.3,
+        concavity: 0.5,
     };
     let eye_floats = |surface: Surface| -> Vec<f32> {
         let eyed = Draw {
@@ -288,7 +289,7 @@ fn the_mesh_shader_validates() {
             0.0, 1.0, 0.0, 1.4, // up, the index
             0.012, 0.006, 0.008, 0.003, // the shape
             0.3, 0.7, 0.7, 0.2, // the irises in the texture
-            0.1, 0.3, 0.0, 0.0, // the iris's radius there, the pupil
+            0.1, 0.3, 0.5, 0.0, // the iris's radius there, the pupil, the bowl's slope
         ]
     );
     assert_eq!(eye_floats(Surface::Cutout), [0.0; 32], "no other surface");
@@ -302,6 +303,14 @@ fn the_mesh_shader_validates() {
     assert!(MESH_SRC.contains("let cornea = 1.0 - smoothstep(0.85, 1.0, entry_rim);"));
     assert!(MESH_SRC.contains("if (draw.flags.x == 6u && draw.eye_centres[0].w > 0.0) {"));
     assert!(MESH_SRC.contains("@location(5) eye_centre: vec4<f32>,"));
+    // the iris lit as a bowl, by light bent at the eye's front: the CPU painter's arithmetic
+    assert!(MESH_SRC.contains(
+        "seen.iris_normal = safe_normalize(axis - slope * (right * across + up * above));"
+    ));
+    assert!(MESH_SRC.contains(
+        "falling = ratio * to_light + (sqrt(inside) - ratio * cosine) * under_cornea.xyz;"
+    ));
+    assert!(MESH_SRC.contains("let_in = 1.0 - fresnel(head_on * head_on, cosine);"));
     // its clear shell is cut out of the picture and of the shadow maps, as a cutout's is
     assert!(MESH_SRC.contains("if (draw.flags.x == 2u || draw.flags.x == 6u) {"));
     assert!(

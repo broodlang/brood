@@ -717,6 +717,10 @@ pub const DEFAULT_CORNEA_RADIUS: f32 = 0.0078;
 pub const DEFAULT_IRIS_DEPTH: f32 = 0.0033;
 /// The pupil's radius, a share of the iris's, unless the material says.
 pub const DEFAULT_PUPIL: f32 = 0.35;
+/// The slope of the bowl an iris is lit as, at its edge, unless the material says: about 19°.
+pub const DEFAULT_IRIS_CONCAVITY: f32 = 0.35;
+/// The steepest bowl a material may ask for.
+pub const MAX_IRIS_CONCAVITY: f32 = 4.0;
 /// How soft the pupil's edge is: it fades over this share of its radius either side.
 pub const PUPIL_EDGE: f32 = 0.08;
 /// Where, as a share of the iris's radius from the eye's axis, the cornea's own normal begins
@@ -760,6 +764,9 @@ pub struct Eye {
     pub iris_uv_radius: f32,
     /// The pupil's radius as a share of the iris's (0: none drawn).
     pub pupil: f32,
+    /// How steeply the iris, lit as a shallow bowl, slopes up at its edge: the tangent of the
+    /// angle its normal leans toward the axis there (0: lit flat).
+    pub concavity: f32,
 }
 
 impl Eye {
@@ -1877,6 +1884,39 @@ pub struct EyeSeen {
     pub cornea: f32,
     /// How sharply the reflecting surface curves there.
     pub curvature: f32,
+    /// The normal the light falls on under the cornea: the iris's, lit as a shallow bowl — the
+    /// eye's axis leaning toward itself by the material's `concavity` times the distance from
+    /// it (as a share of the iris's radius, 1 at most). The mesh's when not `through`.
+    pub iris_normal: [f32; 3],
+    /// The eye's unit axis, about which the light is bent on its way in ([`light_under_cornea`]).
+    pub axis: [f32; 3],
+}
+
+/// What bends the light on its way to a surface under a cornea ([`shade`]): the eye's unit
+/// `axis`, the normal of its front, and `ratio`, 1 over its refractive index.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnderCornea {
+    pub axis: [f32; 3],
+    pub ratio: f32,
+}
+
+/// The light reaching a surface under a cornea (ADR-796): `to_light` the unit direction to
+/// the light outside. Answers the unit direction it comes from inside, bent toward the eye's
+/// axis by Snell's law at the eye's front, and the share of it that gets in: none from behind
+/// the front, the rest less what the front reflects (Schlick, the reflectance at normal
+/// incidence that of the index). So a light from the side still lights the iris, from 46° off
+/// the axis at most, where on a bare disc it would graze it. The shader's is the same.
+pub fn light_under_cornea(under: &UnderCornea, to_light: [f32; 3]) -> ([f32; 3], f32) {
+    let cosine = dot(under.axis, to_light);
+    if cosine <= 0.0 {
+        return (to_light, 0.0);
+    }
+    let ratio = under.ratio;
+    let inside = (1.0 - ratio * ratio * (1.0 - cosine * cosine)).max(0.0);
+    let bend = inside.sqrt() - ratio * cosine;
+    let bent = [0, 1, 2].map(|index| ratio * to_light[index] + bend * under.axis[index]);
+    let head_on = (1.0 - ratio) / (1.0 + ratio);
+    (bent, 1.0 - fresnel(head_on * head_on, cosine))
 }
 
 /// What the sight line through a fragment of an `:eye` surface meets (ADR-796): `world` the
@@ -1902,6 +1942,8 @@ pub fn eye_seen(
         normal,
         cornea: 0.0,
         curvature,
+        iris_normal: normal,
+        axis: [0.0; 3],
     };
     let scale = dot(frame.axis, frame.axis).sqrt();
     let Some(at) = eye.eyes.get((frame.index + 0.5) as usize) else {
@@ -1977,6 +2019,11 @@ pub fn eye_seen(
     let entry_out = [0, 1, 2].map(|index| entry[index] - axis[index] * entry_along);
     let entry_rim = dot(entry_out, entry_out).sqrt() / iris_radius;
     let cornea = 1.0 - smoothstep(CORNEA_EDGE, 1.0, entry_rim);
+    // the iris as a shallow bowl: its normal leans toward the axis, more the further out
+    let slope = eye.concavity / rim.max(1.0);
+    let iris_normal = normalize(
+        [0, 1, 2].map(|index| axis[index] - slope * (right[index] * across + up[index] * above)),
+    );
     EyeSeen {
         through: true,
         uv: [
@@ -1989,6 +2036,8 @@ pub fn eye_seen(
         ),
         cornea,
         curvature: curvature + (1.0 / cornea_radius - curvature) * cornea,
+        iris_normal,
+        axis,
     }
 }
 
@@ -2006,7 +2055,9 @@ pub fn eye_seen(
 /// reflection under it is faded out), `emitters` the scene's [`emitter_plan`], and
 /// `diffuse_normal` the unit normal the diffuse and the ambient light fall on: `normal` itself
 /// for every surface but an `:eye` under its cornea (ADR-796), whose highlights are the
-/// cornea's (`normal`) while the light falls on what is under it.
+/// cornea's (`normal`) while the light falls on what is under it — bent on its way in and
+/// lessened by what the eye's front reflects when `under_cornea` says so
+/// ([`light_under_cornea`]; none for every other surface).
 ///
 /// Every surface but `:hair` and `:strands` also reflects its surroundings (ADR-795), a lobe
 /// of its `:lobes` at a time and then its `:coat`: the ambient light's radiance along the
@@ -2040,6 +2091,7 @@ pub fn shade(
     surface_normal: [f32; 3],
     emitters: &EmitterPlan,
     diffuse_normal: [f32; 3],
+    under_cornea: Option<&UnderCornea>,
 ) -> [f32; 3] {
     let ambient = ambient(scene, diffuse_normal);
     let skin = (material.surface == Surface::Skin)
@@ -2061,12 +2113,21 @@ pub fn shade(
     for (index, light) in scene.lights.iter().take(MAX_LIGHTS).enumerate() {
         let (to_light, arriving) = light_arrival(light, world);
         let seen = visibility.get(index).copied().unwrap_or(1.0);
-        let facing = dot(diffuse_normal, to_light);
+        // under a cornea the light is bent on its way in, and only some of it gets in (ADR-796)
+        let (falling, let_in) = match under_cornea {
+            Some(under) => light_under_cornea(under, to_light),
+            None => (to_light, 1.0),
+        };
+        let facing = dot(diffuse_normal, falling);
         // the light past the terminator is light under the skin, which the body's own shadow
         // there would cut off in a hard line: the shadow fades out of what the scattering
         // moved toward the terminator (ADR-793)
         let scattered_seen = 1.0 + (seen - 1.0) * smoothstep(0.0, 0.3, facing);
-        let lambert = facing.max(0.0);
+        // (under a cornea, the share of the light that got in)
+        let lambert = match under_cornea {
+            Some(_) => facing.max(0.0) * let_in,
+            None => facing.max(0.0),
+        };
         // the highlights' own: the reflecting normal's (the same number but under a cornea)
         let mirror_lambert = dot(normal, to_light).max(0.0);
         let half = normalize([
@@ -3769,9 +3830,10 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                 + corners[2].curvature * weights[2];
             // an eye (ADR-796): the mesh says only which pixels it covers. Under the cornea the
             // texture is read where the bent sight line meets the iris, the pupil is drawn
-            // there, and the highlights are the cornea's; the light still falls on the
-            // surface's own normal
-            let diffuse_normal = normal;
+            // there, and the highlights are the cornea's; the light, bent on its way in,
+            // falls on the iris as a shallow bowl
+            let mut diffuse_normal = normal;
+            let mut under_cornea = None;
             let mut mirror_surface = surface_normal;
             if let Some(optics) = material.eye_optics() {
                 let frame = EyeFrame {
@@ -3795,6 +3857,11 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     ];
                     normal = seen.normal;
                     mirror_surface = seen.normal;
+                    diffuse_normal = seen.iris_normal;
+                    under_cornea = Some(UnderCornea {
+                        axis: seen.axis,
+                        ratio: 1.0 / optics.ior.max(1.0),
+                    });
                     curvature = seen.curvature;
                 }
             }
@@ -3877,6 +3944,7 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     mirror_surface,
                     context.emitters,
                     diffuse_normal,
+                    under_cornea.as_ref(),
                 ),
                 scene.exposure,
             );
@@ -4468,6 +4536,7 @@ mod tests {
             [0.0, 0.0, 1.0],
             &emitter_plan(&lit),
             [0.0, 0.0, 1.0],
+            None,
         )
     }
 
@@ -4999,6 +5068,7 @@ mod tests {
                 normal,
                 &emitter_plan(&lit),
                 normal,
+                None,
             )[0]
         };
         let across = shine([1.0, 0.0, 0.0]);
@@ -5056,6 +5126,7 @@ mod tests {
             [0.0, 0.0, 1.0],
             &emitter_plan(&zero),
             [0.0, 0.0, 1.0],
+            None,
         );
         assert!(lit.iter().all(|channel| channel.is_finite()));
     }
@@ -5088,6 +5159,7 @@ mod tests {
             normal,
             &emitter_plan(&lit),
             normal,
+            None,
         )[0]
     }
 
@@ -5735,6 +5807,7 @@ mod tests {
                 normal,
                 &emitter_plan(&sky),
                 normal,
+                None,
             );
             let by_sh = shade(
                 &sh,
@@ -5751,6 +5824,7 @@ mod tests {
                 normal,
                 &emitter_plan(&sh),
                 normal,
+                None,
             );
             for channel in 0..3 {
                 assert!(
@@ -5794,6 +5868,7 @@ mod tests {
             normal,
             &emitter_plan(&lit),
             normal,
+            None,
         )[0]
     }
 
@@ -6258,6 +6333,7 @@ mod tests {
                 normal,
                 &emitter_plan(&lit),
                 normal,
+                None,
             )
         };
         assert_eq!(shaded(&shiny, 0.0), shaded(&matte, 1.0));
@@ -6586,6 +6662,7 @@ mod tests {
             normal,
             &emitter_plan(lit),
             normal,
+            None,
         )
     }
 
@@ -6873,6 +6950,7 @@ mod tests {
                 normal,
                 plan,
                 normal,
+                None,
             )
         };
         let mut bare = unlit.clone();
@@ -6904,6 +6982,7 @@ mod tests {
                 surface,
                 &emitter_plan(&bare),
                 tilted,
+                None,
             )[0]
         };
         near(mapped(normal), kept * mapped(tilted));
@@ -7239,6 +7318,7 @@ mod tests {
                 normal,
                 &emitter_plan(&lit),
                 normal,
+                None,
             )[0]
         };
         near(highlight(0.0), 0.04 * (lobe_exponent(0.0) + 8.0) / 8.0);
@@ -7265,6 +7345,7 @@ mod tests {
             ior: DEFAULT_EYE_IOR,
             iris_uv_radius: 0.25,
             pupil: DEFAULT_PUPIL,
+            concavity: DEFAULT_IRIS_CONCAVITY,
         }
     }
 
@@ -7382,6 +7463,8 @@ mod tests {
                 normal: [0.0, 1.0, 0.0],
                 cornea: 0.0,
                 curvature: 7.0,
+                iris_normal: [0.0, 1.0, 0.0],
+                axis: [0.0; 3],
             }
         );
         // and a frame with no length (a vertex of another surface) is no eye at all
@@ -7506,6 +7589,7 @@ mod tests {
                 normal,
                 &emitter_plan(&lit),
                 diffuse,
+                None,
             )
         };
         // no specular: only the normal the light falls on matters
@@ -7677,5 +7761,131 @@ mod tests {
             assert!(with_optics.eye_optics().is_none());
             assert_eq!(paint_eye(with_optics), paint_eye(plain), "{surface:?}");
         }
+    }
+
+    #[test]
+    fn light_under_a_cornea_is_bent_toward_the_axis_as_snell_says_and_none_comes_from_behind() {
+        let under = UnderCornea {
+            axis: [0.0, 0.0, 1.0],
+            ratio: 1.0 / DEFAULT_EYE_IOR,
+        };
+        // from 60° off the axis it arrives asin(sin 60° / n) off it, still a unit direction,
+        // less what a surface of that index reflects there
+        let outside = 60f32.to_radians();
+        let inside = (outside.sin() / DEFAULT_EYE_IOR).asin();
+        let (bent, let_in) = light_under_cornea(&under, [outside.sin(), 0.0, outside.cos()]);
+        near(bent[0], inside.sin());
+        near(bent[2], inside.cos());
+        assert_eq!(bent[1], 0.0);
+        let head_on = ((DEFAULT_EYE_IOR - 1.0) / (DEFAULT_EYE_IOR + 1.0)).powi(2);
+        near(let_in, 1.0 - fresnel(head_on, outside.cos()));
+        assert!(let_in > 0.9 && let_in < 0.98, "{let_in}");
+        // down the axis: straight in, all but the 2.5 % reflected
+        let (straight, most) = light_under_cornea(&under, [0.0, 0.0, 1.0]);
+        near(straight[2], 1.0);
+        near(most, 1.0 - head_on);
+        // grazing the front: from the critical angle, and next to none of it
+        let grazing = [0.9999f32, 0.0, (1.0 - 0.9999f32 * 0.9999).sqrt()];
+        let (critical, little) = light_under_cornea(&under, grazing);
+        near(critical[0], 0.9999 / DEFAULT_EYE_IOR);
+        assert!(little < 0.1, "{little}");
+        // from behind the front: none
+        assert_eq!(light_under_cornea(&under, [0.6, 0.0, -0.8]).1, 0.0);
+        // an index of 1 bends nothing and reflects nothing
+        let plain = UnderCornea {
+            axis: [0.0, 0.0, 1.0],
+            ratio: 1.0,
+        };
+        let (unbent, all) = light_under_cornea(&plain, [0.6, 0.0, 0.8]);
+        near(unbent[0], 0.6);
+        near(unbent[2], 0.8);
+        assert_eq!(all, 1.0);
+    }
+
+    #[test]
+    fn the_iris_is_lit_as_a_bowl_the_side_away_from_a_side_light_the_brighter() {
+        // an index of 1 for the sight line, so a point of the iris's plane is seen where it is
+        let eye = Eye {
+            ior: 1.0,
+            pupil: 0.0,
+            ..an_eye()
+        };
+        let (_, iris) = heights(&eye);
+        let seen_across = |eye: &Eye, share: f32| {
+            let world = [share * DEFAULT_IRIS_RADIUS, 0.0, iris];
+            seen_at(eye, &at_rest(), world, [0.0, 0.0, 1.0])
+        };
+        // the bowl's normal: the axis in the middle, leaning toward it by the concavity times
+        // the way out, and no further past the iris's edge
+        assert_eq!(seen_across(&eye, 0.0).iris_normal, [0.0, 0.0, 1.0]);
+        let half_way = seen_across(&eye, 0.5).iris_normal;
+        near(-half_way[0] / half_way[2], 0.5 * DEFAULT_IRIS_CONCAVITY);
+        let other_side = seen_across(&eye, -0.5).iris_normal;
+        near(other_side[0] / other_side[2], 0.5 * DEFAULT_IRIS_CONCAVITY);
+        assert_eq!(seen_across(&eye, 0.5).axis, [0.0, 0.0, 1.0]);
+        let flat = Eye {
+            concavity: 0.0,
+            ..eye.clone()
+        };
+        assert_eq!(seen_across(&flat, 0.7).iris_normal, [0.0, 0.0, 1.0]);
+        // a light 60° to the +x side of the axis, on a white iris with no highlights
+        let mut lit = scene(draw());
+        lit.sky = [0.0; 3];
+        lit.ground = [0.0; 3];
+        let outside = 60f32.to_radians();
+        lit.lights = vec![Light::directional(
+            [-outside.sin(), 0.0, -outside.cos()],
+            [1.0; 3],
+        )];
+        let matte = Material {
+            surface: Surface::Eye,
+            specular: 0.0,
+            ..Material::default()
+        };
+        let under = UnderCornea {
+            axis: [0.0, 0.0, 1.0],
+            ratio: 1.0 / DEFAULT_EYE_IOR,
+        };
+        let lit_at = |eye: &Eye, share: f32, under: Option<&UnderCornea>| {
+            shade(
+                &lit,
+                &matte,
+                [1.0; 3],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [0.0; 3],
+                1.0,
+                &[],
+                [0.0; 3],
+                0.0,
+                1.0,
+                [0.0, 0.0, 1.0],
+                &emitter_plan(&lit),
+                seen_across(eye, share).iris_normal,
+                under,
+            )[0]
+        };
+        // the far side faces the light the bowl's slope more, the near side less
+        let (near_side, middle, far_side) = (
+            lit_at(&eye, 0.8, Some(&under)),
+            lit_at(&eye, 0.0, Some(&under)),
+            lit_at(&eye, -0.8, Some(&under)),
+        );
+        assert!(far_side > middle * 1.1 && middle > near_side * 1.1);
+        // the middle: the cosine of the BENT light, times what got in
+        let inside = (outside.sin() / DEFAULT_EYE_IOR).asin();
+        let head_on = ((DEFAULT_EYE_IOR - 1.0) / (DEFAULT_EYE_IOR + 1.0)).powi(2);
+        near(
+            middle,
+            inside.cos() * (1.0 - fresnel(head_on, outside.cos())),
+        );
+        // … brighter than the bare disc's cosine of 60°: a side light reaches under a cornea
+        near(lit_at(&flat, 0.0, None), outside.cos());
+        assert!(middle > 1.4 * outside.cos());
+        // flat, it is lit evenly
+        assert_eq!(
+            lit_at(&flat, 0.8, Some(&under)),
+            lit_at(&flat, -0.8, Some(&under))
+        );
     }
 }

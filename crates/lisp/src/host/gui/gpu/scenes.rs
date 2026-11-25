@@ -1156,7 +1156,7 @@ pub(super) fn draw_uniform(
 /// `eye_centres` (each eye's centre at rest; the first's fourth float how many eyes there
 /// are), `eye_axes`, `eye_up` (and the refractive index), `eye_shape` (the eyeball's, iris's
 /// and cornea's radius, the iris's depth), `eye_uv` (each eye's iris in the texture) and
-/// `eye_iris` (the iris's radius in the texture, the pupil's share of it).
+/// `eye_iris` (the iris's radius in the texture, the pupil's share of it, the bowl's slope).
 fn eye_floats(material: &crate::host::gui::mesh::Material) -> [f32; 32] {
     let mut floats = [0.0f32; 32];
     let Some(eye) = material.eye_optics() else {
@@ -1178,6 +1178,7 @@ fn eye_floats(material: &crate::host::gui::mesh::Material) -> [f32; 32] {
     ]);
     floats[28] = eye.iris_uv_radius;
     floats[29] = eye.pupil;
+    floats[30] = eye.concavity;
     floats
 }
 
