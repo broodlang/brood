@@ -1084,6 +1084,8 @@ override SAMPLES: u32 = 4u;
 override HAIR_TRIAL: u32 = 0u;
 // a `:fibres` strand's baked self-shadow used (E2, `BROOD_GUI_FIBRE_BAKE`: 1, the default) or not (0)
 override FIBRE_BAKE: u32 = 1u;
+// how much of the baked hair count tints and dims the light (E2, `BROOD_GUI_FIBRE_DENSITY`, on trial)
+override FIBRE_DENSITY: f32 = 0.4;
 // a `:fibres` fragment's strand value and baked self-shadow, set by `mesh_lit` for `shade`
 var<private> fibre_strand: f32 = 0.0;
 var<private> fibre_visibility: vec4<f32> = vec4<f32>(0.0);
@@ -2007,7 +2009,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             // starting numbers) and scattering a little away; the shadow maps' estimate otherwise
             var through = vec3<f32>(seen);
             if (dot(fibre_visibility, fibre_visibility) > 0.0) {
-                let crossed = max(0.0, fibre_visibility.x + dot(fibre_visibility.yzw, to_light));
+                let crossed = FIBRE_DENSITY * max(0.0, fibre_visibility.x + dot(fibre_visibility.yzw, to_light));
                 through = pow(vec3<f32>(0.98, 0.86, 0.63), vec3<f32>(crossed)) * exp(-0.03 * crossed);
             }
             let shadowed = dot(through, vec3<f32>(0.2126, 0.7152, 0.0722));

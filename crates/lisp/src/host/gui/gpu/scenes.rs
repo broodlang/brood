@@ -331,6 +331,16 @@ pub(super) fn fibre_bake() -> u32 {
     u32::from(std::env::var("BROOD_GUI_FIBRE_BAKE").as_deref() != Ok("0"))
 }
 
+/// How much of the baked hair count tints and dims a `:fibres` strand's light (E2, on trial):
+/// `BROOD_GUI_FIBRE_DENSITY`, 0.4 by default. The shader's `FIBRE_DENSITY`.
+pub(super) fn fibre_density() -> f64 {
+    std::env::var("BROOD_GUI_FIBRE_DENSITY")
+        .ok()
+        .and_then(|text| text.trim().parse::<f64>().ok())
+        .filter(|density| density.is_finite() && *density >= 0.0)
+        .unwrap_or(0.4)
+}
+
 /// A trial of what a scene's hair costs on the card, for measuring only
 /// (`BROOD_GUI_HAIR_TRIAL`): 0 drawn as ever (the default), 1 its coverage alone, lit by
 /// nothing, 2 without its hair-on-hair shadow. The shader's `HAIR_TRIAL`.
@@ -694,6 +704,7 @@ impl MeshGpu {
                             ("SAMPLES", f64::from(samples)),
                             ("HAIR_TRIAL", f64::from(hair_trial())),
                             ("FIBRE_BAKE", f64::from(fibre_bake())),
+                            ("FIBRE_DENSITY", fibre_density()),
                         ],
                         ..Default::default()
                     },
