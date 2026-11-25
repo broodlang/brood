@@ -1,0 +1,47 @@
+;; tests/gui_headless_gpu_exit_test.blsp — a program that ends while one of its processes is
+;; still drawing to a headless window the GPU draws (`BROOD_GUI_HEADLESS=gpu`, ADR-798) ends
+;; cleanly.
+;;
+;; The offscreen painter's thread used to return when a request reached it after the exit
+;; gate shut, dropping its windows: each `GpuWindow`'s device was destroyed while the GPU
+;; driver's own exit handler was tearing the same state down, and the process died of a
+;; SIGSEGV (or an abort) after its work was done — every time, whichever way it ended. It
+;; needs a GPU, so it runs in a child runtime of its own and passes untested where the child
+;; says it has none (CI): `offscreen::tests::a_request_after_the_exit_gate_shut_drops_nothing`
+;; holds the rule there.
+(defmodule gui-headless-gpu-exit-test
+  (:use test)
+  (:use suite-helpers))
+
+(purge-stale-temp "headless-gpu-exit-")
+
+(def- app-source
+  (str "(defn keep-drawing (window step)\n"
+    "  (gui/draw window [[:clear] [:quad 100.0 60.0 60.0 40.0 [40 200 40] (* 0.01 step)]])\n"
+    "  (keep-drawing window (+ step 1)))\n"
+    "(let (window (try (gui/open \"ending\" 320 200) (catch e nil)))\n" "  (if (nil? window)\n"
+    "    (io/puts \"no-gpu\")\n" "    (do (spawn (keep-drawing window 0))\n"
+    "      (io/puts (str \"captured \" (get (gui/capture window) :width)))\n"
+    "      (proc/sleep 200)\n" "      (cond\n"
+    "        (= (os/env \"ENDING\") \"halt\") (system/halt 0)\n"
+    "        (= (os/env \"ENDING\") \"error\") (error \"ending by an error\")\n"
+    "        else nil))))\n"))
+
+(describe "a headless window the GPU draws, as its program ends (ADR-798)"
+  (test "no crash at exit while a process is still drawing: off the end, system/halt, an error"
+    (let (nest (sibling-binary "nest"))
+      (when (and nest (gui/available?))
+        (let (dir (temp-dir "headless-gpu-exit-")
+              script (path/join dir "app.blsp"))
+          (file/mkdir dir)
+          (file/spit script app-source)
+          (doseq (ending ["end" "halt" "error"])
+            (let (result (os/cmd nest
+                           ["run" script]
+                           {:env {"BROOD_GUI_HEADLESS" "gpu" "ENDING" ending} :dir dir})
+                  out (str (os/cmd-out result) (get result :stderr "")))
+              (when (not (includes? out "no-gpu"))
+                (is (includes? out "captured 320"))
+                (is (not (includes? out "fatal SIG")))
+                (is (not (includes? out "the offscreen painter is gone")))
+                (is (= [ending (get result :exit)] [ending (if (= ending "error") 1 0)]))))))))))

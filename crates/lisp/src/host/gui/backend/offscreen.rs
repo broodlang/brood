@@ -247,30 +247,54 @@ struct Painter {
 }
 
 fn serve(requests: Receiver<Request>) {
-    let mut painter = Painter {
+    let painter = Painter {
         families: default_families(),
         defaults: RenderDefaults::default(),
         windows: HashMap::new(),
         installed: HashMap::new(),
     };
+    // The loop ends only as the process exits, and what it hands back is never dropped: its
+    // windows' devices stay as they are while the driver's exit handler takes its state down.
+    let _kept = serve_requests(&requests, painter, enter_gate);
+    // And the thread stays, holding the channel's other end: a process still drawing as the
+    // program ends has its last frames queued unread, not an error to die of at exit.
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Handle `requests` with `painter` until the process is exiting (`gate` answers `None`, as
+/// `enter_gate` does once the exit gate is shut) or nobody can send any more, and hand the
+/// painter back UNDROPPED. A request that arrives after the gate shut is not handled, and
+/// the painter's windows are not dropped either: dropping a `GpuWindow` destroys its device,
+/// textures and pipelines, which is a call into a GPU driver whose own exit handler is
+/// tearing the same state down on another thread — the segfault a program got that ended
+/// while one of its processes was still drawing to a window the GPU draws (ADR-798: the
+/// thread used to `return` here, and its painter went with it).
+fn serve_requests<Gate>(
+    requests: &Receiver<Request>,
+    painter: Painter,
+    gate: impl Fn() -> Option<Gate>,
+) -> std::mem::ManuallyDrop<Painter> {
+    let mut painter = std::mem::ManuallyDrop::new(painter);
     loop {
         // Nothing waiting: the GPU targets draw the frames they owe, then the thread sleeps
         // on the next request. A window's redraw, without a compositor to ask for it.
         let request = match requests.try_recv() {
             Ok(request) => request,
-            Err(mpsc::TryRecvError::Disconnected) => return,
+            Err(mpsc::TryRecvError::Disconnected) => return painter,
             Err(mpsc::TryRecvError::Empty) => {
                 painter.paint_owed();
                 match requests.recv() {
                     Ok(request) => request,
-                    Err(_) => return,
+                    Err(_) => return painter,
                 }
             }
         };
         // Once the process is exiting nothing more is painted: a GPU driver's exit handler
         // is tearing its state down (`exit_gate`).
-        let Some(_gate) = enter_gate() else {
-            return;
+        let Some(_gate) = gate() else {
+            return painter;
         };
         painter.handle(request);
     }
@@ -876,6 +900,51 @@ mod tests {
         }
         assert_eq!(pixel(&image, x, image.row_tops[1]), BODY);
         assert_eq!(pixel(&image, x, 0), BACKGROUND);
+    }
+
+    /// A painter holding one headless window (the CPU painter's), numbered 7.
+    fn painter_with_a_window() -> Painter {
+        let mut painter = Painter {
+            families: default_families(),
+            defaults: RenderDefaults::default(),
+            windows: HashMap::new(),
+            installed: HashMap::new(),
+        };
+        let renderer = painter.renderer(1.0);
+        painter.windows.insert(
+            7,
+            Window {
+                renderer,
+                subscriber: 0,
+                px: (400, 203),
+                size: Arc::new(Mutex::new((1, 1))),
+                frame: Vec::new(),
+                #[cfg(feature = "gui-gpu")]
+                gpu: None,
+                #[cfg(feature = "gui-gpu")]
+                owed: false,
+            },
+        );
+        painter
+    }
+
+    /// The thread's loop as the process exits (ADR-798): a request that arrives once the exit
+    /// gate is shut is not handled — the window it would close stays, undropped, in the
+    /// painter the loop hands back, which is never dropped either (`ManuallyDrop`) — where
+    /// the same request with the gate open closes the window. Dropping a window the GPU
+    /// draws at that moment destroyed its device under the driver's own exit handler.
+    #[test]
+    fn a_request_after_the_exit_gate_shut_drops_nothing() {
+        let (sender, requests) = mpsc::channel();
+        sender.send(Request::Close { id: 7 }).unwrap();
+        let kept = serve_requests(&requests, painter_with_a_window(), || None::<()>);
+        assert!(kept.windows.contains_key(&7), "the window was dropped");
+
+        // the gate open: the request is handled, and the loop ends when nobody can send
+        sender.send(Request::Close { id: 7 }).unwrap();
+        drop(sender);
+        let kept = serve_requests(&requests, painter_with_a_window(), || Some(()));
+        assert!(kept.windows.is_empty(), "the window was not closed");
     }
 
     /// `ops` as a `w`×`h` window with the default font and no inset paints them on the CPU.
