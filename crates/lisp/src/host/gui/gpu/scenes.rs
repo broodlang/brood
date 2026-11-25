@@ -1088,7 +1088,18 @@ impl MeshGpu {
                 let skinned = u32::from(mesh.skinned && palette_joints > 0);
                 // `DrawU::deform` (ADR-805): pressed by the scene's contacts, where its posed vertices
                 // start in the scene's posed buffer, whether it has a softness, how many vertices
-                let pressed = !scene.contacts.is_empty() && crate::host::gui::mesh::pressed(draw);
+                // `DrawU::loose` (ADR-812): its flesh lagging its bones, where the lagging palette
+                // starts and how many joints it holds (a skinned draw only, as the CPU poses it)
+                let loose = crate::host::gui::mesh::loose_palette(scene, draw)
+                    .filter(|_| skinned == 1)
+                    .and_then(|(joints, amount)| {
+                        let start = palette_starts.get(draw.loose?.palette)?;
+                        Some([amount, *start as f32, (joints.len() / 16) as f32, 0.0])
+                    });
+                // posed once by the compute passes: pressed by contacts, or loose (with no contacts
+                // the passes only pose it)
+                let pressed = (!scene.contacts.is_empty() || loose.is_some())
+                    && crate::host::gui::mesh::pressed(draw);
                 let deform = if pressed {
                     let start = pressed_vertices;
                     pressed_vertices += mesh.vertex_count;
@@ -1111,6 +1122,7 @@ impl MeshGpu {
                         morph_start,
                     ],
                     deform,
+                    loose.unwrap_or([0.0; 4]),
                 );
                 bytes.resize(DRAW_BYTES as usize, 0);
                 let at = draw_bytes.len() / DRAW_BYTES as usize;
@@ -1619,6 +1631,7 @@ pub(super) fn draw_uniform(
     flags: [u32; 4],
     morph_info: [u32; 4],
     deform: [u32; 4],
+    loose: [f32; 4],
 ) -> Vec<u8> {
     let material = &draw.material;
     let mut floats = Vec::with_capacity(32);
@@ -1656,6 +1669,9 @@ pub(super) fn draw_uniform(
     // `DrawU::deform`: pressed by the scene's contacts, its first posed vertex, whether it has a
     // softness, its vertex count (ADR-805)
     bytes.extend(words_bytes(&deform));
+    // `DrawU::loose`: its flesh lagging its bones, the amount (0 none), its lagging palette's
+    // offset and joint count (ADR-812)
+    bytes.extend(floats_bytes(&loose));
     bytes
 }
 

@@ -1132,6 +1132,20 @@ pub struct Draw {
     /// smile, a blink and speech at once).
     pub morphs: Vec<(u32, f32)>,
     pub material: Material,
+    /// Its soft flesh lagging its bones (`:loose`, ADR-812), or none.
+    pub loose: Option<Loose>,
+}
+
+/// A draw's flesh lagging its bones (`:loose {:palette i :amount a}`, ADR-812): `palette` is
+/// one of the scene's palettes for the same skeleton as the draw's own, each joint where a damped
+/// follower of it is this frame (kept by the game, so the lag is stepped on its own clock, and
+/// both painters and a film drawn at chosen moments agree); a vertex of softness `s` is placed
+/// `s × amount` (held to 0 … 1) of the way from where the draw's own palette puts it to where this
+/// one does. Bone (softness 0) stays where its bones are; its normal is the draw's own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Loose {
+    pub palette: usize,
+    pub amount: f32,
 }
 
 /// A `[:scene …]` op: meshes drawn into the pixel rect `x y w h` of the frame.
@@ -4337,6 +4351,7 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
     let mut normals = mesh.normals.clone();
     add_morphs(&mesh.morphs, &draw.morphs, &mut positions, &mut normals);
     let eye = draw.material.eye_optics();
+    let loose = loose_palette(scene, draw);
     (0..mesh.positions.len())
         .map(|index| {
             let position = positions[index];
@@ -4349,7 +4364,19 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
                 Some(skin) => multiply(&draw.model, &skin),
                 None => draw.model,
             };
-            let world = transform(&matrix, position, 1.0);
+            let mut world = transform(&matrix, position, 1.0);
+            // its soft flesh toward where its bones' followers carry it (ADR-812)
+            if let Some((palette, amount)) = loose {
+                let share = loose_share(mesh, index, amount);
+                if share > 0.0
+                    && let Some(skin) = skin_matrix(mesh, Some(palette), index)
+                {
+                    let lagged = transform(&multiply(&draw.model, &skin), position, 1.0);
+                    for axis in 0..3 {
+                        world[axis] += (lagged[axis] - world[axis]) * share;
+                    }
+                }
+            }
             let turned_normal = transform(&matrix, normal, 0.0);
             let turned_tangent = transform(&matrix, [tangent[0], tangent[1], tangent[2]], 0.0);
             if draw.material.surface == Surface::Strands {
@@ -4404,6 +4431,25 @@ pub fn pressed(draw: &Draw) -> bool {
             draw.material.surface,
             Surface::Strands | Surface::Hair | Surface::Eye
         )
+}
+
+/// `draw`'s lagging palette and how far its soft flesh goes toward it (ADR-812): only for a
+/// skinned `:deform` draw (whose skin both painters pose once a frame, [`pressed`]) with an
+/// amount above 0 and a palette the scene has.
+pub fn loose_palette<'a>(scene: &'a Scene, draw: &Draw) -> Option<(&'a [f32], f32)> {
+    let loose = draw.loose?;
+    if !pressed(draw) || loose.amount <= 0.0 || !loose.amount.is_finite() {
+        return None;
+    }
+    scene.palette_of(draw)?;
+    let palette = scene.palettes.get(loose.palette)?;
+    (palette.len() >= 16).then_some((&palette[..], loose.amount))
+}
+
+/// How far vertex `index` of `mesh` goes toward its lagging palette (ADR-812): its softness ×
+/// `amount`, held to 0 … 1.
+pub fn loose_share(mesh: &Mesh, index: usize, amount: f32) -> f32 {
+    (softness_at(mesh, index) * amount).clamp(0.0, 1.0)
 }
 
 /// How soft `mesh`'s flesh is at vertex `index` (ADR-805): its `:softness`, or wholly soft when it
@@ -4778,6 +4824,7 @@ mod tests {
 
     fn draw() -> Draw {
         Draw {
+            loose: None,
             mesh: 1,
             model: identity(),
             palette: None,
@@ -8559,6 +8606,7 @@ mod tests {
     #[test]
     fn without_contacts_or_deform_nothing_is_pressed() {
         let mut draw = Draw {
+            loose: None,
             mesh: 1,
             model: identity(),
             palette: None,

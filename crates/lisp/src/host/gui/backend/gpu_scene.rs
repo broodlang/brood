@@ -70,6 +70,7 @@ fn scene() -> Scene {
         contact_skips: Vec::new(),
         contact_onlys: Vec::new(),
         draws: vec![Draw {
+            loose: None,
             mesh: 1,
             model: identity,
             palette: None,
@@ -303,6 +304,7 @@ fn soft_shadow_on_both_painters(more: Vec<Light>) {
     scene.lights = vec![light];
     scene.lights.extend(more);
     let draw = |mesh: u32| Draw {
+        loose: None,
         mesh,
         model: [
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -390,6 +392,7 @@ fn ambient_occlusion_draws_on_the_gpu_as_on_the_cpu() {
         strength: 1.0,
     });
     let draw = |mesh: u32| Draw {
+        loose: None,
         mesh,
         model: [
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -464,6 +467,7 @@ fn hair_covers_and_shines_on_the_gpu_as_on_the_cpu() {
     scene.eye = [0.0, 10.0, 0.0];
     scene.lights = vec![Light::directional([0.0, -1.0, 0.0], [1.0, 1.0, 1.0])];
     let hair = |opacity: f32| Draw {
+        loose: None,
         mesh: 1,
         model: [
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -626,6 +630,7 @@ fn a_ball_pressed_into_soft_skin_dents_it_alike_on_both_painters() {
     // seen from in front and a little to the side, lit from the upper left
     scene.lights = vec![Light::directional([0.6, -0.5, 0.6], [1.0, 1.0, 1.0])];
     let draw = |deform: bool| Draw {
+        loose: None,
         mesh: 1,
         model: [
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -716,6 +721,170 @@ fn a_ball_pressed_into_soft_skin_dents_it_alike_on_both_painters() {
         );
         if dent < 500 || unchanged > 0 || apart > gpu_red.len() / 50 {
             failures.push(format!("{name}: dent {dent}, unpressed apart {unchanged}, {apart} pixels apart from the CPU"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// ADR-812: a slab skinned to one joint, its left half bone (softness 0) and its right half soft
+/// (1), drawn `:loose` toward a lagging palette 10 cm above its own at amount 0.5: its right half
+/// is drawn 5 cm up and its left where it was, alike on both painters; without `:loose` (or at
+/// amount 0) it is drawn as its own palette puts it.
+#[test]
+fn loose_flesh_follows_its_lagging_bones_alike_on_both_painters() {
+    use crate::host::gui::mesh::Loose;
+    let side = 96u32;
+    let cells = 48usize;
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut softness = Vec::new();
+    for row in 0..=cells {
+        for column in 0..=cells {
+            let x = column as f32 / cells as f32 - 0.5;
+            let y = row as f32 / cells as f32 - 0.5;
+            positions.extend_from_slice(&[x, y * 0.6, 0.5]);
+            normals.extend_from_slice(&[0.0, 0.0, -1.0]);
+            softness.push(if x > 0.0 { 1.0f32 } else { 0.0 });
+        }
+    }
+    let mut indices = Vec::new();
+    for row in 0..cells {
+        for column in 0..cells {
+            let corner = (row * (cells + 1) + column) as u32;
+            let next = corner + (cells + 1) as u32;
+            indices.extend_from_slice(&[corner, corner + 1, next, corner + 1, next + 1, next]);
+        }
+    }
+    let count = (cells + 1) * (cells + 1);
+    let slab = Arc::new(
+        Mesh::from_parts(MeshParts {
+            positions: bytes_of(&positions),
+            normals: bytes_of(&normals),
+            indices: indices
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect(),
+            indices_wide: true,
+            // every vertex wholly on joint 0
+            joints: vec![0u8; count * 4],
+            weights: bytes_of(&[1.0f32, 0.0, 0.0, 0.0].repeat(count)),
+            softness: bytes_of(&softness),
+            ..MeshParts::default()
+        })
+        .expect("a slab"),
+    );
+    let identity: [f32; 16] = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    let mut lifted = identity;
+    lifted[13] = 0.1;
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    scene.lights = vec![Light::directional([0.6, -0.5, 0.6], [1.0, 1.0, 1.0])];
+    scene.palettes = vec![Arc::from(&identity[..]), Arc::from(&lifted[..])];
+    let shoot = |loose: Option<Loose>| {
+        let mut scene = scene.clone();
+        scene.draws = vec![Draw {
+            loose,
+            mesh: 1,
+            model: identity,
+            palette: Some(0),
+            morphs: vec![],
+            material: Material {
+                surface: Surface::Standard,
+                deform: true,
+                double_sided: true,
+                roughness: 0.6,
+                specular: 0.0,
+                color: [0.8, 0.8, 0.8, 1.0],
+                ..Material::default()
+            },
+        }];
+        scene
+    };
+    let loose = shoot(Some(Loose {
+        palette: 1,
+        amount: 0.5,
+    }));
+    let plain = shoot(None);
+    let still = shoot(Some(Loose {
+        palette: 1,
+        amount: 0.0,
+    }));
+    let meshes = |handle: u32| (handle == 1).then(|| slab.clone());
+    let (_, _, cpu_loose) = rasterize(&loose, &meshes, &|_| None);
+    let (_, _, cpu_plain) = rasterize(&plain, &meshes, &|_| None);
+    let (_, _, cpu_still) = rasterize(&still, &meshes, &|_| None);
+    assert_eq!(cpu_plain, cpu_still, "the CPU painter: amount 0 is no lag");
+    // the left third of the picture (bone) unmoved, the right third moved
+    let third = |pixels: &[u8], stride: usize, right: bool| -> Vec<u8> {
+        (0..side as usize)
+            .flat_map(|row| {
+                let columns = if right {
+                    (2 * side as usize / 3)..side as usize
+                } else {
+                    0..side as usize / 3
+                };
+                columns.map(move |column| (row * side as usize + column) * stride)
+            })
+            .map(|at| pixels[at])
+            .collect()
+    };
+    assert_eq!(
+        third(&cpu_loose, 4, false),
+        third(&cpu_plain, 4, false),
+        "the CPU painter: bone stays where its bones are"
+    );
+    assert_ne!(
+        third(&cpu_loose, 4, true),
+        third(&cpu_plain, 4, true),
+        "the CPU painter: soft flesh goes toward the lagging bones"
+    );
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let mut frames = Vec::new();
+        for scene in [&loose, &plain, &still] {
+            let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+                continue;
+            };
+            gpu.upload_mesh(1, &slab);
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            renderer.set_bg(Some([0, 0, 0]));
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            frames.push(gpu.read_pixels());
+        }
+        if frames.len() < 3 {
+            continue;
+        }
+        let red = |pixels: &[u8], stride: usize| -> Vec<u8> {
+            pixels.chunks(stride).map(|pixel| pixel[0]).collect()
+        };
+        let apart = |a: &[u8], b: &[u8]| {
+            a.iter()
+                .zip(b)
+                .filter(|(x, y)| x.abs_diff(**y) > 24)
+                .count()
+        };
+        let from_cpu = apart(&red(&frames[0], 3), &red(&cpu_loose, 4));
+        let moved = apart(&red(&frames[0], 3), &red(&frames[1], 3));
+        let still_apart = apart(&red(&frames[2], 3), &red(&frames[1], 3));
+        eprintln!(
+            "{name}: moved {moved}, amount 0 apart {still_apart}, pixels apart from the CPU {from_cpu} of {}",
+            side * side
+        );
+        if moved < 100 || still_apart > 0 || from_cpu > (side * side) as usize / 50 {
+            failures.push(format!(
+                "{name}: moved {moved}, amount 0 apart {still_apart}, {from_cpu} apart from the CPU"
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

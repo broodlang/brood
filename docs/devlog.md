@@ -3025,3 +3025,11 @@ back through the caller's dispatch. Guards: `jit_count_call_test`, `jit_float_eq
 `resolve_prim` look-through test; each run in both contract modes. Run: `make test` and the
 armed suite on the final tree.
 
+
+2026-11-26. **A contact's ring sized by what skin can squash, `:only`; soft flesh lagging its
+bones, `:loose` (ADR-805, ADR-812).** womanblend's wall crouch swelled her thighs: one part driven
+deep through the floor sized the floor's ring; the ring now goes by the press capped at
+`MAX_SQUASH`. `:only [j …]` presses one limb's skin alone (a plane between her thighs). A draw's
+`:loose {:palette j :amount a}` draws its soft skin toward a palette of damped followers the game
+keeps (b3d-loose), by softness: no renderer state, alike on both painters. Run: the GPU/CPU
+contact and scene tests (154/154), the new parity test on both adapters.

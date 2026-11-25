@@ -168,6 +168,7 @@ fn the_mesh_shader_validates() {
     // settings four floats before an eye's optics; the shader's flat texel is the CPU painter's
     use crate::host::gui::mesh::{DETAIL_FLAT, Draw, Material};
     let draw = Draw {
+        loose: None,
         mesh: 1,
         model: [0.0; 16],
         palette: None,
@@ -180,7 +181,7 @@ fn the_mesh_shader_validates() {
             ..Material::default()
         },
     };
-    let packed = scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4]);
+    let packed = scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4], [0.0; 4]);
     assert_eq!(
         packed.len() as u64,
         draw_declared,
@@ -234,7 +235,7 @@ fn the_mesh_shader_validates() {
         },
         ..draw
     };
-    let packed = scenes::draw_uniform(&coated, [0; 4], [0; 4], [0; 4]);
+    let packed = scenes::draw_uniform(&coated, [0; 4], [0; 4], [0; 4], [0.0; 4]);
     let floats: Vec<f32> = packed[80..112]
         .as_chunks::<4>()
         .0
@@ -275,6 +276,7 @@ fn the_mesh_shader_validates() {
     };
     let eye_floats = |surface: Surface| -> Vec<f32> {
         let eyed = Draw {
+            loose: None,
             mesh: 1,
             model: [0.0; 16],
             palette: None,
@@ -285,7 +287,7 @@ fn the_mesh_shader_validates() {
                 ..Material::default()
             },
         };
-        let packed = scenes::draw_uniform(&eyed, [0; 4], [0; 4], [0; 4]);
+        let packed = scenes::draw_uniform(&eyed, [0; 4], [0; 4], [0; 4], [0.0; 4]);
         assert_eq!(packed.len() as u64, draw_declared);
         packed[192..192 + 32 * 4]
             .as_chunks::<4>()
@@ -307,12 +309,13 @@ fn the_mesh_shader_validates() {
     );
     assert_eq!(eye_floats(Surface::Cutout), [0.0; 32], "no other surface");
     assert_eq!(
-        draw_declared, 352,
-        "the eye's fields, then a hair's `:sheen` (ADR-799), then `deform` (ADR-805)"
+        draw_declared, 368,
+        "the eye's fields, then a hair's `:sheen` (ADR-799), `deform` (ADR-805), then `loose` (ADR-812)"
     );
     // a hair surface's `:sheen` last, its fourth float 1 when given; its `:shift` in the
     // strand vector's spare two (ADR-799)
     let hair = Draw {
+        loose: None,
         mesh: 1,
         model: [0.0; 16],
         palette: None,
@@ -324,15 +327,15 @@ fn the_mesh_shader_validates() {
             ..Material::default()
         },
     };
-    let floats: Vec<f32> = scenes::draw_uniform(&hair, [0; 4], [0; 4], [0; 4])
+    let floats: Vec<f32> = scenes::draw_uniform(&hair, [0; 4], [0; 4], [0; 4], [0.0; 4])
         .as_chunks::<4>()
         .0
         .iter()
         .map(|word| f32::from_le_bytes(*word))
         .collect();
-    // `sheen`, then the four words of `deform` (ADR-805)
+    // `sheen`, then the four words of `deform` (ADR-805) and the four floats of `loose` (ADR-812)
     assert_eq!(
-        floats[floats.len() - 8..floats.len() - 4],
+        floats[floats.len() - 12..floats.len() - 8],
         [0.5, 0.25, 0.125, 1.0]
     );
     assert_eq!(

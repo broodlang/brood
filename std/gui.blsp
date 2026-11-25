@@ -784,7 +784,10 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; `:ambient-occlusion {:radius m :strength s}`, or `true` for 3 cm at full strength), an
 ;; `:exposure`, a `:background` ([r g b a], transparent by default), the skeletons' joint
 ;; `:palettes` (16 numbers a joint, or f32 bytes), and the `:draws` — each `{:mesh handle
-;; :model [16] :palette i :morphs [[target weight] …] :material {…}}`. A material is the fixed
+;; :model [16] :palette i :morphs [[target weight] …] :material {…}}`, and on a `:deform` draw
+;; `:loose {:palette j :amount a}`: its soft skin drawn toward palette j (the same skeleton, each
+;; joint where a damped follower of it is, kept by the game) by its softness × a, bone staying on
+;; its bones (ADR-812). A material is the fixed
 ;; shading model's parameters: `:surface` (:skin, :standard, :cutout, :blend, :eye — an eyeball
 ;; drawn by optics, with its `:eye`, below — :hair — strands
 ;; lit along the bitangent, their alpha coverage — or :strands, ribbons turned to the camera, a

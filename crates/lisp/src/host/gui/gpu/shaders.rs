@@ -696,6 +696,7 @@ struct DrawU {
     eye_iris: vec4<f32>,        // the iris's radius in the texture, the pupil's share of the iris, the slope of the bowl the iris is lit as
     sheen: vec4<f32>,           // a hair surface's second highlight's colour (`:sheen`), w 1 when given (ADR-799)
     deform: vec4<u32>,          // pressed by the scene's contacts (ADR-805), its first posed vertex, whether it has a softness, its vertex count
+    loose: vec4<f32>,           // its flesh lagging its bones (ADR-812): the amount (0 none), its lagging palette's offset, its joint count
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
@@ -818,6 +819,27 @@ fn contact_softness(index: u32) -> f32 {
     return 1.0;
 }
 
+// `mesh::skin_matrix` over the draw's lagging palette (ADR-812): where `position` would be were
+// its bones where the game's followers carry them; `world` itself when none of them moves it
+fn loose_world(input: VertexIn, position: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+    let start = u32(draw.loose.y + 0.5);
+    let joint_count = u32(draw.loose.z + 0.5);
+    var skin = mat4x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
+    var moved = false;
+    for (var slot = 0u; slot < 4u; slot = slot + 1u) {
+        let joint = input.joints[slot];
+        let weight = input.weights[slot];
+        if (weight > 0.0 && joint < joint_count) {
+            skin = skin + palette[start + joint] * weight;
+            moved = true;
+        }
+    }
+    if (!moved) {
+        return world;
+    }
+    return ((draw.model * skin) * vec4<f32>(position, 1.0)).xyz;
+}
+
 // pass A: each pressed vertex posed (into the scene's posed buffer) and each contact's deepest
 // press into it kept (a positive float's bits order as the float does)
 @compute @workgroup_size(64)
@@ -827,7 +849,14 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let input = vertex_at(id.x);
     let posed = pose(input);
-    let world = (posed.matrix * vec4<f32>(posed.position, 1.0)).xyz;
+    var world = (posed.matrix * vec4<f32>(posed.position, 1.0)).xyz;
+    // its soft flesh toward where its bones' followers carry it (`mesh::pose_vertices`, ADR-812)
+    if (draw.loose.x > 0.0) {
+        let share = clamp(contact_softness(id.x) * draw.loose.x, 0.0, 1.0);
+        if (share > 0.0) {
+            world = world + (loose_world(input, posed.position, world) - world) * share;
+        }
+    }
     let normal = safe_normalize((posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz);
     let tangent = safe_normalize((posed.matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz);
     let at = (draw.deform.y + id.x) * 3u;

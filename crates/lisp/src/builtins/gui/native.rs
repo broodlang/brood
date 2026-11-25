@@ -1508,7 +1508,8 @@ fn emitter_spec(
 /// [r g b a]` (0 … 1, transparent by default), `:ambient-occlusion {:radius m :strength s}`
 /// (or `true`: folds and corners darken the ambient light — off by default), `:palettes`
 /// (joint matrices, 16 numbers each: a vector of numbers or f32 bytes per skeleton) and `:draws [{:mesh h :model [16] :palette i
-/// :morphs [[target weight] …] :material {…}} …]`. Colours and light are linear. A key of the
+/// :morphs [[target weight] …] :material {…} :loose {:palette j :amount a}} …]` (`:loose`: a `:deform`
+/// draw's soft skin drawn toward palette j by its softness × a, ADR-812). Colours and light are linear. A key of the
 /// wrong shape keeps its default and a draw without a mesh handle is dropped — except the
 /// lights, `:ambient-sh`, and a material's `:cast-shadow`, `:lobes`, `:scatter` and `:detail`
 /// keys (ADR-797) and its `:eye` (ADR-796), where a mistake would light the scene wrongly
@@ -1522,8 +1523,8 @@ fn scene_spec(
     num: &dyn Fn(Value) -> f32,
 ) -> Result<Option<crate::host::gui::mesh::Scene>, String> {
     use crate::host::gui::mesh::{
-        AmbientOcclusion, DEFAULT_OCCLUSION_RADIUS, Draw, MAX_DETAIL_SCALE, MAX_DETAIL_STRENGTH,
-        MAX_EMITTERS, MAX_SCATTER, Material, SPECULAR_TO_F0, Scene, Surface,
+        AmbientOcclusion, DEFAULT_OCCLUSION_RADIUS, Draw, Loose, MAX_DETAIL_SCALE,
+        MAX_DETAIL_STRENGTH, MAX_EMITTERS, MAX_SCATTER, Material, SPECULAR_TO_F0, Scene, Surface,
     };
     let Value::Map(map) = spec else {
         return Ok(None);
@@ -1820,7 +1821,25 @@ fn scene_spec(
                     _ => Vec::new(),
                 };
                 morphs.sort_by(|left, right| right.1.abs().total_cmp(&left.1.abs()));
+                // `:loose {:palette i :amount a}`: its soft flesh lagging its bones (ADR-812)
+                let loose = match get(*draw_map, "loose") {
+                    Some(Value::Map(settings)) => {
+                        match (get(settings, "palette"), get(settings, "amount")) {
+                            (Some(Value::Int(index)), Some(amount))
+                                if is_number(amount) && num(amount).is_finite() =>
+                            {
+                                usize::try_from(index).ok().map(|palette| Loose {
+                                    palette,
+                                    amount: num(amount).max(0.0),
+                                })
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
                 Some(Ok(Draw {
+                    loose,
                     mesh,
                     model: matrix(get(*draw_map, "model")).unwrap_or([
                         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
