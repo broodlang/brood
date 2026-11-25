@@ -955,3 +955,88 @@ pub(super) fn emit_self_call(
     );
     Some(())
 }
+
+/// `Inst::MakeClosure` — a `(fn …)` literal (`BROOD_JIT_CLOSURES=1`, ADR-803). The callback
+/// runs the VM's own `MakeClosure` arm, so this only has to put the world in the shape that
+/// arm expects: the `ncap` capture values staged on top of `roots` (where the VM's operand
+/// stack leaves them), then one `brood_rt_make_closure(heap, out, inst)` call, then the fresh
+/// closure read back from `out` as a `Handle`.
+///
+/// The callback allocates, and a capture-free literal's eighth sighting promotes it, so it is
+/// treated as a safepoint with a non-tail call's two disciplines: every live `Handle` deeper
+/// on the operand stack is spilled to a reserved frame slot first (`jit_spill_reserve` counts
+/// `MakeClosure` as a producer, so the room exists), and the roots base is re-fetched after
+/// the call (the staging `push_room` may have moved `roots`).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_make_closure(
+    b: &mut FunctionBuilder,
+    stack: &mut Vec<Op>,
+    spill_next: &mut usize,
+    ncap: usize,
+    inst: *const crate::eval::compile::Inst,
+    spill_base: usize,
+    call_spill_capacity: usize,
+    frame: Frame,
+    funcs: Funcs,
+) -> Option<()> {
+    let heap = funcs.heap;
+    let below = stack
+        .len()
+        .checked_sub(ncap)
+        .or_bail("operand-stack-underflow")?;
+    for depth in 0..below {
+        if matches!(stack[depth], Op::Handle(..)) {
+            if *spill_next >= call_spill_capacity {
+                return super::bail("mkclo-spill-exhausted");
+            }
+            let slot = spill_base + *spill_next;
+            *spill_next += 1;
+            store_op(b, slot as i64, stack[depth], frame);
+            stack[depth] = Op::Slot(slot);
+        }
+    }
+    // Pop the captures (the last in source order on top) and read every word BEFORE the
+    // staging push: `push_room` may reallocate `roots`, so no slot read may follow it.
+    let mut captures: Vec<Op> = Vec::with_capacity(ncap);
+    for _ in 0..ncap {
+        captures.push(stack.pop().or_bail("operand-stack-underflow")?);
+    }
+    captures.reverse(); // back to `names` order, the order the VM's arm reads them in
+    let worded: Vec<[Value; 3]> = captures
+        .iter()
+        .map(|&capture| read_words(b, capture, frame))
+        .collect();
+    if ncap > 0 {
+        let stage_n = b.ins().iconst(types::I64, ncap as i64);
+        let room = b.ins().call(funcs.pushroom, &[heap, stage_n]);
+        let stage_ptr = b.inst_results(room)[0];
+        for (index, words) in worded.iter().enumerate() {
+            let offset = (index * STRIDE as usize) as i32;
+            b.ins()
+                .store(MemFlagsData::trusted(), words[0], stage_ptr, offset);
+            b.ins().store(
+                MemFlagsData::trusted(),
+                words[1],
+                stage_ptr,
+                offset + PAYLOAD_OFFSET as i32,
+            );
+            b.ins().store(
+                MemFlagsData::trusted(),
+                words[2],
+                stage_ptr,
+                offset + PAYLOAD_OFFSET as i32 + 8,
+            );
+        }
+    }
+    let out_addr = b.ins().stack_addr(funcs.ptr_ty, funcs.out_slot, 0);
+    let inst_v = b.ins().iconst(funcs.ptr_ty, inst as i64);
+    let call = b.ins().call(funcs.mkclo, &[heap, out_addr, inst_v]);
+    let status = b.inst_results(call)[0];
+    let roots_base = super::emit::load_roots_base(b, heap);
+    b.def_var(frame.rb_var, roots_base);
+    let cont = b.create_block();
+    b.ins().brif(status, funcs.error, &[], cont, &[]);
+    b.switch_to_block(cont);
+    stack.push(handle_from_out_slot(b, funcs.out_slot));
+    Some(())
+}

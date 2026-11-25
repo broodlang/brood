@@ -516,6 +516,14 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
     // the thunk nested under the builtin, where a `receive` blocks the worker. Read as a VALUE
     // as well (ADR-494): `(apply proc/interruptible …)` is a region on the VM.
     let interruptible_sym = crate::core::value::intern("proc/interruptible");
+    // A `(fn …)` literal is admitted only under `BROOD_JIT_CLOSURES=1` (ADR-803), and never in
+    // a chunk that calls `%receive`: every receive builds its matcher as a literal, so a
+    // receive-bearing chunk was kept out by the literal before, and a head receive (ADR-410)
+    // keeps exactly the shapes it had.
+    let closures_ok = crate::diagnostics::debug_flags::jit_closures()
+        && !code.iter().any(
+            |inst| matches!(inst, Inst::Call { head: Some(head), .. } if *head == receive_sym),
+        );
     code.iter().all(|inst| match inst {
         Inst::Const(_) => true,
         Inst::Call { head: Some(h), .. } if *h == receive_sym => receive_ok,
@@ -556,9 +564,10 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         // a hot arm does not put the whole arm on the interpreter for good. Same cap as the
         // vector, in values.
         Inst::MakeMap(n) => 2 * *n <= 32,
-        // A `(fn …)` literal (`MakeClosure`) stays out: admitting it tiered up dozens of
-        // boot-path closure arms for a fixed per-run compile cost, while the arms that
-        // would benefit still fail the `call-mediated-boxed` gate.
+        // A `(fn …)` literal (`MakeClosure`): one `brood_rt_make_closure` callback. Opt-in —
+        // admitting it by default tiers up dozens of boot-path closure arms for a fixed
+        // per-run compile cost (2026-08-29: +11 ms a run).
+        Inst::MakeClosure { names, .. } => closures_ok && names.len() <= 32,
         _ => false,
     })
 }
@@ -1068,7 +1077,14 @@ pub(super) mod codegen {
         // The unboxing signals that earn the general lowering:
         //   * a `VectorRef`/`MakeVector` (rules bintree/matmul back in — they lower and win), or
         //   * a self-tail loop (`fold--loop`, hence `reduce`/`pipeline`; `row-sum`).
+        // Under `BROOD_JIT_CLOSURES=1` (ADR-803) an arm that builds a closure is exempt as
+        // closure arms are: the literal is almost always handed to a HOF (`map`, `reduce`,
+        // `sort-by`), whose native apply path is what the arm being native buys, and deopt
+        // feedback still demotes one that thrashes.
+        let builds_closure = crate::diagnostics::debug_flags::jit_closures()
+            && code.iter().any(|i| matches!(i, Inst::MakeClosure { .. }));
         if arm.dbg_name.is_some()
+            && !builds_closure
             && non_tail_call_count(code) >= 1
             && !has_inline_vec
             && !has_self_loop

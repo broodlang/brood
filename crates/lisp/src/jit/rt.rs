@@ -262,6 +262,72 @@ pub unsafe extern "C" fn brood_rt_vec2_room(
     }
 }
 
+/// Build the closure for a native arm's `Inst::MakeClosure` (`BROOD_JIT_CLOSURES=1`,
+/// ADR-803) — the VM's `MakeClosure` arm (`exec_chunk`), step for step: the `ncap` capture
+/// values are staged on top of `roots`, exactly where the VM's operand stack leaves them; a
+/// fresh env frame off GLOBAL binds them (and the `letrec` self-name, when there is one); the
+/// closure goes through `make_closure_cached`. The fresh closure is written to `*out` and the
+/// staged captures are dropped.
+///
+/// `inst` points at the arm's own `Inst::MakeClosure`, inside its chunk, which the arm
+/// keep-alive pins for the process's life — the contract `brood_rt_const_load` runs under.
+/// `fn_rest` is a `ConstVal`, so a RUNTIME compaction rewrites it in place and `.load()` reads
+/// the current bits.
+///
+/// GC: building the env and the closure only grows the LOCAL slabs; the one route to a
+/// collection is a capture-free literal's promote, and with no captures nothing is staged.
+/// The captures sit on `roots` regardless, so the discipline survives a change to
+/// `make_closure_cached`.
+///
+/// Returns [`status::DONE`], or [`status::ERROR`] with the error parked.
+///
+/// # Safety
+/// `heap` live; `out` writable; `inst` points at a live `Inst::MakeClosure` of an installed
+/// arm's chunk; the top `names.len()` roots are its capture values, in `names` order.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn brood_rt_make_closure(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    inst: *const crate::eval::compile::Inst,
+) -> i64 {
+    // SAFETY: contracts heap, out and inst (this fn's `# Safety`): the chunk `inst` points
+    // into is pinned by the arm keep-alive, and the staged captures are the top roots.
+    unsafe {
+        let h = &mut *heap;
+        let crate::eval::compile::Inst::MakeClosure {
+            fn_rest,
+            names,
+            self_name,
+            module,
+        } = &*inst
+        else {
+            // Emitted only at MakeClosure sites; anything else is a lowering bug, and an error
+            // keeps it diagnosable where undefined behaviour would not.
+            let error =
+                crate::error::LispError::type_err("brood_rt_make_closure: inst is not MakeClosure");
+            return answer_or_park(h, out, Err(error));
+        };
+        let ncap = names.len();
+        let top = h.roots_len();
+        let env = if ncap == 0 && self_name.is_none() {
+            h.global()
+        } else {
+            let frame = h.new_env(Some(h.global()));
+            for (index, name) in names.iter().enumerate() {
+                let capture = h.root_at(top - ncap + index);
+                h.env_define(frame, *name, capture);
+            }
+            frame
+        };
+        h.truncate_roots(top - ncap);
+        let closure = crate::eval::make_closure_cached(h, fn_rest.load(), env, *module);
+        if let (Ok(closure), Some(name)) = (&closure, self_name) {
+            h.env_define(env, *name, *closure);
+        }
+        answer_or_park(h, out, closure)
+    }
+}
+
 /// Build an `n`-element vector from `n` `Value`s staged contiguously at `elems`
 /// (the JIT wrote each element's 3 words into a stack slot it owns), writing the
 /// fresh vector to `*out`. The variadic generalisation of [`brood_rt_vec2_room`]

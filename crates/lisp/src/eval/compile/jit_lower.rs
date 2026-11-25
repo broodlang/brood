@@ -801,6 +801,7 @@ fn jit_lower_arm_inner(
         vec2room: callbacks.vector2_room,
         makevecn: callbacks.make_vector_n,
         makemapn: callbacks.make_map_n,
+        mkclo: callbacks.make_closure,
         thas: callbacks.table_has,
         tget: callbacks.table_get,
         mget: callbacks.map_get,
@@ -971,6 +972,21 @@ fn jit_lower_arm_inner(
                 }
                 Inst::MakeMap(n) => {
                     prim::emit_make_map(&mut b, &mut stack, *n, frame, funcs)?;
+                }
+                // A `(fn …)` literal: one callback running the VM's own arm (ADR-803).
+                // Admitted to the subset only under `BROOD_JIT_CLOSURES=1`.
+                Inst::MakeClosure { names, .. } => {
+                    call::emit_make_closure(
+                        &mut b,
+                        &mut stack,
+                        &mut spill_next,
+                        names.len(),
+                        &code[j] as *const Inst,
+                        spill_base,
+                        call_spill_capacity,
+                        frame,
+                        funcs,
+                    )?;
                 }
                 Inst::Prim2 { op, map, .. } => {
                     prim::emit_prim2(&mut b, &mut stack, op, *map, has_float_slot, frame, funcs)?;

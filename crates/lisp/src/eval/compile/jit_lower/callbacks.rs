@@ -29,6 +29,7 @@ pub(super) struct CallbackIds {
     vector2_room: FuncId,
     make_vector_n: FuncId,
     make_map_n: FuncId,
+    make_closure: FuncId,
     gc_safepoint: FuncId,
     #[cfg(debug_assertions)]
     debug_set_staging: FuncId,
@@ -83,6 +84,7 @@ pub(super) struct CallbackRefs {
     pub(super) vector2_room: FuncRef,
     pub(super) make_vector_n: FuncRef,
     pub(super) make_map_n: FuncRef,
+    pub(super) make_closure: FuncRef,
     pub(super) gc_safepoint: FuncRef,
     #[cfg(debug_assertions)]
     pub(super) debug_set_staging: FuncRef,
@@ -207,6 +209,15 @@ pub(super) fn declare_callbacks(module: &mut JITModule, pointer: Type) -> Option
     let literal_signature = signature(module, &[pointer, pointer, pointer, i64], &[]);
     let make_vector_n = import(module, "brood_rt_make_vector_n", &literal_signature)?;
     let make_map_n = import(module, "brood_rt_make_map_n", &literal_signature)?;
+    // brood_rt_make_closure(heap, out, inst: *const Inst) -> status: build a `(fn …)`
+    // literal's closure by running the VM's `MakeClosure` arm on captures staged on `roots`;
+    // 0 = the closure is at `*out`, 1 = an error is parked. `inst` is baked into the arm's
+    // chunk, which the arm keep-alive pins (the `brood_rt_const_load` contract).
+    let make_closure = import(
+        module,
+        "brood_rt_make_closure",
+        &signature(module, &[pointer, pointer, pointer], &[i64]),
+    )?;
     // brood_rt_gc_safepoint(heap): collect if due (bounds the nursery for cons loops).
     let gc_safepoint = import(
         module,
@@ -387,6 +398,7 @@ pub(super) fn declare_callbacks(module: &mut JITModule, pointer: Type) -> Option
         vector2_room,
         make_vector_n,
         make_map_n,
+        make_closure,
         gc_safepoint,
         #[cfg(debug_assertions)]
         debug_set_staging,
@@ -444,6 +456,7 @@ pub(super) fn import_callbacks(
     let vector2_room = declare(ids.vector2_room, b.func);
     let make_vector_n = declare(ids.make_vector_n, b.func);
     let make_map_n = declare(ids.make_map_n, b.func);
+    let make_closure = declare(ids.make_closure, b.func);
     let gc_safepoint = declare(ids.gc_safepoint, b.func);
     #[cfg(debug_assertions)]
     let debug_set_staging = declare(ids.debug_set_staging, b.func);
@@ -496,6 +509,7 @@ pub(super) fn import_callbacks(
         vector2_room,
         make_vector_n,
         make_map_n,
+        make_closure,
         gc_safepoint,
         #[cfg(debug_assertions)]
         debug_set_staging,

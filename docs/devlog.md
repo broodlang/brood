@@ -2927,3 +2927,18 @@ check-desktop's static gates, and the one new unit test
 (`a_gpu_window_captures_the_frame_the_gpu_drew`, sabotaged red by taking the paint out of the
 capture, restored). NOT run: the Rust suite, the `.blsp` suites, A/B, fuzz (desktop rule): CI's,
 which has no GPU and skips the new test.
+
+2026-11-25. **Functions holding a `(fn …)` literal go native under `BROOD_JIT_CLOSURES=1`
+(ADR-803).** b3d-skeleton had 38 functions on the VM for good because each builds a closure
+(the joint chain's world matrices among them, about a fifth of the game's tick). Both gates are
+lifted for that class: the literal lowers as one `brood_rt_make_closure` callback running the
+VM's own `MakeClosure` arm on captures staged on `roots` (a safepoint: handles beneath spilled,
+roots base reloaded), and an arm that builds a closure is exempt from the call-mediated gate as
+closure arms already were. A chunk calling `%receive` keeps the literal out, so receive chunks
+are as they were. Opt-in, because default-on tiers the boot path's closure arms. Under the flag:
+the whole `.blsp` suite (8873, 0 failed), the brood crate's 156 JIT/compile/tier/deopt tests,
+and the new `crates/cli/tests/jit_closure_literal.rs` (five shapes settled native, answers equal
+to the VM's; red with captures staged out of order and with the self-name unbound). Timing,
+best of five: `nqueens` −16% at `BENCH_N=12`, `nbody` −5%, the other rows (spawn, startup
+included) flat. NOT run: `make ab`/`ab-vm`, the fuzz differential, gcstress under the flag —
+the gates for flipping the default.

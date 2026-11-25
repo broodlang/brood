@@ -127,6 +127,7 @@ fn callback_table() -> Vec<(&'static str, *const u8)> {
         brood_rt_cons,
         brood_rt_vec2_room,
         brood_rt_make_vector_n,
+        brood_rt_make_closure,
         brood_rt_car,
         brood_rt_cdr,
         brood_rt_push_room,
