@@ -66,6 +66,7 @@ fn scene() -> Scene {
         background: [0.0, 0.0, 0.0, 0.0],
         palettes: vec![],
         contacts: Vec::new(),
+        contact_drags: Vec::new(),
         draws: vec![Draw {
             mesh: 1,
             model: identity,
@@ -651,7 +652,9 @@ fn a_ball_pressed_into_soft_skin_dents_it_alike_on_both_painters() {
         scene.contacts = contacts;
         scene
     };
-    let pressed = shoot(true, vec![ball]);
+    // (pressed and dragged 2 cm sideways by its friction, ADR-805's `:drag`)
+    let mut pressed = shoot(true, vec![ball]);
+    pressed.contact_drags = vec![[0.02, 0.0, 0.0]];
     let plain = shoot(true, vec![]);
     let not_deformed = shoot(false, vec![ball]);
     let (_, _, cpu_pressed) = rasterize(&pressed, &meshes, &|_| None);

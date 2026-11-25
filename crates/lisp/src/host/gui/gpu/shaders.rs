@@ -721,8 +721,8 @@ struct DrawU {
 
 struct ContactList {
     count: vec4<u32>,
-    // two vec4 a contact: `[x y z kind]`, `[x y z w]` (`scenes::contact_words`)
-    shapes: array<vec4<f32>, 32>,
+    // three vec4 a contact: `[x y z kind]`, `[x y z w]`, its drag (`scenes::contact_words`)
+    shapes: array<vec4<f32>, 48>,
 };
 @group(3) @binding(8) var<storage, read> mesh_vertices: array<f32>;
 @group(3) @binding(9) var<uniform> contact_list: ContactList;
@@ -748,8 +748,8 @@ fn smooth_outside(distance: f32, band: f32) -> f32 {
 // `mesh::Contact::signed_distance`: how far `point` lies outside contact `slot` (negative inside),
 // in w, and the unit direction out of it there, in xyz
 fn contact_distance(slot: u32, point: vec3<f32>) -> vec4<f32> {
-    let first = contact_list.shapes[slot * 2u];
-    let second = contact_list.shapes[slot * 2u + 1u];
+    let first = contact_list.shapes[slot * 3u];
+    let second = contact_list.shapes[slot * 3u + 1u];
     let kind = u32(first.w + 0.5);
     if (kind == 0u) {
         return vec4<f32>(first.xyz, dot(first.xyz, point) - second.x);
@@ -867,6 +867,11 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         let sideways = out - normal * dot(out, normal);
         point = point + out * moved + normal * lift;
+        // (its `:drag`: wholly inside the patch, less through its edge and ring)
+        let reach = (RING_WIDTH + RING_SPREAD * depth) * (0.5 + softness);
+        let outside = max(distance, 0.0) / reach;
+        let held = into + (1.0 - into) * exp(-outside * outside);
+        point = point + contact_list.shapes[slot * 3u + 2u].xyz * held;
         let turned = safe_normalize(normal + (-out - normal) * into);
         if (dot(sideways, sideways) > 1e-8) {
             normal = safe_normalize(turned - safe_normalize(sideways) * slope);

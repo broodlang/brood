@@ -1893,6 +1893,8 @@ fn scene_spec(
     // `:contacts [{:plane [nx ny nz d]} {:sphere [x y z r]} {:capsule [ax ay az bx by bz r]} …]`:
     // what presses the skin of its `:deform` draws this frame (ADR-805), in world space
     let mut contacts = Vec::new();
+    // and how far each drags the skin along its surface this frame (`:drag [x y z]`, metres)
+    let mut contact_drags = Vec::new();
     if let Some(given) = get(map, "contacts") {
         let Value::Vector(list) = given else {
             return Err(":contacts is a vector of contact maps".into());
@@ -1910,6 +1912,10 @@ fn scene_spec(
             let Value::Map(contact) = item else {
                 return Err(shape.into());
             };
+            contact_drags.push(
+                numbers(get(contact, "drag"), 3)
+                    .map_or([0.0; 3], |drag| [drag[0], drag[1], drag[2]]),
+            );
             use crate::host::gui::mesh::Contact;
             let contact = if let Some(plane) = numbers(get(contact, "plane"), 4) {
                 let length =
@@ -1956,6 +1962,7 @@ fn scene_spec(
         palettes,
         draws,
         contacts,
+        contact_drags,
     }))
 }
 
