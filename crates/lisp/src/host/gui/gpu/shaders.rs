@@ -738,6 +738,7 @@ const EDGE_BAND: f32 = 0.004;
 const EDGE_SPREAD: f32 = 0.5;
 const FIRM_INSET: f32 = 0.25;
 const FIRM_SOFTNESS: f32 = 0.5;
+const MAX_SQUASH: f32 = 0.02;
 
 // `mesh::smooth_outside`: `distance`'s smooth maximum with 0 over `band`
 fn smooth_outside(distance: f32, band: f32) -> f32 {
@@ -852,7 +853,7 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         let eased = smooth_outside(distance, band);
         let into = 1.0 - smoothstep(-band, band, distance);
         let inset = FIRM_INSET * depth * clamp(1.0 - softness / FIRM_SOFTNESS, 0.0, 1.0) * into;
-        let moved = eased - distance - inset;
+        let moved = min(eased - distance - inset, MAX_SQUASH * softness);
         var lift = 0.0;
         var slope = 0.0;
         if (depth > 0.0 && distance > 0.0) {

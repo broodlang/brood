@@ -1190,6 +1190,10 @@ pub const EDGE_SPREAD: f32 = 0.5;
 /// round it), as a share of the press's depth, for softness 0, none from `FIRM_SOFTNESS` up.
 pub const FIRM_INSET: f32 = 0.25;
 pub const FIRM_SOFTNESS: f32 = 0.5;
+/// The farthest skin of softness 1 is laid toward a contact's surface (metres); softer skin less
+/// in proportion. Pressed further (a pose that pushes a face deep through glass), skin passes the
+/// surface rather than being flattened away from what lies under it (an eye, the mouth) (ADR-805).
+pub const MAX_SQUASH: f32 = 0.02;
 
 /// A shape pressing on skin (ADR-805), in world space.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1288,7 +1292,9 @@ pub fn deform_by_contacts(
         let into = 1.0 - smoothstep(-band, band, distance);
         // a firm part (a nipple) sits a little behind the surface, sunk into the softer flesh round it
         let inset = FIRM_INSET * depth * (1.0 - softness / FIRM_SOFTNESS).clamp(0.0, 1.0) * into;
-        let moved = eased - distance - inset;
+        // at most `MAX_SQUASH` × softness: tissue gives only so far (a lid, bone, barely); pushed
+        // further, the skin passes the surface with the rest of her rather than opening holes
+        let moved = (eased - distance - inset).min(MAX_SQUASH * softness);
         // the ring: nothing at the patch's edge, rising to its crest a little way out, falling
         // away; as wide as the press is deep, wider and higher for soft flesh
         let (mut lift, mut slope) = (0.0, 0.0);
@@ -8390,6 +8396,11 @@ mod tests {
         let (far, far_normal) =
             deform_by_contacts(&floor, &depths, &[], [0.0, 0.2, 0.0], down, 1.0);
         assert_eq!((far, far_normal), ([0.0, 0.2, 0.0], down));
+        // pushed far past the surface, firm skin gives only so far (MAX_SQUASH × softness) and passes
+        // it, rather than being flattened away from what lies under it
+        let deep_depths = contact_depths(&floor, [[0.0, -0.05, 0.0]].iter());
+        let (deep, _) = deform_by_contacts(&floor, &deep_depths, &[], [0.0, -0.05, 0.0], down, 0.1);
+        assert!(deep[1] < -0.04, "{deep:?}");
         // dragged along the floor by its friction: inside, the whole drag; far off, none
         let drag = [[0.003, 0.0, 0.0]];
         let (held, _) = deform_by_contacts(&floor, &depths, &drag, [0.0, -0.005, 0.0], down, 1.0);
