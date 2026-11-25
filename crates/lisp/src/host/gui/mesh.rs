@@ -171,8 +171,12 @@ pub const MAX_VERTICES: usize = 3 << 20;
 /// The most bytes of morph targets one mesh may carry as uploaded: 24 bytes a vertex a target
 /// (position and normal offsets, every vertex, as a glTF buffer holds them), before they are
 /// kept sparse. Neither painter keeps them dense: the GPU target uploads one blended offset a
-/// vertex a frame. The cap bounds what one `gui/mesh` call may make the host unpack.
-pub const MAX_MORPH_BYTES: usize = 128 << 20;
+/// vertex a frame. The cap bounds what one `gui/mesh` call may make the host unpack: a guard
+/// against a bad file, not a cost kept (the dense input lives only while the call sorts it into
+/// sparse targets). 256 MiB: a figure of 70,000 vertices has room for some 150 targets (at 128
+/// MiB its 79 were all spoken for). Sparse input (indices and offsets a target) is the real
+/// cure and would make the cap count what is kept.
+pub const MAX_MORPH_BYTES: usize = 256 << 20;
 /// The most indices one mesh may have (4 bytes each on the GPU target, under 256 MiB).
 pub const MAX_INDICES: usize = 63 << 20;
 
