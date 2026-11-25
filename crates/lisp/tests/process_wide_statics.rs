@@ -146,6 +146,8 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("host/gui/backend/degradation.rs", "D", OneMachine),
     // The GUI thread's exit gate: one GUI thread per OS process, shut once at its exit.
     ("host/gui/backend/exit_gate.rs", "EXIT_GATE", OneMachine),
+    // the GPU's time on recent frames' scenes (ADR-801): a log a person reads, one GPU per process
+    ("host/gui/scene_gpu_times.rs", "LOG", Diagnostic),
     // the offscreen painter's one thread (gui/render-frame, ADR-609): text shaping cannot
     // move between threads, so every runtime in the process sends its frames to this one
     ("host/gui/backend/offscreen.rs", "T", OneMachine),

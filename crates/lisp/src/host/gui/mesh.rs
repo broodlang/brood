@@ -1895,7 +1895,8 @@ pub struct EyeSeen {
     pub uv: [f32; 2],
     /// How much of the pupil is there, 0 … 1.
     pub pupil: f32,
-    /// The normal the highlights are reflected about: the cornea's, the mesh's at the limbus.
+    /// The normal the highlights are reflected about: the cornea's, the eyeball's own at the
+    /// limbus and over the white (ADR-804).
     pub normal: [f32; 3],
     /// How much of that normal is the cornea's, 0 … 1.
     pub cornea: f32,
@@ -1941,8 +1942,9 @@ pub fn light_under_cornea(under: &UnderCornea, to_light: [f32; 3]) -> ([f32; 3],
 /// the mesh's there, `frame` its eye's. The mesh only says which pixels the eye covers: the
 /// line through the fragment is met with the cornea's sphere on the viewer's side, bent there
 /// by Snell's law (`ior`), and followed to the iris's plane, and the texture is read at that
-/// point's place on the iris's disc. A line that misses the cornea's cap (the white) is left
-/// as the mesh has it. The shader's `eye_seen` is the same.
+/// point's place on the iris's disc. A line that misses the cornea's cap (the white) keeps the
+/// mesh's uv and the light falls on the mesh's normal, but it reflects about the eyeball's own
+/// normal (ADR-804). The shader's `eye_seen` is the same.
 pub fn eye_seen(
     eye: &Eye,
     frame: &EyeFrame,
@@ -1970,6 +1972,13 @@ pub fn eye_seen(
         return missed;
     }
     let axis = [0, 1, 2].map(|index| frame.axis[index] / scale);
+    // the white reflects as the ball it is (ADR-804): its own normal, not the mesh's, which
+    // around the limbus may lean any way the mesh was modelled (a bowl for a painted iris)
+    let ball = normalize([0, 1, 2].map(|index| world[index] - frame.centre[index]));
+    let missed = EyeSeen {
+        normal: ball,
+        ..missed
+    };
     let iris_radius = eye.iris_radius * scale;
     let cornea_radius = eye.cornea_radius * scale;
     let ball_radius = eye.radius * scale;
@@ -2048,8 +2057,9 @@ pub fn eye_seen(
             at.iris_uv[1] - above * eye.iris_uv_radius,
         ],
         pupil,
+        // the cornea's normal, giving way to the ball's toward the limbus (ADR-804)
         normal: normalize(
-            [0, 1, 2].map(|index| normal[index] + (cornea_normal[index] - normal[index]) * cornea),
+            [0, 1, 2].map(|index| ball[index] + (cornea_normal[index] - ball[index]) * cornea),
         ),
         cornea,
         curvature: curvature + (1.0 / cornea_radius - curvature) * cornea,
@@ -3940,6 +3950,11 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                         ratio: 1.0 / optics.ior.max(1.0),
                     });
                     curvature = seen.curvature;
+                } else {
+                    // the white: reflecting as the ball; the light still falls on the mesh's
+                    // normal (ADR-804)
+                    normal = seen.normal;
+                    mirror_surface = seen.normal;
                 }
             }
             let occlusion = context
@@ -7779,25 +7794,23 @@ mod tests {
     }
 
     #[test]
-    fn the_white_of_an_eye_is_left_as_its_mesh_has_it() {
+    fn the_white_of_an_eye_reflects_as_the_ball_and_is_lit_as_its_mesh() {
         // a point of the eyeball 60° round from the axis, seen along its own normal: the line
-        // never meets the cornea
+        // never meets the cornea. The mesh's normal there (`seen_at`'s, straight up) is not the
+        // ball's: the white keeps the mesh's for the light and reflects about the ball's own
+        // (ADR-804), so a mesh modelled any way round the limbus shows no mirror band
         let eye = an_eye();
         let on_the_white = [eye.radius * 0.866, 0.0, eye.radius * 0.5];
         let seen = seen_at(&eye, &at_rest(), on_the_white, on_the_white);
-        assert_eq!(
-            seen,
-            EyeSeen {
-                through: false,
-                uv: [0.0, 0.0],
-                pupil: 0.0,
-                normal: [0.0, 1.0, 0.0],
-                cornea: 0.0,
-                curvature: 7.0,
-                iris_normal: [0.0, 1.0, 0.0],
-                axis: [0.0; 3],
-            }
-        );
+        assert!(!seen.through);
+        assert_eq!(seen.uv, [0.0, 0.0]);
+        assert_eq!(seen.cornea, 0.0);
+        assert_eq!(seen.curvature, 7.0);
+        assert_eq!(seen.iris_normal, [0.0, 1.0, 0.0]);
+        let ball = normalize(on_the_white);
+        for index in 0..3 {
+            near(seen.normal[index], ball[index]);
+        }
         // and a frame with no length (a vertex of another surface) is no eye at all
         let nowhere = EyeFrame::default();
         assert!(!seen_at(&eye, &nowhere, [0.0; 3], [0.0, 0.0, 1.0]).through);
@@ -7827,7 +7840,7 @@ mod tests {
     }
 
     #[test]
-    fn the_corneas_normal_gives_way_to_the_meshs_at_the_limbus() {
+    fn the_corneas_normal_gives_way_to_the_balls_at_the_limbus() {
         let eye = Eye {
             ior: 1.0,
             ..an_eye()
@@ -7841,8 +7854,16 @@ mod tests {
         let edge = cornea_at(0.999);
         assert!(edge.through);
         assert!(edge.cornea < 1e-3, "{}", edge.cornea);
-        // … where the normal is the mesh's again, and the curve the mesh's
-        assert!(edge.normal[1] > 0.999, "{:?}", edge.normal);
+        // … where the normal is the eyeball's own (ADR-804; not the mesh's, straight up in
+        // `seen_at`), and the curve the mesh's
+        let ball = normalize([0.999 * DEFAULT_IRIS_RADIUS, 0.0, iris]);
+        for index in 0..3 {
+            assert!(
+                (edge.normal[index] - ball[index]).abs() < 1e-3,
+                "{:?}",
+                edge.normal
+            );
+        }
         assert!((edge.curvature - 7.0).abs() < 0.2, "{}", edge.curvature);
         // past it the line misses the cap
         assert!(!cornea_at(1.01).through);
