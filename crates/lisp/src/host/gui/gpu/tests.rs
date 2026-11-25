@@ -185,6 +185,55 @@ fn the_mesh_shader_validates() {
     assert!(MESH_SRC.contains("const DETAIL_FLAT = 128.0 / 255.0;"));
     assert_eq!(DETAIL_FLAT, 128.0 / 255.0);
     assert!(MESH_SRC.contains("@group(3) @binding(4) var detail_texture: texture_2d<f32>;"));
+    // ADR-795: the scene uniform fits the slot each scene is given (`scene_uniform` pads to it,
+    // and would cut a longer one short without a word), it holds as many emitters as the CPU
+    // plans, and the shader's numbers are the CPU painter's
+    use crate::host::gui::mesh::{COAT_F0, MAX_EMITTERS, MIN_ROUGHNESS, RESOLVED_EXPONENT};
+    assert!(
+        declared as u64 <= scenes::SCENE_BYTES,
+        "SceneU is {declared} bytes, a scene's slot {}",
+        scenes::SCENE_BYTES
+    );
+    assert_eq!(scenes::SCENE_BYTES % 256, 0, "a dynamic offset's alignment");
+    assert!(MESH_SRC.contains(&format!("emitters: array<Emitter, {MAX_EMITTERS}>")));
+    assert_eq!(MAX_LIGHTS, 8, "the shader's `shaping` holds a light's each");
+    assert!(MESH_SRC.contains("var shaping: array<f32, 8>;"));
+    let emitter_type = module
+        .types
+        .iter()
+        .find(|(_, ty)| ty.name.as_deref() == Some("Emitter"))
+        .map(|(handle, _)| handle)
+        .expect("Emitter");
+    assert_eq!(layouter[emitter_type].size, 64, "four vec4s an emitter");
+    assert_eq!(
+        (COAT_F0, MIN_ROUGHNESS, RESOLVED_EXPONENT),
+        (0.02, 0.04, 4096.0)
+    );
+    assert!(MESH_SRC.contains("let reflectances = vec3<f32>(f0, f0, 0.02);"));
+    assert!(MESH_SRC.contains("fresnel(0.02, dot(view, half_vector))"));
+    assert!(MESH_SRC.contains("let clamped = clamp(roughness, 0.04, 1.0);"));
+    assert!(MESH_SRC.contains("if (exponent <= 4096.0 || turn <= 0.0) {"));
+    // a draw's coat rides beside its scatter, the rim's old slot spare
+    let coated = Draw {
+        material: Material {
+            coat: Some([0.5, 0.15]),
+            ..Material::default()
+        },
+        ..draw
+    };
+    let packed = scenes::draw_uniform(&coated, [0; 4], [0; 4]);
+    let floats: Vec<f32> = packed[80..112]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| f32::from_le_bytes(*word))
+        .collect();
+    assert_eq!(
+        floats[..4],
+        [Material::default().scatter_scale(), 0.5, 0.15, 0.0]
+    );
+    assert_eq!(floats[6], 0.0, "the rim is gone");
+    assert!(MESH_SRC.contains("coat = draw.skin.yz;"));
 }
 
 #[test]

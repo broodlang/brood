@@ -93,6 +93,22 @@ its slope times `:detail-strength`; its cavity damps the specular and the rim by
 distance. Any surface but `:hair` and `:strands`; a malformed key is an error raised by
 `gui/draw`. A material without `:detail` draws exactly as before.
 
+**Added: glossy surfaces reflect their surroundings and the shapes of lights (ADR-795).** Every
+surface but `:hair` and `:strands` now reflects the ambient light along the reflection of the
+view (the `:ambient-sh` blurred by roughness, or the sky and ground), scaled by a closed-form
+environment fit: about F0 head on, a bright edge at a grazing angle. A light may carry a
+`:shape` — `:disc` or `:sphere` as wide as its `:size` (a directional light's `:angle`), or on
+a spot `:rect` with `:extent [w h]` and `:up` — which glossy surfaces show in place of its
+Blinn-Phong highlight, at the radiance that brings the light its `:color`: an eye's catchlight
+is the softbox's rectangle. A scene's `:emitters` are shapes seen only in reflections (a window,
+a bounce card). A material's `:coat [strength roughness]` is a clear wet layer over it. Eight
+shapes a scene; malformed ones are errors raised by `gui/draw`. Reflections are occluded with
+the ambient and where a normal map turns them under the surface. **Breaking (look and spec):**
+every non-hair surface gains the ambient reflection; `:rim` is gone (ignored: remove it), the
+grazing reflection is the rim now; a `:roughness` under about 0.149 is no longer the same as
+0.149 (the exponent's ceiling of 4096 is lifted, held to what a pixel resolves on a curved
+surface).
+
 ## v0.59.0 — shadow like other languages, named fn, smooth textures, 3D meshes
 
 **Added: smooth textures (ADR-783).** `(gui/texture id image {:filter :smooth})` — and the same

@@ -62,6 +62,7 @@ fn scene() -> Scene {
         ambient_sh: None,
         exposure: 1.0,
         ambient_occlusion: None,
+        emitters: Vec::new(),
         background: [0.0, 0.0, 0.0, 0.0],
         palettes: vec![],
         draws: vec![Draw {

@@ -6,16 +6,16 @@
 
 use super::*;
 use crate::host::gui::mesh::{
-    LightKind, MAX_LIGHTS, MAX_SHADOW_VIEWS, Mesh, MeshBounds, Morph, SKIN_TABLE_HEIGHT,
-    SKIN_TABLE_WIDTH, Scene, ShadowPlan, Surface, add_morphs_packed, draw_bounds, shadow_plan,
-    skin_table, union,
+    EmitterPlan, LightKind, MAX_EMITTERS, MAX_LIGHTS, MAX_SHADOW_VIEWS, Mesh, MeshBounds, Morph,
+    SKIN_TABLE_HEIGHT, SKIN_TABLE_WIDTH, Scene, ShadowPlan, Surface, add_morphs_packed,
+    draw_bounds, emitter_plan, shadow_plan, skin_table, union,
 };
 
 /// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4,
 /// curvature 1.
 pub(super) const VERTEX_FLOATS: usize = 21;
-/// The `SceneU` uniform (2832 bytes), padded to the dynamic-offset alignment.
-const SCENE_BYTES: u64 = 3072;
+/// The `SceneU` uniform (3360 bytes), padded to the dynamic-offset alignment.
+pub(super) const SCENE_BYTES: u64 = 3584;
 /// The `DrawU` uniform, padded to the dynamic-offset alignment.
 pub(super) const DRAW_BYTES: u64 = 256;
 const SAMPLES: u32 = 4;
@@ -735,7 +735,7 @@ impl MeshGpu {
                 union(bounds, more)
             });
             let shadows = shadow_plan(scene, world);
-            scene_bytes.extend(scene_uniform(scene, &shadows));
+            scene_bytes.extend(scene_uniform(scene, &shadows, &emitter_plan(scene)));
             shadow_plans.push(shadows);
             // the scene's palettes, placed after the ones before
             let mut palette_starts = Vec::with_capacity(scene.palettes.len());
@@ -1122,14 +1122,11 @@ pub(super) fn draw_uniform(
     let mut floats = Vec::with_capacity(32);
     floats.extend_from_slice(&draw.model);
     floats.extend_from_slice(&material.color);
-    // `DrawU::skin`: what turns the mesh's curvature into the skin table's
-    floats.extend_from_slice(&[material.scatter_scale(), 0.0, 0.0, 0.0]);
-    floats.extend_from_slice(&[
-        material.roughness,
-        material.specular,
-        material.rim,
-        material.cutoff,
-    ]);
+    // `DrawU::skin`: what turns the mesh's curvature into the skin table's, then the `:coat`'s
+    // strength and roughness (ADR-795; 0: none)
+    let [coat_strength, coat_roughness] = material.coat.unwrap_or([0.0, 0.0]);
+    floats.extend_from_slice(&[material.scatter_scale(), coat_strength, coat_roughness, 0.0]);
+    floats.extend_from_slice(&[material.roughness, material.specular, 0.0, material.cutoff]);
     let lobes = material.lobes();
     floats.extend_from_slice(&[lobes[0], lobes[1], lobes[2], material.f0()]);
     let mut bytes = floats_bytes(&floats);
@@ -1163,8 +1160,8 @@ struct DrawPlan {
 }
 
 /// `scene`'s `SceneU` uniform (the WGSL struct in `MESH_SRC`), padded to [`SCENE_BYTES`].
-fn scene_uniform(scene: &Scene, shadows: &ShadowPlan) -> Vec<u8> {
-    let mut bytes = words_bytes(&scene_words(scene, shadows));
+fn scene_uniform(scene: &Scene, shadows: &ShadowPlan, emitters: &EmitterPlan) -> Vec<u8> {
+    let mut bytes = words_bytes(&scene_words(scene, shadows, emitters));
     bytes.resize(SCENE_BYTES as usize, 0);
     bytes
 }
@@ -1186,16 +1183,17 @@ pub(super) fn scene_uniform_len() -> usize {
         ambient_sh: None,
         exposure: 1.0,
         ambient_occlusion: None,
+        emitters: Vec::new(),
         background: [0.0; 4],
         palettes: Vec::new(),
         draws: Vec::new(),
     };
-    scene_words(&scene, &shadow_plan(&scene, None)).len() * 4
+    scene_words(&scene, &shadow_plan(&scene, None), &emitter_plan(&scene)).len() * 4
 }
 
 /// The words of `scene`'s `SceneU`: its camera, its lights, its ambient and exposure, and the
 /// shadow views `shadows` plans.
-fn scene_words(scene: &Scene, shadows: &ShadowPlan) -> Vec<u32> {
+fn scene_words(scene: &Scene, shadows: &ShadowPlan, emitters: &EmitterPlan) -> Vec<u32> {
     let mut words: Vec<u32> = Vec::with_capacity(SCENE_BYTES as usize / 4);
     let floats = |words: &mut Vec<u32>, values: &[f32]| {
         words.extend(values.iter().map(|value| value.to_bits()));
@@ -1235,7 +1233,8 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan) -> Vec<u32> {
                     LightKind::Spot => 2,
                 };
                 let (first, count) = shadows.lights[index];
-                words.extend_from_slice(&[kind, first, count, 0]);
+                // shaped: glossy surfaces show its shape, not a Blinn-Phong highlight (ADR-795)
+                words.extend_from_slice(&[kind, first, count, u32::from(emitters.shaped[index])]);
             }
             None => words.extend_from_slice(&[0; 20]),
         }
@@ -1296,7 +1295,48 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan) -> Vec<u32> {
         ],
     );
     // the picture's size in pixels, for a strand's pixel width (`mesh::strand_vertex`)
+    // … and how many emitters follow
     let (width, height) = scene.pixel_size();
-    floats(&mut words, &[width as f32, height as f32, 0.0, 0.0]);
+    floats(
+        &mut words,
+        &[
+            width as f32,
+            height as f32,
+            emitters.emitters.len().min(MAX_EMITTERS) as f32,
+            0.0,
+        ],
+    );
+    // the shapes glossy surfaces show (`mesh::PlannedEmitter`, the shader's `Emitter`)
+    for index in 0..MAX_EMITTERS {
+        match emitters.emitters.get(index) {
+            Some(emitter) => {
+                let [centre, facing, right, radiance] = [
+                    emitter.centre,
+                    emitter.facing,
+                    emitter.right,
+                    emitter.radiance,
+                ];
+                floats(
+                    &mut words,
+                    &[centre[0], centre[1], centre[2], emitter.shape.code() as f32],
+                );
+                floats(
+                    &mut words,
+                    &[
+                        facing[0],
+                        facing[1],
+                        facing[2],
+                        emitter.light.map_or(0.0, |light| (light + 1) as f32),
+                    ],
+                );
+                floats(&mut words, &[right[0], right[1], right[2], emitter.half[0]]);
+                floats(
+                    &mut words,
+                    &[radiance[0], radiance[1], radiance[2], emitter.half[1]],
+                );
+            }
+            None => words.extend_from_slice(&[0; 16]),
+        }
+    }
     words
 }

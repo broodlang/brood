@@ -1522,7 +1522,7 @@ fn scene_spec(
 ) -> Result<Option<crate::host::gui::mesh::Scene>, String> {
     use crate::host::gui::mesh::{
         AmbientOcclusion, DEFAULT_OCCLUSION_RADIUS, Draw, MAX_DETAIL_SCALE, MAX_DETAIL_STRENGTH,
-        MAX_SCATTER, Material, SPECULAR_TO_F0, Scene, Surface,
+        MAX_EMITTERS, MAX_SCATTER, Material, SPECULAR_TO_F0, Scene, Surface,
     };
     let Value::Map(map) = spec else {
         return Ok(None);
@@ -1702,9 +1702,23 @@ fn scene_spec(
                 ));
             }
         };
-        if let Some(rim) = number("rim") {
-            material.rim = rim.clamp(0.0, 16.0);
-        }
+        // a clear layer over the surface (ADR-795), refused when malformed: a wet lip drawn dry
+        // says nothing. (`:rim` is gone with the same decision — the surroundings reflected at
+        // a grazing angle are the rim — and is now a key a material does not have: ignored.)
+        material.coat = match get(material_map, "coat") {
+            None | Some(Value::Nil) => None,
+            Some(given) => match numbers(Some(given), 2) {
+                Some(coat) if (0.0..=1.0).contains(&coat[0]) && (0.0..=1.0).contains(&coat[1]) => {
+                    Some([coat[0], coat[1]])
+                }
+                _ => {
+                    return Err(format!(
+                        "a material's :coat is [strength roughness], a clear layer over the surface, each 0 … 1, not {}",
+                        crate::syntax::printer::print(heap, given)
+                    ));
+                }
+            },
+        };
         if let Some(cutoff) = number("cutoff") {
             material.cutoff = cutoff.clamp(0.0, 1.0);
         }
@@ -1845,6 +1859,16 @@ fn scene_spec(
         }
         _ => None,
     };
+    // the shapes seen only in reflections (ADR-795); with the shaped lights, at most
+    // `MAX_EMITTERS`
+    let emitters = reflected_emitters_spec(heap, get(map, "emitters"), num)?;
+    let shaped = lights.iter().filter(|light| light.shape.is_some()).count();
+    if shaped + emitters.len() > MAX_EMITTERS {
+        return Err(format!(
+            "{shaped} lights with a :shape and {} :emitters are more than the {MAX_EMITTERS} shapes a scene's reflections show",
+            emitters.len()
+        ));
+    }
     Ok(Some(Scene {
         x: rect[0],
         y: rect[1],
@@ -1858,10 +1882,189 @@ fn scene_spec(
         ambient_sh,
         exposure,
         ambient_occlusion,
+        emitters,
         background,
         palettes,
         draws,
     }))
+}
+
+/// A `:shape` read: `:disc`, `:rect` or `:sphere` (ADR-795), or why it is none of them.
+fn emitter_shape(
+    heap: &Heap,
+    given: Value,
+) -> Result<crate::host::gui::mesh::EmitterShape, String> {
+    use crate::host::gui::mesh::EmitterShape;
+    let name = match given {
+        Value::Keyword(symbol) => value::symbol_name_ref(symbol),
+        _ => "",
+    };
+    match name {
+        "disc" => Ok(EmitterShape::Disc),
+        "rect" => Ok(EmitterShape::Rect),
+        "sphere" => Ok(EmitterShape::Sphere),
+        _ => Err(format!(
+            ":shape is :disc, :rect or :sphere, not {}",
+            crate::syntax::printer::print(heap, given)
+        )),
+    }
+}
+
+/// A scene spec's `:emitters` (absent or nil: none) read into `mesh::Emitter`s (ADR-795): shapes
+/// seen only in reflections, each `{:shape :rect :position [x y z] :direction [x y z] :up
+/// [x y z] :extent [w h] :radiance [r g b]}`, or with `:shape :disc` and `:size d` in place of
+/// `:up` and `:extent`, or `{:shape :sphere :position … :size d :radiance …}`. Metres;
+/// `:direction` is the way its light travels (the way it faces), `:up` (world up by default)
+/// where a rectangle's height runs, `:radiance` linear, 0 or more, on the ambient's scale. A
+/// malformed one, a key its shape does not take, or more than `MAX_EMITTERS` is refused with
+/// why.
+fn reflected_emitters_spec(
+    heap: &Heap,
+    given: Option<Value>,
+    num: &dyn Fn(Value) -> f32,
+) -> Result<Vec<crate::host::gui::mesh::Emitter>, String> {
+    use crate::host::gui::mesh::{Emitter, EmitterShape, MAX_EMITTERS};
+    let shown = |value: Value| crate::syntax::printer::print(heap, value);
+    let id = match given {
+        None | Some(Value::Nil) => return Ok(Vec::new()),
+        Some(Value::Vector(id)) => id,
+        Some(other) => {
+            return Err(format!(
+                ":emitters is a vector of emitter maps, not {}",
+                shown(other)
+            ));
+        }
+    };
+    let entries = heap.vector(id);
+    if entries.len() > MAX_EMITTERS {
+        return Err(format!(
+            "{} :emitters is more than the {MAX_EMITTERS} shapes a scene's reflections show",
+            entries.len()
+        ));
+    }
+    let numbers = |key: &str, value: Value, count: usize| -> Result<Vec<f32>, String> {
+        let parsed = match value {
+            Value::Vector(id) if heap.vector(id).len() == count => heap
+                .vector(id)
+                .iter()
+                .map(|item| match item {
+                    Value::Int(_) | Value::Float(_) | Value::Ratio(_) | Value::Decimal(_) => {
+                        Some(num(*item)).filter(|number| number.is_finite())
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<f32>>>(),
+            _ => None,
+        };
+        parsed.ok_or_else(|| format!(":{key} is {count} numbers, not {}", shown(value)))
+    };
+    let one = |entry: Value| -> Result<Emitter, String> {
+        let Value::Map(map) = entry else {
+            return Err(format!("an emitter is a map, not {}", shown(entry)));
+        };
+        let get = |key: &str| heap.map_get(map, value::kw(key));
+        let shape = match get("shape") {
+            Some(given) => emitter_shape(heap, given)?,
+            None => return Err("an emitter needs a :shape, :disc, :rect or :sphere".to_string()),
+        };
+        let (name, takes): (&str, &[&str]) = match shape {
+            EmitterShape::Rect => (
+                "a :rect emitter",
+                &["shape", "position", "direction", "up", "extent", "radiance"],
+            ),
+            EmitterShape::Disc => (
+                "a :disc emitter",
+                &["shape", "position", "direction", "size", "radiance"],
+            ),
+            EmitterShape::Sphere => (
+                "a :sphere emitter",
+                &["shape", "position", "size", "radiance"],
+            ),
+        };
+        for (key, _) in heap.map_entries(map) {
+            let key_name = match key {
+                Value::Keyword(symbol) => value::symbol_name_ref(symbol),
+                _ => "",
+            };
+            if !takes.contains(&key_name) {
+                return Err(format!(
+                    "{name} has no {}; it takes {}",
+                    shown(key),
+                    takes
+                        .iter()
+                        .map(|key| format!(":{key}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ));
+            }
+        }
+        let needed = |key: &str| get(key).ok_or_else(|| format!("{name} needs a :{key}"));
+        let triple = |key: &str, value: Value| {
+            numbers(key, value, 3).map(|values| [values[0], values[1], values[2]])
+        };
+        let heading = |key: &str, value: Value| {
+            let direction = triple(key, value)?;
+            if direction.iter().all(|axis| *axis == 0.0) {
+                return Err(format!(":{key} must not be [0 0 0]"));
+            }
+            Ok(direction)
+        };
+        let position = triple("position", needed("position")?)?;
+        let radiance = triple("radiance", needed("radiance")?)?;
+        if radiance.iter().any(|channel| *channel < 0.0) {
+            return Err(format!(
+                ":radiance is 0 or more, not {}",
+                shown(needed("radiance")?)
+            ));
+        }
+        let direction = match shape {
+            EmitterShape::Sphere => [0.0, -1.0, 0.0],
+            EmitterShape::Disc | EmitterShape::Rect => heading("direction", needed("direction")?)?,
+        };
+        let up = match get("up") {
+            Some(given) => heading("up", given)?,
+            None => [0.0, 1.0, 0.0],
+        };
+        let extent = if shape == EmitterShape::Rect {
+            let given = needed("extent")?;
+            let extent = numbers("extent", given, 2)?;
+            if extent.iter().any(|side| *side <= 0.0) {
+                return Err(format!(
+                    ":extent is [width height], metres above 0, not {}",
+                    shown(given)
+                ));
+            }
+            [extent[0], extent[1]]
+        } else {
+            let given = needed("size")?;
+            match given {
+                Value::Int(_) | Value::Float(_) | Value::Ratio(_) | Value::Decimal(_)
+                    if num(given).is_finite() && num(given) > 0.0 =>
+                {
+                    [num(given), num(given)]
+                }
+                _ => {
+                    return Err(format!(
+                        ":size is its diameter, metres above 0, not {}",
+                        shown(given)
+                    ));
+                }
+            }
+        };
+        Ok(Emitter {
+            shape,
+            position,
+            direction,
+            up,
+            extent,
+            radiance,
+        })
+    };
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| one(*entry).map_err(|why| format!("emitter {index}: {why}")))
+        .collect()
 }
 
 /// A scene spec's `:lights` (absent or nil: none) read into `mesh::Light`s, or why they are
@@ -1950,7 +2153,9 @@ fn light_spec(
     given: Value,
     num: &dyn Fn(Value) -> f32,
 ) -> Result<crate::host::gui::mesh::Light, String> {
-    use crate::host::gui::mesh::{Light, LightKind, MAX_SHADOW_SIDE, MIN_SHADOW_SIDE, Shadow};
+    use crate::host::gui::mesh::{
+        EmitterShape, Light, LightKind, LightShape, MAX_SHADOW_SIDE, MIN_SHADOW_SIDE, Shadow,
+    };
     let shown = |value: Value| crate::syntax::printer::print(heap, value);
     let Value::Map(map) = given else {
         return Err(format!("a light is a map, not {}", shown(given)));
@@ -1988,11 +2193,11 @@ fn light_spec(
     let (name, takes): (&str, &[&str]) = match kind {
         LightKind::Directional => (
             "a directional light",
-            &["direction", "color", "angle", "shadow"],
+            &["direction", "color", "angle", "shadow", "shape"],
         ),
         LightKind::Point => (
             "a point light",
-            &["position", "color", "range", "size", "shadow"],
+            &["position", "color", "range", "size", "shadow", "shape"],
         ),
         LightKind::Spot => (
             "a spot light",
@@ -2004,12 +2209,19 @@ fn light_spec(
                 "cone",
                 "size",
                 "shadow",
+                "shape",
+                "extent",
+                "up",
             ],
         ),
     };
     let mut light = Light::directional([0.0, -1.0, 0.0], [1.0, 1.0, 1.0]);
     light.kind = kind;
     let mut has_direction = false;
+    // the shape glossy surfaces show it as (ADR-795), put together after every key is read
+    let mut shape = None;
+    let mut extent = None;
+    let mut up = None;
     for (key, value) in heap.map_entries(map) {
         let key_name = match key {
             Value::Keyword(symbol) => value::symbol_name_ref(symbol),
@@ -2025,6 +2237,7 @@ fn light_spec(
                     " (a directional light's size is its :angle, in radians)"
                 }
                 (_, "angle") => " (a point or spot light's size is its :size, in metres)",
+                (_, "extent" | "up") => " (a :shape :rect's, which only a spot light takes)",
                 _ => "",
             };
             return Err(format!(
@@ -2055,6 +2268,24 @@ fn light_spec(
                 light.color = color;
             }
             "range" => light.range = positive("range", value)?,
+            "shape" => shape = Some(emitter_shape(heap, value)?),
+            "extent" => {
+                let sides = numbers("extent", value, 2)?;
+                if sides.iter().any(|side| *side <= 0.0) {
+                    return Err(format!(
+                        ":extent is [width height], metres above 0, not {}",
+                        shown(value)
+                    ));
+                }
+                extent = Some([sides[0], sides[1]]);
+            }
+            "up" => {
+                let heading = triple("up", value)?;
+                if heading.iter().all(|axis| *axis == 0.0) {
+                    return Err(":up must not be [0 0 0]".to_string());
+                }
+                up = Some(heading);
+            }
             "size" | "angle" => {
                 light.size = number(value)
                     .filter(|amount| *amount >= 0.0)
@@ -2171,6 +2402,54 @@ fn light_spec(
     }
     if kind != LightKind::Point && !has_direction {
         return Err(format!("{name} needs a :direction"));
+    }
+    // a shape needs the size it is drawn at, and only the kind of light that can have it
+    let is_rect = shape == Some(EmitterShape::Rect);
+    if !is_rect && (extent.is_some() || up.is_some()) {
+        return Err(":extent and :up are a :shape :rect's".to_string());
+    }
+    if let Some(shape) = shape {
+        match (kind, shape) {
+            (LightKind::Directional, EmitterShape::Rect) => {
+                return Err(
+                    "a directional light's :shape is a :disc (or :sphere) of its :angle, not :rect"
+                        .to_string(),
+                );
+            }
+            (LightKind::Point, EmitterShape::Disc | EmitterShape::Rect) => {
+                return Err(
+                    "a point light's :shape is :sphere; a :disc or :rect faces a :direction (give it a :cone to make it a spot)"
+                        .to_string(),
+                );
+            }
+            (_, EmitterShape::Rect) if extent.is_none() => {
+                return Err(
+                    ":shape :rect needs an :extent [width height], metres above 0".to_string(),
+                );
+            }
+            (LightKind::Directional, _) if light.size <= 0.0 => {
+                return Err(
+                    "a directional light's :shape is as big as its :angle, radians above 0: give it one"
+                        .to_string(),
+                );
+            }
+            (_, EmitterShape::Disc | EmitterShape::Sphere) if light.size <= 0.0 => {
+                return Err(format!(
+                    ":shape {} is as big as the light's :size, its diameter in metres above 0: give it one",
+                    if shape == EmitterShape::Disc {
+                        ":disc"
+                    } else {
+                        ":sphere"
+                    }
+                ));
+            }
+            _ => {}
+        }
+        light.shape = Some(LightShape {
+            shape,
+            extent: extent.unwrap_or([0.0, 0.0]),
+            up: up.unwrap_or([0.0, 1.0, 0.0]),
+        });
     }
     Ok(light)
 }
@@ -3495,5 +3774,302 @@ mod gui_scene_light_tests {
         refused("{:detail 7 :detail-cavity 1.5}", cavity);
         refused("{:detail 7 :detail-cavity -0.1}", cavity);
         refused("{:detail 7 :detail-cavity true}", cavity);
+    }
+
+    #[test]
+    fn a_lights_shape_the_emitters_and_a_coat_read_and_default() {
+        // ADR-795: without the keys a light is a point, a scene has no emitters, a material no
+        // coat; `:rim` is a key a material no longer has, ignored as any unknown one
+        use crate::host::gui::mesh::{EmitterShape, LightShape, Material};
+        let plain = scene_with(
+            "[{:position [0 2 0] :direction [0 -1 0] :cone [0.3 0.6] :size 0.4}]",
+            "{:rim 0.5}",
+        )
+        .expect("a scene");
+        assert_eq!(plain.lights[0].shape, None);
+        assert!(plain.emitters.is_empty());
+        assert_eq!(plain.draws[0].material, Material::default());
+        let scene = scene_keyed(
+            "[{:position [0 2 1] :direction [0 -1 -1] :cone [0.5 0.8] :size 0.3
+               :shape :rect :extent [1.2 0.8] :up [0 0 1]}
+              {:position [0 2 1] :direction [0 -1 -1] :cone [0.5 0.8] :shape :rect :extent [1 2]}
+              {:position [0 2 0] :size 0.1 :shape :sphere}
+              {:direction [0 -1 0] :angle 0.02 :shape :disc}]",
+            "{:coat [0.5 0.15]}",
+            ":emitters [{:shape :rect :position [1.7 1.6 -4.5] :direction [0 0 1] :extent [1.5 1.3]
+                         :radiance [6 7 8]}
+                        {:shape :rect :position [0 1 0] :direction [1 0 0] :up [0 0 1]
+                         :extent [1 2] :radiance [0 0 0]}
+                        {:shape :disc :position [0 1 0] :direction [0 -1 0] :size 0.5
+                         :radiance [1 1 1]}
+                        {:shape :sphere :position [0 1 0] :size 0.25 :radiance [2 2 2]}]",
+        )
+        .expect("a scene");
+        assert_eq!(
+            scene.lights[0].shape,
+            Some(LightShape {
+                shape: EmitterShape::Rect,
+                extent: [1.2, 0.8],
+                up: [0.0, 0.0, 1.0]
+            })
+        );
+        assert_eq!(scene.lights[0].size, 0.3, "its shadow's softness still");
+        assert_eq!(
+            scene.lights[1].shape,
+            Some(LightShape {
+                shape: EmitterShape::Rect,
+                extent: [1.0, 2.0],
+                up: [0.0, 1.0, 0.0]
+            })
+        );
+        let shapes: Vec<_> = scene.lights[2..]
+            .iter()
+            .map(|light| light.shape.map(|shape| shape.shape))
+            .collect();
+        assert_eq!(
+            shapes,
+            [Some(EmitterShape::Sphere), Some(EmitterShape::Disc)]
+        );
+        let disc = lights(
+            "[{:position [0 2 1] :direction [0 -1 0] :cone [0.5 0.8] :size 0.3 :shape :disc}]",
+        )
+        .expect("a disc");
+        assert_eq!(
+            disc.lights[0].shape.map(|shape| shape.shape),
+            Some(EmitterShape::Disc)
+        );
+        assert_eq!(scene.draws[0].material.coat, Some([0.5, 0.15]));
+        let window = &scene.emitters[0];
+        assert_eq!(
+            (window.shape, window.position, window.direction, window.up),
+            (
+                EmitterShape::Rect,
+                [1.7, 1.6, -4.5],
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0]
+            )
+        );
+        assert_eq!(
+            (window.extent, window.radiance),
+            ([1.5, 1.3], [6.0, 7.0, 8.0])
+        );
+        assert_eq!(scene.emitters[1].up, [0.0, 0.0, 1.0]);
+        assert_eq!(
+            (scene.emitters[2].shape, scene.emitters[2].extent),
+            (EmitterShape::Disc, [0.5, 0.5])
+        );
+        assert_eq!(
+            (scene.emitters[3].shape, scene.emitters[3].extent),
+            (EmitterShape::Sphere, [0.25, 0.25])
+        );
+        // nil is the key left out; the ends of a coat's range
+        let nil = scene_keyed("[]", "{:coat nil}", ":emitters nil").expect("a scene");
+        assert_eq!(nil.draws[0].material.coat, None);
+        assert!(nil.emitters.is_empty());
+        let ends = scene_with("[]", "{:coat [1 0]}").expect("a scene");
+        assert_eq!(ends.draws[0].material.coat, Some([1.0, 0.0]));
+        // eight shapes together: five lights' and three emitters'
+        let five = "{:position [0 2 0] :size 0.1 :shape :sphere} ".repeat(5);
+        let emitter = "{:shape :sphere :position [0 1 0] :size 0.25 :radiance [2 2 2]} ";
+        let full = scene_keyed(
+            &format!("[{five}]"),
+            "{}",
+            &format!(":emitters [{}]", emitter.repeat(3)),
+        )
+        .expect("eight shapes");
+        assert_eq!(full.emitters.len(), 3);
+    }
+
+    #[test]
+    fn a_malformed_shape_emitter_or_coat_is_refused_with_why() {
+        let refused = |result: Result<Scene, String>, why: &str| {
+            let error = result.expect_err(why);
+            assert!(
+                error.contains("%gui-draw") && error.contains(why),
+                "{error:?} does not say {why:?}"
+            );
+        };
+        let spot = "{:position [0 2 0] :direction [0 -1 0] :cone [0.3 0.6]";
+        refused(
+            lights(&format!("[{spot} :shape :square}}]")),
+            ":shape is :disc, :rect or :sphere",
+        );
+        refused(
+            lights(&format!("[{spot} :shape \"rect\"}}]")),
+            ":shape is :disc, :rect or :sphere",
+        );
+        // a shape without the size it is drawn at
+        refused(
+            lights(&format!("[{spot} :shape :disc}}]")),
+            ":shape :disc is as big as the light's :size",
+        );
+        refused(
+            lights(&format!("[{spot} :shape :sphere :size 0}}]")),
+            ":shape :sphere is as big as the light's :size",
+        );
+        refused(
+            lights(&format!("[{spot} :shape :rect :size 0.5}}]")),
+            ":shape :rect needs an :extent",
+        );
+        refused(
+            lights("[{:direction [0 -1 0] :shape :disc}]"),
+            "as big as its :angle",
+        );
+        // an extent that is not two lengths, an up that points nowhere
+        for extent in ["[1]", "[1 0]", "[1 -2]", "[1 2 3]", "1.5", ":wide"] {
+            refused(
+                lights(&format!("[{spot} :shape :rect :extent {extent}}}]")),
+                ":extent is",
+            );
+        }
+        refused(
+            lights(&format!(
+                "[{spot} :shape :rect :extent [1 2] :up [0 0 0]}}]"
+            )),
+            ":up must not be [0 0 0]",
+        );
+        refused(
+            lights(&format!("[{spot} :shape :rect :extent [1 2] :up [0 1]}}]")),
+            ":up is 3 numbers",
+        );
+        // a rectangle's keys on what is not one, and shapes a kind of light cannot have
+        refused(
+            lights(&format!("[{spot} :size 0.5 :shape :disc :extent [1 2]}}]")),
+            ":extent and :up are a :shape :rect's",
+        );
+        refused(
+            lights(&format!("[{spot} :up [0 1 0]}}]")),
+            ":extent and :up are a :shape :rect's",
+        );
+        refused(
+            lights("[{:position [0 2 0] :shape :rect :extent [1 2]}]"),
+            "has no :extent (a :shape :rect's, which only a spot light takes)",
+        );
+        refused(
+            lights("[{:position [0 2 0] :size 0.5 :shape :disc}]"),
+            "a point light's :shape is :sphere",
+        );
+        refused(
+            lights("[{:direction [0 -1 0] :angle 0.1 :shape :rect}]"),
+            "a directional light's :shape is a :disc",
+        );
+        refused(
+            lights("[{:direction [0 -1 0] :angle 0.1 :shape :disc :up [0 1 0]}]"),
+            "has no :up",
+        );
+        // the emitters
+        let emitters = |spec: &str| scene_keyed("[]", "{}", &format!(":emitters {spec}"));
+        refused(emitters("{:shape :rect}"), ":emitters is a vector");
+        refused(emitters("[:window]"), "emitter 0: an emitter is a map");
+        refused(
+            emitters("[{:position [0 1 0] :radiance [1 1 1]}]"),
+            "an emitter needs a :shape",
+        );
+        refused(
+            emitters("[{:shape :cube :position [0 1 0] :radiance [1 1 1]}]"),
+            ":shape is :disc, :rect or :sphere",
+        );
+        let rect =
+            "{:shape :rect :position [0 1 0] :direction [0 0 1] :extent [1 2] :radiance [1 1 1]";
+        refused(
+            emitters(&format!("[{rect}}} {rect} :color [1 1 1]}}]")),
+            "emitter 1: a :rect emitter has no :color",
+        );
+        refused(
+            emitters(&format!("[{rect} :size 2}}]")),
+            "a :rect emitter has no :size",
+        );
+        refused(
+            emitters("[{:shape :rect :direction [0 0 1] :extent [1 2] :radiance [1 1 1]}]"),
+            "a :rect emitter needs a :position",
+        );
+        refused(
+            emitters("[{:shape :rect :position [0 1 0] :extent [1 2] :radiance [1 1 1]}]"),
+            "a :rect emitter needs a :direction",
+        );
+        refused(
+            emitters("[{:shape :rect :position [0 1 0] :direction [0 0 1] :radiance [1 1 1]}]"),
+            "a :rect emitter needs a :extent",
+        );
+        refused(
+            emitters("[{:shape :rect :position [0 1 0] :direction [0 0 1] :extent [1 2]}]"),
+            "a :rect emitter needs a :radiance",
+        );
+        refused(
+            emitters(
+                "[{:shape :rect :position [0 1 0] :direction [0 0 0] :extent [1 2] :radiance [1 1 1]}]",
+            ),
+            ":direction must not be [0 0 0]",
+        );
+        refused(
+            emitters(
+                "[{:shape :rect :position [0 1 0] :direction [0 0 1] :extent [1 0] :radiance [1 1 1]}]",
+            ),
+            ":extent is [width height], metres above 0",
+        );
+        refused(
+            emitters(
+                "[{:shape :rect :position [0 1] :direction [0 0 1] :extent [1 2] :radiance [1 1 1]}]",
+            ),
+            ":position is 3 numbers",
+        );
+        refused(
+            emitters(&format!("[{rect} :up [0 0 0]}}]")),
+            ":up must not be [0 0 0]",
+        );
+        refused(
+            emitters(
+                "[{:shape :rect :position [0 1 0] :direction [0 0 1] :extent [1 2] :radiance [1 -1 1]}]",
+            ),
+            ":radiance is 0 or more",
+        );
+        refused(
+            emitters("[{:shape :disc :position [0 1 0] :direction [0 0 1] :radiance [1 1 1]}]"),
+            "a :disc emitter needs a :size",
+        );
+        refused(
+            emitters(
+                "[{:shape :disc :position [0 1 0] :direction [0 0 1] :size 0 :radiance [1 1 1]}]",
+            ),
+            ":size is its diameter, metres above 0",
+        );
+        refused(
+            emitters("[{:shape :sphere :position [0 1 0] :size [1 1] :radiance [1 1 1]}]"),
+            ":size is its diameter, metres above 0",
+        );
+        refused(
+            emitters(
+                "[{:shape :sphere :position [0 1 0] :direction [0 0 1] :size 1 :radiance [1 1 1]}]",
+            ),
+            "a :sphere emitter has no :direction",
+        );
+        // more shapes than a scene's reflections show: nine emitters, or eight and a shaped light
+        let sphere = "{:shape :sphere :position [0 1 0] :size 0.25 :radiance [2 2 2]} ";
+        refused(
+            emitters(&format!("[{}]", sphere.repeat(9))),
+            "9 :emitters is more than the 8 shapes",
+        );
+        refused(
+            scene_keyed(
+                "[{:position [0 2 0] :size 0.1 :shape :sphere}]",
+                "{}",
+                &format!(":emitters [{}]", sphere.repeat(8)),
+            ),
+            "1 lights with a :shape and 8 :emitters are more than the 8 shapes",
+        );
+        // a coat
+        let coat = ":coat is [strength roughness]";
+        for given in [
+            "0.5",
+            "[0.5]",
+            "[0.5 0.1 0.2]",
+            "[1.5 0.1]",
+            "[0.5 -0.1]",
+            "[0.5 2]",
+            ":wet",
+            "true",
+        ] {
+            refused(scene_with("[]", &format!("{{:coat {given}}}")), coat);
+        }
     }
 }

@@ -783,7 +783,8 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; pixel wide at least, `:width [root tip]` metres), `:base`, `:normal` and `:occlusion` (texture
 ;; handles), `:color`, `:roughness`, `:specular`, `:lobes`, `:scatter` (light under the skin,
 ;; below), `:detail` with `:detail-scale`, `:detail-strength` and `:detail-cavity` (a tiled
-;; micro-relief, below), `:rim`, `:cutoff`, `:double-sided`, `:cast-shadow` (true by default).
+;; micro-relief, below), `:coat` (a clear wet layer, below), `:cutoff`, `:double-sided`,
+;; `:cast-shadow` (true by default).
 ;; A glTF loader, a skeleton's maths, a camera — policy above this, in the engine. Both window
 ;; painters draw a scene: the GPU target with a depth buffer and 4× multisampling, the CPU
 ;; painter in software.
@@ -821,16 +822,48 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; glittering. The normal is laid over the `:normal` map's, or over the bare surface without
 ;; one, as a second height field: slopes add. It needs the mesh's tangents, as `:normal` does.
 ;; `:detail-strength` (0 … 16, default 1) multiplies its slope. The cavity damps the specular
-;; and the rim, never the diffuse or the ambient (a pore reflects less; it is not darker
-;; skin), by `:detail-cavity` (0 none … 1 all, the default); it needs no tangents. Any surface
+;; (the lights' and the surroundings'), never the diffuse or the ambient (a pore reflects less;
+;; it is not darker skin), by `:detail-cavity` (0 none … 1 all, the default); it needs no tangents. Any surface
 ;; but :hair and :strands reads it. A malformed `:detail` key is an error raised by gui/draw.
 ;; `:ambient-sh` is nine [r g b] L2 spherical-harmonic coefficients of the light arriving
 ;; from every way (linear radiance projected onto the real SH basis on world directions, in
 ;; the order L00 L1-1 L10 L11 L2-2 L2-1 L20 L21 L22, three.js's `SphericalHarmonics3`
 ;; normalisation: Y00 0.282095, Y1-1 0.488603·y, Y10 0.488603·z, Y11 0.488603·x …); the
 ;; diffuse ambient is the albedo times Ramamoorthi and Hanrahan's cosine-convolved irradiance
-;; over π, in place of :sky/:ground (the `:rim` stays lit by :sky). A uniform radiance L is
+;; over π, in place of :sky/:ground (and what glossy surfaces reflect, below). A uniform radiance L is
 ;; L00 = 3.5449·L (2√π·L), the rest 0 — the same as `:sky L :ground L`.
+;;
+;; REFLECTIONS (ADR-795). Every surface but :hair and :strands reflects its surroundings, a
+;; specular lobe at a time: the ambient light's radiance along the reflection of the view (the
+;; `:ambient-sh` blurred as the lobe is rough, or :ground to :sky by how far the reflection
+;; points up), scaled by a closed-form fit of the environment BRDF, F0 × scale + F90 × bias
+;; (Karis's): about F0 head on, rising to a bright edge at a grazing angle — what `:rim` faked.
+;; `:rim` is gone (a material carrying it draws without it; remove the key). The reflection is
+;; taken away where the ambient light is (`:occlusion`, `:ambient-occlusion`; Lagarde's
+;; specular occlusion) and where a normal map turns it under the surface itself.
+;; A light may have a SHAPE that glossy surfaces show, in place of its Blinn-Phong highlight:
+;;   {… :shape :disc}    a disc as wide as its `:size` (a directional light's `:angle`)
+;;   {… :shape :sphere}  a ball of that diameter (the only shape a point light takes)
+;;   {… :shape :rect :extent [w h] :up [x y z]}   a spot only: a softbox w × h metres facing
+;;                       the light's `:direction`, its height along `:up` (world up by default)
+;; Its image has the radiance that brings the light its `:color` (π·color / its area), so the
+;; highlight and the diffuse light stay on one scale; it is dimmed by the light's shadow, cone
+;; and range window. A mirror shows the shape sharply; a rougher lobe shows it blurred over the
+;; lobe's width, and a shape far smaller than the lobe is the Blinn-Phong highlight exactly, so
+;; giving a light a shape changes how its highlight is drawn, never how bright it is.
+;; `:emitters [{:shape :rect :position [x y z] :direction [x y z] :up [x y z] :extent [w h]
+;; :radiance [r g b]} …]` are shapes seen ONLY in reflections (a window, a bounce card): they
+;; light nothing and cast nothing. `:disc` and `:sphere` take `:size` (a diameter) for `:up`
+;; and `:extent`; a sphere has no `:direction`. `:radiance` is linear, on the ambient's scale
+;; (a window as bright as a sky of [1 1 1] is [1 1 1]). At most 8 shapes a scene: its shaped
+;; lights and its emitters together.
+;; `:coat [strength roughness]` (each 0 … 1) is a clear layer over a material, of water's
+;; reflectance (F0 2 %): it reflects the lights, the shapes and the surroundings again at its
+;; own roughness — saliva on lips and teeth, the film over an eye. None by default.
+;; `:roughness` runs down to 0.04 (a mirror). Under about 0.149 the highlight of a light
+;; WITHOUT a shape keeps sharpening on a flat surface, and on a curved one only as far as a
+;; pixel can show (by the mesh's own curvature), so it never sparkles: give a light a shape
+;; for a glossy surface to show.
 ;;
 ;; LIGHTS (ADR-788), linear, their keys saying their kind:
 ;;   directional  {:direction [x y z] :color [r g b] :angle a :shadow …}  (direction: its travel)
@@ -857,6 +890,9 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; a wall a metre behind the figure. With neither, the 3×3 filter as before.
 ;; A malformed light, an unknown key, a malformed `:ambient-sh` or `:lobes`, or too many
 ;; lights or shadows is an error, raised by the gui/draw (or gui/render-frame) that carries it.
+;; A light's `:shape`, a scene's `:emitters` and a material's `:coat` are refused when
+;; malformed (a shape without its `:size`, `:angle` or `:extent`, a `:rect` on a point or
+;; directional light, more than 8 shapes), each with what it should be.
 
 ;; The mesh counter: handles from 1, process-wide, made at load like the textures' registry.
 (def *meshes* (table/new))

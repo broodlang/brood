@@ -3127,6 +3127,13 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
     `:detail-strength` and `:detail-cavity`: a tiled micro-normal laid over the surface's
     (slopes add), its cavity damping the specular, fading by its own mip level. ⬜ Roughness
     from the variance the fade loses (Toksvig).
+  - ✅ **Reflections of the surroundings, with no cubemap** (ADR-795, 2026-11-25) — the ambient
+    light's radiance along the reflection (SH blurred by roughness) through Karis's
+    environment fit; a light's `:shape` (`:disc`, `:sphere`, a spot's `:rect`) and a scene's
+    `:emitters` shown by glossy surfaces as analytic shapes, eight a scene; specular occlusion
+    and a horizon term; a material's `:coat`; `:rim` retired; roughness under 0.149 means
+    something. ⬜ Emitters shadowed or occluded by geometry; ⬜ the footprint widened by a
+    normal map's variance; ⬜ energy taken from the diffuse under a coat.
 - ✅ **Telemetry** (ADR-106) — core landed; the kernel event *sources* shipped
   2026-07-19 (ADR-137: `system-monitor` → `telemetry/watch-runtime`, GC/spawn/exit/
   deopt as `[:runtime kind]` events). ✅ **Metric aggregators + sampling** shipped

@@ -63,6 +63,18 @@ pub const HAIR_TINT: f32 = 0.45;
 /// A material's `:specular` times this is its reflectance at normal incidence, F0 (ADR-793):
 /// UE4's mapping, so the default 0.5 is 4 %, a common dielectric's, and skin's 2.8 % is 0.35.
 pub const SPECULAR_TO_F0: f32 = 0.08;
+/// The most shapes a scene's glossy surfaces show reflected (ADR-795): its shaped lights and its
+/// `:emitters` together.
+pub const MAX_EMITTERS: usize = 8;
+/// The reflectance at normal incidence of a material's `:coat` (ADR-795): water's, 2 %.
+pub const COAT_F0: f32 = 0.02;
+/// The roughness under which a specular lobe is no sharper (a mirror's): the exponent there,
+/// `2 / roughness⁴ − 2`, is the most any lobe has.
+pub const MIN_ROUGHNESS: f32 = 0.04;
+/// The specular exponent a light without a `:shape` reaches on any surface; past it (a
+/// roughness under about 0.149) its highlight sharpens only as far as a pixel can show on a
+/// surface curved as the mesh is there ([`highlight_exponent`], ADR-795).
+pub const RESOLVED_EXPONENT: f32 = 4096.0;
 /// A `:skin` surface's two specular lobes by default: roughness times 0.75 and times 1.3,
 /// weighted 0.85 and 0.15 (UE4's dual-lobe skin, ADR-793).
 pub const SKIN_LOBES: [f32; 3] = [0.75, 1.3, 0.85];
@@ -700,7 +712,7 @@ pub struct Material {
     /// across the UV square: red and green a tangent-space normal's x and y about
     /// [`DETAIL_FLAT`], laid over the surface's own ([`detail_normal`]) where the mesh has
     /// tangents; blue the cavity, 1 on the open surface falling to 0 in a pore, which damps
-    /// the specular and the rim and nothing else ([`detail_specular`]). Not read by a `:hair`
+    /// the specular (the lights' and the surroundings') and nothing else ([`detail_specular`]). Not read by a `:hair`
     /// or `:strands` surface ([`Material::detail_texture`]).
     pub detail: Option<u32>,
     /// How many times the detail tile repeats across the UV square, along u and along v.
@@ -724,8 +736,11 @@ pub struct Material {
     /// measured in metres (ADR-794): it scales the mesh's curvature before the skin table is
     /// read. 0 is plain Lambert; a mesh in centimetres is 0.01. None: [`DEFAULT_SCATTER`].
     pub scatter: Option<f32>,
-    /// The fresnel rim's strength, lit by the sky.
-    pub rim: f32,
+    /// `[strength roughness]`: a second, clear layer over the surface (ADR-795), a dielectric
+    /// of [`COAT_F0`] reflecting the lights, the emitters and the surroundings at its own
+    /// roughness, `strength` (0 … 1) of it: saliva on lips and teeth, the film over an eye.
+    /// None: no coat. Not read by a `:hair` or `:strands` surface.
+    pub coat: Option<[f32; 2]>,
     /// The alpha under which a cutout texel is not drawn.
     pub cutoff: f32,
     /// Draw back faces too (their normals turned to face the viewer).
@@ -753,7 +768,7 @@ impl Default for Material {
             specular: 0.5,
             lobes: None,
             scatter: None,
-            rim: 0.0,
+            coat: None,
             cutoff: 0.5,
             double_sided: false,
             cast_shadow: true,
@@ -878,6 +893,44 @@ pub struct Light {
     pub cone: [f32; 2],
     pub size: f32,
     pub shadow: Option<Shadow>,
+    /// The shape glossy surfaces show it as (ADR-795); none is a point, whose highlight is the
+    /// Blinn-Phong lobe.
+    pub shape: Option<LightShape>,
+}
+
+/// What an emitter looks like in a reflection (ADR-795).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmitterShape {
+    /// A flat disc facing its direction.
+    Disc,
+    /// A flat rectangle facing its direction: a softbox, a window.
+    Rect,
+    /// A ball: a bulb, a globe.
+    Sphere,
+}
+
+/// A light's `:shape` (ADR-795). A disc's or a sphere's diameter is the light's `size` (a
+/// directional light's its `:angle`); a rectangle is `extent` (width and height, metres) with
+/// its height along `up` as nearly as its facing, the light's direction, allows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightShape {
+    pub shape: EmitterShape,
+    pub extent: [f32; 2],
+    pub up: [f32; 3],
+}
+
+/// One of a scene's `:emitters` (ADR-795): a shape seen only in reflections, lighting nothing
+/// and casting nothing (a window, a bounce card). `direction` is the way its light travels
+/// (the way a disc or rectangle faces); `extent` a rectangle's width and height, or a disc's
+/// or sphere's diameter in its first; `radiance` linear, on the scale of the ambient light's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Emitter {
+    pub shape: EmitterShape,
+    pub position: [f32; 3],
+    pub direction: [f32; 3],
+    pub up: [f32; 3],
+    pub extent: [f32; 2],
+    pub radiance: [f32; 3],
 }
 
 impl Light {
@@ -891,6 +944,7 @@ impl Light {
             cone: [0.0; 2],
             size: 0.0,
             shadow: None,
+            shape: None,
         }
     }
 
@@ -964,6 +1018,8 @@ pub struct Scene {
     pub ambient_sh: Option<[[f32; 3]; 9]>,
     /// The ambient occlusion, if any (`:ambient-occlusion`).
     pub ambient_occlusion: Option<AmbientOcclusion>,
+    /// Shapes seen only in reflections (`:emitters`, ADR-795).
+    pub emitters: Vec<Emitter>,
     /// Scales the light before tone mapping.
     pub exposure: f32,
     /// What the rect shows where no mesh is: straight RGBA 0 … 1, transparent by default.
@@ -1190,18 +1246,344 @@ pub fn fresnel(f0: f32, view_dot_half: f32) -> f32 {
 /// cosine `normal_dot_half`, before Fresnel and the light's angle: each lobe Blinn-Phong
 /// normalised to `(n + 8) / 8` (the `1/π` of the normalised BRDF folded into the light, as
 /// the diffuse term's is: a light's `:color` is π times its radiance), weighted by its mix.
-pub fn specular_lobes(material: &Material, normal_dot_half: f32) -> f32 {
+/// `turn` is how far the reflection turns across half a pixel there ([`highlight_exponent`]).
+pub fn specular_lobes(material: &Material, normal_dot_half: f32, turn: f32) -> f32 {
     let [rough_a, rough_b, mix] = material.lobes();
-    let lobe = |roughness: f32| {
-        let exponent = shininess(roughness);
-        (exponent + 8.0) / 8.0 * normal_dot_half.max(0.0).powf(exponent)
-    };
-    let first = lobe(material.roughness * rough_a);
+    let first = specular_lobe(material.roughness * rough_a, normal_dot_half, turn);
     if mix >= 1.0 {
         first
     } else {
-        mix * first + (1.0 - mix) * lobe(material.roughness * rough_b)
+        mix * first
+            + (1.0 - mix) * specular_lobe(material.roughness * rough_b, normal_dot_half, turn)
     }
+}
+
+/// One Blinn-Phong lobe of `roughness`, normalised to `(n + 8) / 8` ([`specular_lobes`]).
+pub fn specular_lobe(roughness: f32, normal_dot_half: f32, turn: f32) -> f32 {
+    let exponent = highlight_exponent(roughness, turn);
+    (exponent + 8.0) / 8.0 * normal_dot_half.max(0.0).powf(exponent)
+}
+
+/// The specular exponent of a lobe of `roughness`, `2 / roughness⁴ − 2`, at least 1 and the
+/// roughness held to [`MIN_ROUGHNESS`] … 1 (so at most 781 248): what a reflection of the
+/// surroundings is as sharp as (ADR-795). [`shininess`] with no ceiling of 4096.
+pub fn lobe_exponent(roughness: f32) -> f32 {
+    let clamped = roughness.clamp(MIN_ROUGHNESS, 1.0);
+    (2.0 / (clamped * clamped * clamped * clamped) - 2.0).max(1.0)
+}
+
+/// The exponent of the highlight a light without a `:shape` makes on a lobe of `roughness`
+/// (ADR-795): [`lobe_exponent`]'s, which up to [`RESOLVED_EXPONENT`] (a roughness of about
+/// 0.149 and rougher) is what it always was. A sharper lobe is as sharp as its roughness asks
+/// on a flat surface, and on a curved one only as sharp as a pixel resolves, never under
+/// `RESOLVED_EXPONENT`: `turn` is how far (radians) the reflection turns across half a
+/// picture pixel there, twice the mesh's curvature times the metres the pixel spans, and a
+/// lobe of solid angle `8π / (n + 8)` narrower than `(2 turn)²` would be a point lighting one
+/// pixel in one frame and none in the next.
+pub fn highlight_exponent(roughness: f32, turn: f32) -> f32 {
+    let exponent = lobe_exponent(roughness);
+    if exponent <= RESOLVED_EXPONENT || turn <= 0.0 {
+        return exponent;
+    }
+    let resolved = 2.0 * std::f32::consts::PI / (turn * turn) - 8.0;
+    exponent.min(resolved.max(RESOLVED_EXPONENT))
+}
+
+/// The half-width, per metre travelled, of the square a specular lobe of `exponent` covers
+/// where its reflection lands (ADR-795): the lobe taken as a box of the solid angle
+/// `Ω = 8π / (n + 8)` — the one whose height is the Blinn-Phong lobe's peak `(n + 8) / 8π` —
+/// so `√Ω / 2`, and never under `turn` ([`highlight_exponent`]), the only anti-aliasing a
+/// sharp reflected edge gets on a curved surface.
+pub fn lobe_spread(exponent: f32, turn: f32) -> f32 {
+    ((8.0 * std::f32::consts::PI / (exponent + 8.0)).sqrt() * 0.5).max(turn)
+}
+
+/// The metres one of the picture's pixels spans at `world`, seen along `view` (the unit
+/// direction to the eye): where a centimetre across the line of sight lands, as
+/// [`strand_vertex`] measures a strand's pixel. 0 where it cannot be told (behind the eye).
+pub fn pixel_span(scene: &Scene, world: [f32; 3], view: [f32; 3]) -> f32 {
+    let (across, _) = basis(view);
+    let (pixel_width, pixel_height) = scene.pixel_size();
+    let near = transform(&scene.view_proj, world, 1.0);
+    let far = transform(
+        &scene.view_proj,
+        [0, 1, 2].map(|axis| world[axis] + across[axis] * 0.01),
+        1.0,
+    );
+    if near[3] > 1e-6 && far[3] > 1e-6 {
+        let x = (far[0] / far[3] - near[0] / near[3]) * pixel_width as f32 * 0.5;
+        let y = (far[1] / far[3] - near[1] / near[3]) * pixel_height as f32 * 0.5;
+        let pixels = (x * x + y * y).sqrt();
+        if pixels > 1e-6 {
+            return 0.01 / pixels;
+        }
+    }
+    0.0
+}
+
+/// The radiance arriving along the unit `direction` from an environment whose radiance has
+/// the SH coefficients `coefficients` ([`sh_irradiance`]'s convention), blurred over a
+/// specular lobe of `exponent` (ADR-795): band l scaled by `exp(−2 l² / n)` — Ramamoorthi and
+/// Hanrahan's `exp(−l² / 2s)` for a Phong lobe of exponent s about the reflection, a
+/// Blinn-Phong lobe of n being one of n / 4 — and held at 0. A uniform radiance comes back
+/// as itself at any exponent.
+pub fn sh_radiance(coefficients: &[[f32; 3]; 9], direction: [f32; 3], exponent: f32) -> [f32; 3] {
+    let [x, y, z] = direction;
+    let first = (-2.0 / exponent).exp();
+    let second = (-8.0 / exponent).exp();
+    let weights = [
+        0.282_095,
+        0.488_603 * y * first,
+        0.488_603 * z * first,
+        0.488_603 * x * first,
+        1.092_548 * x * y * second,
+        1.092_548 * y * z * second,
+        0.315_392 * (3.0 * z * z - 1.0) * second,
+        1.092_548 * x * z * second,
+        0.546_274 * (x * x - y * y) * second,
+    ];
+    [0, 1, 2].map(|channel| {
+        let radiance: f32 = weights
+            .iter()
+            .zip(coefficients)
+            .map(|(weight, coefficient)| weight * coefficient[channel])
+            .sum();
+        radiance.max(0.0)
+    })
+}
+
+/// The surroundings' radiance a specular lobe of `exponent` about the unit `direction`
+/// reflects (ADR-795): [`sh_radiance`] of the scene's `ambient_sh` when it has one, else
+/// `ground` blended to `sky` by how far the direction points up, that blend drawn toward the
+/// middle as band 1 is (`exp(−2 / n)`).
+pub fn ambient_radiance(scene: &Scene, direction: [f32; 3], exponent: f32) -> [f32; 3] {
+    match &scene.ambient_sh {
+        Some(coefficients) => sh_radiance(coefficients, direction, exponent),
+        None => {
+            let up = direction[1] * (-2.0 / exponent).exp() * 0.5 + 0.5;
+            [0, 1, 2].map(|channel| {
+                scene.ground[channel] + (scene.sky[channel] - scene.ground[channel]) * up
+            })
+        }
+    }
+}
+
+/// Karis's closed-form fit of the split-sum environment BRDF (`EnvBRDFApprox`, "Physically
+/// Based Shading on Mobile", 2014): `[scale, bias]`, a surface of `roughness` seen at the
+/// cosine `normal_dot_view` reflecting `F0 × scale + F90 × bias` of a uniform surrounding. No
+/// table: both painters evaluate it. `scale + bias` is `1 − 0.55 × roughness`, never above 1.
+pub fn environment_brdf(roughness: f32, normal_dot_view: f32) -> [f32; 2] {
+    let rough = roughness.clamp(0.0, 1.0);
+    let curve = [
+        1.0 - rough,
+        0.0425 - 0.0275 * rough,
+        1.04 - 0.572 * rough,
+        0.022 * rough - 0.04,
+    ];
+    let grazing = (curve[0] * curve[0]).min((-9.28 * normal_dot_view).exp2()) * curve[0] + curve[1];
+    // the fit strays a few hundredths outside 0 … 1 at its ends (a mirror at a grazing angle,
+    // chalk head on): held, so nothing reflects more than arrives or less than nothing
+    let scale = (curve[2] - 1.04 * grazing).max(0.0);
+    [scale, (curve[3] + 1.04 * grazing).clamp(0.0, 1.0 - scale)]
+}
+
+/// How much of a reflection reaches a point whose ambient light is `occlusion` (its map's
+/// times the scene's [`ambient_occlusion`]; 1 open) — Lagarde's specular occlusion ("Moving
+/// Frostbite to PBR", 2014): `clamp((n·v + ao)^(2^(−16 r − 1)) − 1 + ao)`. Exactly 1 for an
+/// open point and 0 for a fully occluded one; between, a smooth surface seen head on keeps
+/// more of its reflection than its diffuse keeps of the ambient.
+pub fn specular_occlusion(normal_dot_view: f32, occlusion: f32, roughness: f32) -> f32 {
+    let power = (-16.0 * roughness.clamp(0.0, 1.0) - 1.0).exp2();
+    ((normal_dot_view + occlusion).max(0.0).powf(power) - 1.0 + occlusion).clamp(0.0, 1.0)
+}
+
+/// How much of a reflection along the unit `reflected` is kept where a normal map (or a
+/// smoothed normal) has turned it under the surface whose own unit normal is
+/// `surface_normal`: `clamp(1 + r·n)²`, 1 for any reflection leaving the surface.
+pub fn horizon(reflected: [f32; 3], surface_normal: [f32; 3]) -> f32 {
+    let above = (1.0 + dot(reflected, surface_normal)).clamp(0.0, 1.0);
+    above * above
+}
+
+/// How an [`emitter_plan`]'s shape is tested.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlannedShape {
+    Disc,
+    Rect,
+    Sphere,
+    /// A directional light's disc, at no distance: `half[0]` the tangent of half its angle.
+    Distant,
+}
+
+impl PlannedShape {
+    /// The number the scene uniform carries for it (0 is no emitter).
+    pub fn code(self) -> u32 {
+        match self {
+            PlannedShape::Disc => 1,
+            PlannedShape::Rect => 2,
+            PlannedShape::Sphere => 3,
+            PlannedShape::Distant => 4,
+        }
+    }
+}
+
+/// One shape a scene's glossy surfaces show this frame (ADR-795).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlannedEmitter {
+    pub shape: PlannedShape,
+    pub centre: [f32; 3],
+    /// The unit direction its light travels: the way a disc or rectangle faces.
+    pub facing: [f32; 3],
+    /// A rectangle's unit width and height directions, square to `facing`.
+    pub right: [f32; 3],
+    pub up: [f32; 3],
+    /// A rectangle's half width and half height; a disc's or sphere's radius in the first.
+    pub half: [f32; 2],
+    /// Linear radiance: a shaped light's is `π × color / area`, the radiance that brings the
+    /// light its `:color` does, so its image and its diffuse light are on one scale.
+    pub radiance: [f32; 3],
+    /// The light it is the shape of, whose shadow, cone and range window it keeps; none for
+    /// one of the scene's `:emitters`.
+    pub light: Option<usize>,
+}
+
+/// The shapes a scene's glossy surfaces show this frame, planned once for both painters as
+/// [`shadow_plan`] plans the shadow maps: every shaped light, then the scene's `:emitters`,
+/// [`MAX_EMITTERS`] at most.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmitterPlan {
+    pub emitters: Vec<PlannedEmitter>,
+    /// Per light, by index: whether it is in `emitters`, its Blinn-Phong highlight then
+    /// skipped so nothing is counted twice.
+    pub shaped: [bool; MAX_LIGHTS],
+}
+
+/// A rectangle's width and height directions: square to the unit `facing`, the height as
+/// near `up` as that allows (any side when `up` runs along `facing`).
+fn emitter_frame(facing: [f32; 3], up: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let across = cross(up, facing);
+    let right = if dot(across, across) > 1e-12 {
+        normalize(across)
+    } else {
+        basis(facing).0
+    };
+    (right, cross(facing, right))
+}
+
+/// `scene`'s [`EmitterPlan`]. A shaped light whose size is nothing (a `:size` of 0) is left a
+/// point, with its Blinn-Phong highlight.
+pub fn emitter_plan(scene: &Scene) -> EmitterPlan {
+    let mut plan = EmitterPlan {
+        emitters: Vec::new(),
+        shaped: [false; MAX_LIGHTS],
+    };
+    for (index, light) in scene.lights.iter().take(MAX_LIGHTS).enumerate() {
+        let Some(shape) = light.shape else {
+            continue;
+        };
+        let (planned, half) = match (light.kind, shape.shape) {
+            (LightKind::Directional, _) => (
+                PlannedShape::Distant,
+                [(light.size * 0.5).min(1.5).tan(), 0.0],
+            ),
+            (_, EmitterShape::Rect) => (
+                PlannedShape::Rect,
+                [shape.extent[0] * 0.5, shape.extent[1] * 0.5],
+            ),
+            (_, EmitterShape::Disc) => (PlannedShape::Disc, [light.size * 0.5, 0.0]),
+            (_, EmitterShape::Sphere) => (PlannedShape::Sphere, [light.size * 0.5, 0.0]),
+        };
+        let area = if planned == PlannedShape::Rect {
+            4.0 * half[0] * half[1]
+        } else {
+            std::f32::consts::PI * half[0] * half[0]
+        };
+        if area.is_nan() || area <= 0.0 || plan.emitters.len() == MAX_EMITTERS {
+            continue;
+        }
+        let facing = normalize(light.direction);
+        let (right, up) = emitter_frame(facing, shape.up);
+        plan.shaped[index] = true;
+        plan.emitters.push(PlannedEmitter {
+            shape: planned,
+            centre: light.position,
+            facing,
+            right,
+            up,
+            half,
+            radiance: light
+                .color
+                .map(|channel| std::f32::consts::PI * channel / area),
+            light: Some(index),
+        });
+    }
+    for emitter in &scene.emitters {
+        if plan.emitters.len() == MAX_EMITTERS {
+            break;
+        }
+        let facing = normalize(emitter.direction);
+        let (right, up) = emitter_frame(facing, emitter.up);
+        plan.emitters.push(PlannedEmitter {
+            shape: match emitter.shape {
+                EmitterShape::Disc => PlannedShape::Disc,
+                EmitterShape::Rect => PlannedShape::Rect,
+                EmitterShape::Sphere => PlannedShape::Sphere,
+            },
+            centre: emitter.position,
+            facing,
+            right,
+            up,
+            half: [emitter.extent[0] * 0.5, emitter.extent[1] * 0.5],
+            radiance: emitter.radiance,
+            light: None,
+        });
+    }
+    plan
+}
+
+/// How much of the segment `offset ± reach` lies within `± half`: 0 … 1.
+pub fn overlap(offset: f32, half: f32, reach: f32) -> f32 {
+    (((offset + reach).min(half) - (offset - reach).max(-half)) / (2.0 * reach)).clamp(0.0, 1.0)
+}
+
+/// How much of a specular lobe leaving `world` along the unit `reflected` lands on `emitter`
+/// (ADR-795), 0 … 1; `spread` is the lobe's [`lobe_spread`]. The reflection is followed to the
+/// emitter's plane — a rectangle's or disc's own, a sphere's the one through its centre facing
+/// the point, a distant disc's a metre away — which it must reach from the lit side; there the
+/// lobe covers a square of half-width `distance × spread / √cos`, the cosine the one the
+/// reflection meets the plane at (so a small emitter seen aslant covers as little of the lobe
+/// as its solid angle is). A rectangle's coverage is the square's overlap with it along its
+/// width times along its height; a disc's or sphere's falls from 1 to 0 as the square leaves
+/// it, times `min(1, π a² / 4 reach²)`, the share of the square it can fill. A mirror's lobe
+/// inside the shape is covered exactly 1; a shape shrunk to a point covers `area / (distance²
+/// Ω)` of it, which times its radiance is the Blinn-Phong highlight's peak.
+pub fn emitter_coverage(
+    emitter: &PlannedEmitter,
+    world: [f32; 3],
+    reflected: [f32; 3],
+    spread: f32,
+) -> f32 {
+    let (centre, facing) = match emitter.shape {
+        PlannedShape::Sphere => (emitter.centre, normalize(subtract(world, emitter.centre))),
+        PlannedShape::Distant => (subtract(world, emitter.facing), emitter.facing),
+        PlannedShape::Disc | PlannedShape::Rect => (emitter.centre, emitter.facing),
+    };
+    let toward = -dot(reflected, facing);
+    let height = dot(subtract(world, centre), facing);
+    if toward.is_nan() || toward <= 1e-4 || height.is_nan() || height <= 0.0 {
+        return 0.0;
+    }
+    let distance = height / toward;
+    let reach = (distance * spread / toward.sqrt()).max(1e-9);
+    let hit = [0, 1, 2].map(|axis| world[axis] + reflected[axis] * distance - centre[axis]);
+    if emitter.shape == PlannedShape::Rect {
+        return overlap(dot(hit, emitter.right), emitter.half[0], reach)
+            * overlap(dot(hit, emitter.up), emitter.half[1], reach);
+    }
+    let radius = emitter.half[0];
+    let edge =
+        ((radius + reach - dot(hit, hit).sqrt()) / (2.0 * radius.min(reach))).clamp(0.0, 1.0);
+    edge * (std::f32::consts::PI * radius * radius / (4.0 * reach * reach)).min(1.0)
 }
 
 /// The curvature, per millimetre, that row `row` of the skin table holds: `(row / last)²` of
@@ -1362,9 +1744,19 @@ pub fn detail_specular(cavity: f32, amount: f32) -> f32 {
 /// `visibility` how much of each light (by index) its shadow lets through — 1 for a light it
 /// holds no entry for — `strand` a `:hair` surface's unit strand direction (unused by the
 /// others), `curvature` how sharply the mesh curves there, 1 over its radius in the mesh's
-/// units ([`Mesh::curvature`]; read by a `:skin` surface only), and `specular_kept` how much
-/// of the specular and the rim its detail tile's cavity leaves there ([`detail_specular`]; 1
-/// without one, and not read by a `:hair` or `:strands` surface's highlights).
+/// units ([`Mesh::curvature`]: a `:skin` surface's scattering, and how sharp a reflection a
+/// pixel resolves), `specular_kept` how much of the specular its detail tile's cavity leaves
+/// there ([`detail_specular`]; 1 without one, and not read by a `:hair` or `:strands`
+/// surface's highlights), `surface_normal` the surface's own unit normal, no normal map's (a
+/// reflection under it is faded out), and `emitters` the scene's [`emitter_plan`].
+///
+/// Every surface but `:hair` and `:strands` also reflects its surroundings (ADR-795), a lobe
+/// of its `:lobes` at a time and then its `:coat`: the ambient light's radiance along the
+/// reflection, blurred as the lobe is rough ([`ambient_radiance`]) and scaled by
+/// [`environment_brdf`]; and each planned emitter's radiance times the share of the lobe it
+/// covers ([`emitter_coverage`]) and Schlick's Fresnel at the normal — for a shaped light
+/// times its shadow, cone and range window too, its Blinn-Phong highlight skipped. Both are
+/// scaled by [`specular_occlusion`] and [`horizon`].
 ///
 /// A `:skin` surface's diffuse light is [`skin_diffuse`]'s in place of Lambert's (ADR-794).
 /// A shadow multiplies the Lambert part of it and fades out of the rest — the light the
@@ -1387,6 +1779,8 @@ pub fn shade(
     strand: [f32; 3],
     curvature: f32,
     specular_kept: f32,
+    surface_normal: [f32; 3],
+    emitters: &EmitterPlan,
 ) -> [f32; 3] {
     let ambient = ambient(scene, normal);
     let skin = (material.surface == Surface::Skin)
@@ -1395,6 +1789,16 @@ pub fn shade(
     let f0 = material.f0();
     // a `:hair` surface's highlights: as sharp as its roughness asks
     let exponent = shininess(material.roughness);
+    let reflects = !matches!(material.surface, Surface::Hair | Surface::Strands);
+    // how far the reflection turns across half a pixel: twice the curvature, times the pixel
+    let reflection_turn = if reflects && curvature > 0.0 {
+        2.0 * curvature * pixel_span(scene, world, view)
+    } else {
+        0.0
+    };
+    let coat = material.coat.filter(|coat| reflects && coat[0] > 0.0);
+    // per light: how much of its shape's image is left by its shadow, cone and range window
+    let mut shaping = [0.0f32; MAX_LIGHTS];
     for (index, light) in scene.lights.iter().take(MAX_LIGHTS).enumerate() {
         let (to_light, arriving) = light_arrival(light, world);
         let seen = visibility.get(index).copied().unwrap_or(1.0);
@@ -1434,10 +1838,37 @@ pub fn shade(
         }
         // a pore reflects less than the open surface round it (ADR-797); the diffuse is not
         // touched
-        let specular = fresnel(f0, dot(view, half))
-            * specular_lobes(material, dot(normal, half))
-            * lambert
-            * specular_kept;
+        // a shaped light's highlight is its shape's image, below: its inverse square is the
+        // image's size, so only its cone and range window are kept
+        let shaped = emitters.shaped[index];
+        if shaped {
+            let spread_out = match light.kind {
+                LightKind::Directional => 1.0,
+                LightKind::Point | LightKind::Spot => {
+                    let toward = subtract(light.position, world);
+                    dot(toward, toward).max(NEAR_LIGHT * NEAR_LIGHT)
+                }
+            };
+            shaping[index] = seen * arriving * spread_out;
+        }
+        let specular = if shaped {
+            0.0
+        } else {
+            let highlight = fresnel(f0, dot(view, half))
+                * specular_lobes(material, dot(normal, half), reflection_turn)
+                * lambert
+                * specular_kept;
+            match coat {
+                Some([strength, roughness]) => {
+                    highlight
+                        + strength
+                            * fresnel(COAT_F0, dot(view, half))
+                            * specular_lobe(roughness, dot(normal, half), reflection_turn)
+                            * lambert
+                }
+                None => highlight,
+            }
+        };
         let scattered = skin.map(|(table, curved)| skin_diffuse(table, facing, curved));
         for channel in 0..3 {
             let diffuse = match scattered {
@@ -1448,9 +1879,51 @@ pub fn shade(
                 light.color[channel] * arriving * (base[channel] * diffuse + specular * seen);
         }
     }
-    let rim = material.rim * specular_kept * (1.0 - dot(normal, view).max(0.0)).powi(3);
-    for channel in 0..3 {
-        out[channel] += rim * scene.sky[channel];
+    if !reflects {
+        return out;
+    }
+    // the surroundings, reflected (ADR-795): a layer at a time, each a weight, a roughness and
+    // a reflectance at normal incidence — the material's lobes (a pore reflecting less,
+    // ADR-797), then its coat
+    let facing_view = dot(normal, view);
+    let normal_dot_view = facing_view.clamp(0.0, 1.0);
+    let reflected = [0, 1, 2].map(|axis| 2.0 * facing_view * normal[axis] - view[axis]);
+    let kept = horizon(reflected, surface_normal);
+    let [rough_a, rough_b, mix] = material.lobes();
+    let [coat_strength, coat_roughness] = coat.unwrap_or([0.0, 0.0]);
+    let layers = [
+        (mix * specular_kept, material.roughness * rough_a, f0),
+        (
+            (1.0 - mix) * specular_kept,
+            material.roughness * rough_b,
+            f0,
+        ),
+        (coat_strength, coat_roughness, COAT_F0),
+    ];
+    for (weight, roughness, reflectance) in layers {
+        if weight <= 0.0 {
+            continue;
+        }
+        let exponent = lobe_exponent(roughness);
+        let open = weight * kept * specular_occlusion(normal_dot_view, occlusion, roughness);
+        let [scale, bias] = environment_brdf(roughness, normal_dot_view);
+        let around = ambient_radiance(scene, reflected, exponent);
+        let surrounding = open * (reflectance * scale + (50.0 * reflectance).min(1.0) * bias);
+        for channel in 0..3 {
+            out[channel] += around[channel] * surrounding;
+        }
+        let mirrored = open * fresnel(reflectance, normal_dot_view);
+        let spread = lobe_spread(exponent, reflection_turn);
+        for emitter in &emitters.emitters {
+            let left = emitter.light.map_or(1.0, |index| shaping[index]);
+            if left <= 0.0 {
+                continue;
+            }
+            let covered = emitter_coverage(emitter, world, reflected, spread);
+            for channel in 0..3 {
+                out[channel] += emitter.radiance[channel] * (mirrored * left * covered);
+            }
+        }
     }
     out
 }
@@ -2719,6 +3192,8 @@ struct DrawContext<'a> {
     supersample: usize,
     shadows: &'a ShadowPlan,
     shadow_maps: &'a [Vec<f32>],
+    /// The shapes glossy surfaces show (ADR-795).
+    emitters: &'a EmitterPlan,
 }
 
 /// The pixels of a `width`×`height` picture whose centres `corners` (already clipped in front
@@ -3099,6 +3574,8 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                         + corners[1].curvature * weights[1]
                         + corners[2].curvature * weights[2],
                     specular_kept,
+                    surface_normal,
+                    context.emitters,
                 ),
                 scene.exposure,
             );
@@ -3375,6 +3852,7 @@ pub fn rasterize<'t>(
         union(bounds, draw_bounds(scene, item.draw, &item.mesh.bounds))
     });
     let shadows = shadow_plan(scene, world);
+    let emitters = emitter_plan(scene);
     let shadow_maps: Vec<Vec<f32>> = shadows
         .views
         .iter()
@@ -3397,6 +3875,7 @@ pub fn rasterize<'t>(
             supersample,
             shadows: &shadows,
             shadow_maps: &shadow_maps,
+            emitters: &emitters,
         };
         each_clipped_triangle(&item.mesh, &item.vertices, |corners| {
             fill_triangle(&mut canvas, &context, corners)
@@ -3496,6 +3975,7 @@ mod tests {
             ambient_sh: None,
             exposure: 1.0,
             ambient_occlusion: None,
+            emitters: Vec::new(),
             background: [0.0, 0.0, 0.0, 0.0],
             palettes: vec![],
             draws: vec![draw],
@@ -3680,6 +4160,8 @@ mod tests {
             [0.0; 3],
             curvature,
             1.0,
+            [0.0, 0.0, 1.0],
+            &emitter_plan(&lit),
         )
     }
 
@@ -4208,6 +4690,8 @@ mod tests {
                 strand,
                 0.0,
                 1.0,
+                normal,
+                &emitter_plan(&lit),
             )[0]
         };
         let across = shine([1.0, 0.0, 0.0]);
@@ -4262,6 +4746,8 @@ mod tests {
             [0.0; 3],
             0.0,
             1.0,
+            [0.0, 0.0, 1.0],
+            &emitter_plan(&zero),
         );
         assert!(lit.iter().all(|channel| channel.is_finite()));
     }
@@ -4291,6 +4777,8 @@ mod tests {
             [0.0; 3],
             0.0,
             1.0,
+            normal,
+            &emitter_plan(&lit),
         )[0]
     }
 
@@ -4935,6 +5423,8 @@ mod tests {
                 [0.0; 3],
                 0.0,
                 1.0,
+                normal,
+                &emitter_plan(&sky),
             );
             let by_sh = shade(
                 &sh,
@@ -4948,6 +5438,8 @@ mod tests {
                 [0.0; 3],
                 0.0,
                 1.0,
+                normal,
+                &emitter_plan(&sh),
             );
             for channel in 0..3 {
                 assert!(
@@ -4988,6 +5480,8 @@ mod tests {
             [0.0; 3],
             0.0,
             1.0,
+            normal,
+            &emitter_plan(&lit),
         )[0]
     }
 
@@ -5308,7 +5802,6 @@ mod tests {
             surface: Surface::Skin,
             color: [0.4, 0.3, 0.25, 1.0],
             roughness: 0.3,
-            rim: 0.5,
             ..Material::default()
         };
         let mapped = Material {
@@ -5417,7 +5910,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cavity_takes_the_specular_and_the_rim_and_leaves_the_diffuse() {
+    fn a_cavity_takes_the_specular_and_leaves_the_diffuse() {
         // by the number: an open texel keeps it all, a closed one none, `:detail-cavity`
         // saying how much of that is taken
         assert_eq!(detail_specular(1.0, 1.0), 1.0);
@@ -5428,12 +5921,10 @@ mod tests {
         let shiny = Material {
             color: [0.2, 0.2, 0.2, 1.0],
             roughness: 0.4,
-            rim: 0.5,
             ..Material::default()
         };
         let matte = Material {
             specular: 0.0,
-            rim: 0.0,
             ..shiny.clone()
         };
         let lit = detail_scene(shiny.clone());
@@ -5452,6 +5943,8 @@ mod tests {
                 [0.0; 3],
                 0.0,
                 kept,
+                normal,
+                &emitter_plan(&lit),
             )
         };
         assert_eq!(shaded(&shiny, 0.0), shaded(&matte, 1.0));
@@ -5741,5 +6234,697 @@ mod tests {
                 per_round(start)
             );
         }
+    }
+
+    // --- the surroundings reflected (ADR-795) ---------------------------------------------------
+
+    /// A scene with no light at all.
+    fn dark() -> Scene {
+        let mut lit = scene(draw());
+        lit.lights.clear();
+        lit.sky = [0.0; 3];
+        lit.ground = [0.0; 3];
+        lit
+    }
+
+    /// What a black surface at the origin facing +z sends toward `view` in `lit`: its
+    /// reflections alone, `open` its ambient occlusion, `visibility` its lights' shadows.
+    fn reflecting(
+        lit: &Scene,
+        material: &Material,
+        view: [f32; 3],
+        open: f32,
+        visibility: &[f32],
+    ) -> [f32; 3] {
+        let normal = [0.0, 0.0, 1.0];
+        shade(
+            lit,
+            material,
+            [0.0; 3],
+            normal,
+            normalize(view),
+            [0.0; 3],
+            open,
+            visibility,
+            [0.0; 3],
+            0.0,
+            1.0,
+            normal,
+            &emitter_plan(lit),
+        )
+    }
+
+    /// The view from which that surface's reflection lands at (x, y) on the plane 2 m above it.
+    fn landing(x: f32, y: f32) -> [f32; 3] {
+        [-x, -y, 2.0]
+    }
+
+    /// A white spot of `size` 2 m above the origin, shining straight down on it.
+    fn overhead(size: f32) -> Light {
+        Light {
+            size,
+            ..Light::spot([0.0, 0.0, 2.0], [0.0, 0.0, -1.0], [1.0; 3], 0.0, [0.5, 0.8])
+        }
+    }
+
+    fn shaped(light: Light, shape: EmitterShape, extent: [f32; 2]) -> Light {
+        Light {
+            shape: Some(LightShape {
+                shape,
+                extent,
+                up: [0.0, 1.0, 0.0],
+            }),
+            ..light
+        }
+    }
+
+    fn near(measured: f32, expected: f32) {
+        assert!(
+            (measured - expected).abs() <= 1e-3 * expected.abs().max(1e-5),
+            "{measured} against {expected}"
+        );
+    }
+
+    #[test]
+    fn a_shaped_light_shrunk_to_a_point_is_the_unshaped_highlight() {
+        // the lobe as a box of solid angle 8π / (n + 8), a shape of radiance π·color / area:
+        // a shape far smaller than the lobe gives the Blinn-Phong peak, (n + 8) / 8 × F0 × the
+        // light arriving (a quarter, 2 m away), whatever the shape and the roughness
+        let head_on = [0.0, 0.0, 1.0];
+        for roughness in [0.2f32, 0.35, 0.5, 0.8] {
+            let material = Material {
+                roughness,
+                ..Material::default()
+            };
+            let mut lit = dark();
+            lit.lights = vec![overhead(0.0)];
+            assert!(!emitter_plan(&lit).shaped[0]);
+            let point = reflecting(&lit, &material, head_on, 1.0, &[])[0];
+            near(
+                point,
+                material.f0() * (shininess(roughness) + 8.0) / 8.0 / 4.0,
+            );
+            for shape in [EmitterShape::Disc, EmitterShape::Sphere, EmitterShape::Rect] {
+                lit.lights = vec![shaped(overhead(1e-3), shape, [1e-3, 2e-3])];
+                assert!(emitter_plan(&lit).shaped[0]);
+                near(reflecting(&lit, &material, head_on, 1.0, &[])[0], point);
+            }
+            // a directional light's disc, as wide as its angle
+            let sun = Light::directional([0.0, 0.0, -1.0], [1.0; 3]);
+            lit.lights = vec![sun.clone()];
+            let far_point = reflecting(&lit, &material, head_on, 1.0, &[])[0];
+            near(far_point, point * 4.0);
+            lit.lights = vec![shaped(
+                Light { size: 1e-3, ..sun },
+                EmitterShape::Disc,
+                [0.0; 2],
+            )];
+            near(reflecting(&lit, &material, head_on, 1.0, &[])[0], far_point);
+        }
+        // a shape with no size stays a point, its highlight the lobe's
+        let mut lit = dark();
+        lit.lights = vec![shaped(overhead(0.0), EmitterShape::Disc, [0.0; 2])];
+        let plan = emitter_plan(&lit);
+        assert!(!plan.shaped[0] && plan.emitters.is_empty());
+    }
+
+    #[test]
+    fn a_mirror_shows_a_rectangle_at_its_radiance_keeps_its_aspect_and_shows_nothing_beside_it() {
+        let mirror = Material {
+            roughness: 0.0,
+            ..Material::default()
+        };
+        let color = [0.5f32, 0.4, 0.3];
+        let softbox = |up: [f32; 3]| {
+            let mut light = shaped(
+                Light {
+                    color,
+                    ..overhead(0.0)
+                },
+                EmitterShape::Rect,
+                [1.0, 0.5],
+            );
+            light.shape.as_mut().unwrap().up = up;
+            light
+        };
+        // π·color / area: a 1 m × 0.5 m box
+        let radiance = color.map(|channel| std::f32::consts::PI * channel / 0.5);
+        let mut lit = dark();
+        lit.lights = vec![softbox([0.0, 1.0, 0.0])];
+        assert_eq!(emitter_plan(&lit).emitters[0].radiance, radiance);
+        // its middle, seen head on: exactly F0 × its radiance
+        let middle = reflecting(&lit, &mirror, landing(0.0, 0.0), 1.0, &[]);
+        for channel in 0..3 {
+            near(middle[channel], 0.04 * radiance[channel]);
+        }
+        // … plus what the surroundings reflect, when there are any
+        lit.sky = [0.2; 3];
+        lit.ground = [0.2; 3];
+        let around = |view: [f32; 3]| {
+            let [scale, bias] = environment_brdf(0.0, normalize(view)[2]);
+            0.2 * (0.04 * scale + bias)
+        };
+        let middle = reflecting(&lit, &mirror, landing(0.0, 0.0), 1.0, &[]);
+        near(middle[0], 0.04 * radiance[0] + around(landing(0.0, 0.0)));
+        // beside it, only the surroundings
+        let beside = landing(0.9, 0.0);
+        near(
+            reflecting(&lit, &mirror, beside, 1.0, &[])[0],
+            around(beside),
+        );
+        // 1 m wide and half a metre high: 0.4 m along its width is on it, 0.4 m up is not
+        let (along, up) = (landing(0.4, 0.0), landing(0.0, 0.4));
+        let on_it = |view: [f32; 3]| fresnel(0.04, normalize(view)[2]) * radiance[0] + around(view);
+        near(reflecting(&lit, &mirror, along, 1.0, &[])[0], on_it(along));
+        near(reflecting(&lit, &mirror, up, 1.0, &[])[0], around(up));
+        // turned a quarter by its `:up`, the other way about
+        lit.lights = vec![softbox([1.0, 0.0, 0.0])];
+        near(reflecting(&lit, &mirror, along, 1.0, &[])[0], around(along));
+        near(reflecting(&lit, &mirror, up, 1.0, &[])[0], on_it(up));
+        // from behind it nothing: it shines one way
+        lit.lights = vec![softbox([0.0, 1.0, 0.0])];
+        lit.lights[0].position = [0.0, 0.0, -2.0];
+        lit.lights[0].direction = [0.0, 0.0, 1.0];
+        let behind = reflecting(&lit, &mirror, landing(0.0, 0.0), 1.0, &[])[0];
+        near(behind, around(landing(0.0, 0.0)));
+    }
+
+    #[test]
+    fn a_uniform_surrounding_reflects_by_the_environment_fit_and_never_brighter_than_itself() {
+        // L × (F0 × scale + F90 × bias), F90 min(50 F0, 1): the same from a sky and ground and
+        // from the same radiance as SH, at any roughness, angle and reflectance
+        let level = 0.3f32;
+        let mut by_sky = dark();
+        by_sky.sky = [level; 3];
+        by_sky.ground = [level; 3];
+        let mut by_sh = dark();
+        let mut coefficients = [[0.0f32; 3]; 9];
+        coefficients[0] = [level * 2.0 * std::f32::consts::PI.sqrt(); 3];
+        by_sh.ambient_sh = Some(coefficients);
+        for roughness in [0.0f32, 0.1, 0.25, 0.5, 0.75, 1.0] {
+            for specular in [0.0f32, 0.1, 0.25, 0.5, 2.0, 12.5] {
+                for view in [
+                    landing(0.0, 0.0),
+                    landing(1.0, 0.5),
+                    landing(8.0, 0.0),
+                    landing(60.0, 0.0),
+                ] {
+                    let material = Material {
+                        roughness,
+                        specular,
+                        ..Material::default()
+                    };
+                    let f0 = material.f0();
+                    let [scale, bias] = environment_brdf(roughness, normalize(view)[2]);
+                    assert!(scale >= 0.0 && bias >= 0.0 && scale + bias <= 1.0 + 1e-6);
+                    let expected = level * (f0 * scale + (50.0 * f0).min(1.0) * bias);
+                    let reflected = reflecting(&by_sky, &material, view, 1.0, &[])[0];
+                    assert!(
+                        (reflected - expected).abs() < 1e-6,
+                        "{roughness} {specular} {view:?}: {reflected} against {expected}"
+                    );
+                    assert!(reflected <= level, "{reflected} is brighter than {level}");
+                    let from_sh = reflecting(&by_sh, &material, view, 1.0, &[])[0];
+                    assert!(
+                        (from_sh - reflected).abs() < 1e-4,
+                        "{from_sh} against {reflected}"
+                    );
+                    if specular == 0.0 {
+                        assert_eq!(reflected, 0.0, ":specular 0 reflects nothing");
+                    }
+                }
+            }
+        }
+        // the surroundings blurred as the lobe is rough: light from above only is seen sharply
+        // by a mirror facing it or away from it, and as its mean by chalk
+        let mut above = [[0.0f32; 3]; 9];
+        above[0] = [1.0; 3];
+        above[1] = [1.0; 3];
+        let (up, down) = ([0.0, 1.0, 0.0], [0.0, -1.0, 0.0]);
+        let sharp = lobe_exponent(0.0);
+        assert!(sh_radiance(&above, up, sharp)[0] > 0.75);
+        assert_eq!(sh_radiance(&above, down, sharp)[0], 0.0);
+        let chalk = lobe_exponent(1.0);
+        let (lit_side, far_side) = (
+            sh_radiance(&above, up, chalk)[0],
+            sh_radiance(&above, down, chalk)[0],
+        );
+        assert!(
+            lit_side - far_side < 0.15 && far_side > 0.2,
+            "{lit_side} {far_side}"
+        );
+        // and a sky over a ground likewise
+        let mut split = dark();
+        split.sky = [1.0; 3];
+        assert!(ambient_radiance(&split, down, sharp)[0] < 1e-5);
+        assert!((ambient_radiance(&split, down, chalk)[0] - 0.5).abs() < 0.07);
+    }
+
+    #[test]
+    fn occlusion_a_shadow_and_no_specular_take_the_reflections() {
+        let mirror = Material {
+            roughness: 0.0,
+            ..Material::default()
+        };
+        let mut lit = dark();
+        lit.sky = [0.2; 3];
+        lit.ground = [0.2; 3];
+        let mut unlit = lit.clone();
+        lit.lights = vec![shaped(overhead(0.0), EmitterShape::Rect, [1.0, 0.5])];
+        let head_on = landing(0.0, 0.0);
+        let open = reflecting(&lit, &mirror, head_on, 1.0, &[])[0];
+        let surroundings = reflecting(&unlit, &mirror, head_on, 1.0, &[])[0];
+        assert!(surroundings > 0.0 && open > 10.0 * surroundings);
+        // a point no ambient light reaches reflects nothing, the shape neither
+        assert_eq!(reflecting(&lit, &mirror, head_on, 0.0, &[]), [0.0; 3]);
+        // half occluded, a mirror seen head on keeps more of its reflection than half, and
+        // chalk half of it (Lagarde's)
+        assert!(specular_occlusion(1.0, 0.5, 0.0) > 0.7);
+        assert!((specular_occlusion(1.0, 0.5, 1.0) - 0.5).abs() < 1e-3);
+        assert_eq!(specular_occlusion(0.3, 1.0, 0.5), 1.0);
+        assert_eq!(specular_occlusion(0.3, 0.0, 0.5), 0.0);
+        // in the light's shadow the shape is not reflected: the surroundings alone are left
+        assert_eq!(
+            reflecting(&lit, &mirror, head_on, 1.0, &[0.0])[0],
+            surroundings
+        );
+        // … nor outside its cone (the surface moved out from under it would be; here the cone
+        // is turned away)
+        lit.lights[0].direction = [1.0, 0.0, 0.0];
+        lit.lights[0].shape.as_mut().unwrap().shape = EmitterShape::Sphere;
+        lit.lights[0].size = 0.5;
+        assert_eq!(
+            reflecting(&lit, &mirror, head_on, 1.0, &[])[0],
+            surroundings
+        );
+        // :specular 0 reflects nothing of anything
+        let matte = Material {
+            specular: 0.0,
+            ..mirror.clone()
+        };
+        lit.lights = vec![shaped(overhead(0.0), EmitterShape::Rect, [1.0, 0.5])];
+        assert_eq!(reflecting(&lit, &matte, head_on, 1.0, &[]), [0.0; 3]);
+        // one of the scene's `:emitters` is reflected and lights nothing
+        unlit.emitters = vec![Emitter {
+            shape: EmitterShape::Rect,
+            position: [0.0, 0.0, 2.0],
+            direction: [0.0, 0.0, -1.0],
+            up: [0.0, 1.0, 0.0],
+            extent: [1.0, 0.5],
+            radiance: [3.0, 2.0, 1.0],
+        }];
+        let shown = reflecting(&unlit, &mirror, head_on, 1.0, &[]);
+        near(shown[0] - surroundings, 0.04 * 3.0);
+        near(shown[2] - surroundings, 0.04 * 1.0);
+        let white = Material {
+            specular: 0.0,
+            ..Material::default()
+        };
+        let plan = emitter_plan(&unlit);
+        let normal = [0.0, 0.0, 1.0];
+        let diffuse = |seen: &Scene, plan: &EmitterPlan| {
+            shade(
+                seen,
+                &white,
+                [1.0; 3],
+                normal,
+                normal,
+                [0.0; 3],
+                1.0,
+                &[],
+                [0.0; 3],
+                0.0,
+                1.0,
+                normal,
+                plan,
+            )
+        };
+        let mut bare = unlit.clone();
+        bare.emitters.clear();
+        assert_eq!(diffuse(&unlit, &plan), diffuse(&bare, &emitter_plan(&bare)));
+        // a surface tilted by its normal map until the reflection runs under the surface
+        // itself reflects less by the horizon term, a reflection leaving the surface all
+        let tilted = normalize([0.6, 0.0, 0.8]);
+        let view = normalize([-0.6, 0.0, 0.8]);
+        let facing_view = dot(tilted, view);
+        let under = [0, 1, 2].map(|axis| 2.0 * facing_view * tilted[axis] - view[axis]);
+        assert!(under[2] < 0.0);
+        let kept = horizon(under, normal);
+        assert!(kept > 0.2 && kept < 0.6, "{kept}");
+        assert_eq!(horizon(under, tilted), 1.0);
+        let mapped = |surface: [f32; 3]| {
+            shade(
+                &bare,
+                &mirror,
+                [0.0; 3],
+                tilted,
+                view,
+                [0.0; 3],
+                1.0,
+                &[],
+                [0.0; 3],
+                0.0,
+                1.0,
+                surface,
+                &emitter_plan(&bare),
+            )[0]
+        };
+        near(mapped(normal), kept * mapped(tilted));
+    }
+
+    #[test]
+    fn a_roughness_under_the_old_ceiling_means_something_and_nothing_steps() {
+        // an eye at 0.12 and a tear line at 0.05 were one highlight (the exponent stopped at
+        // 4096, a roughness of about 0.149); now each is its own
+        let glossy = |roughness: f32| Material {
+            roughness,
+            ..Material::default()
+        };
+        let (eye, tear) = (
+            specular_head_on(&glossy(0.12)),
+            specular_head_on(&glossy(0.05)),
+        );
+        near(eye, 0.04 * (lobe_exponent(0.12) + 8.0) / 8.0);
+        near(tear, 0.04 * (lobe_exponent(0.05) + 8.0) / 8.0);
+        assert!(tear > 20.0 * eye, "{tear} against {eye}");
+        assert!(lobe_exponent(0.12) > 2.0 * RESOLVED_EXPONENT);
+        assert_eq!(lobe_exponent(0.0), lobe_exponent(MIN_ROUGHNESS));
+        // from the old ceiling up nothing changed, on a flat surface or a curved one
+        for step in 150..=1000 {
+            let roughness = step as f32 / 1000.0;
+            for turn in [0.0f32, 0.001, 0.05, 0.4] {
+                assert_eq!(highlight_exponent(roughness, turn), shininess(roughness));
+            }
+        }
+        // on a curved surface a sharper lobe is only as sharp as a pixel resolves, never
+        // under the old ceiling: a reflection turning 0.05 rad across half a pixel
+        let resolved = 2.0 * std::f32::consts::PI / (0.05 * 0.05) - 8.0;
+        assert_eq!(
+            highlight_exponent(0.0, 0.05),
+            RESOLVED_EXPONENT.max(resolved)
+        );
+        assert_eq!(highlight_exponent(0.0, 0.01), resolved_at(0.01));
+        assert_eq!(highlight_exponent(0.12, 1e-4), lobe_exponent(0.12));
+        // and a sweep of the roughness has no step in it: the exponent falls by under an
+        // eighth from one thousandth of roughness to the next, flat or curved, as do the
+        // highlight's peak and the width a shape's image is blurred to
+        for turn in [0.0f32, 0.004, 0.01, 0.05] {
+            let mut last = highlight_exponent(0.0, turn);
+            let mut last_spread = lobe_spread(lobe_exponent(0.0), turn);
+            for step in 1..=1000 {
+                let roughness = step as f32 / 1000.0;
+                let exponent = highlight_exponent(roughness, turn);
+                assert!(
+                    exponent <= last && exponent > last * 0.875,
+                    "{roughness} at {turn}: {exponent} after {last}"
+                );
+                let spread = lobe_spread(lobe_exponent(roughness), turn);
+                assert!(
+                    spread >= last_spread && spread >= turn && spread < last_spread * 1.07,
+                    "{roughness} at {turn}: {spread} after {last_spread}"
+                );
+                (last, last_spread) = (exponent, spread);
+            }
+        }
+    }
+
+    /// The exponent whose lobe is as wide as a reflection turning `turn` across half a pixel.
+    fn resolved_at(turn: f32) -> f32 {
+        2.0 * std::f32::consts::PI / (turn * turn) - 8.0
+    }
+
+    #[test]
+    fn a_reflection_crosses_a_shapes_edge_and_a_shape_shrinks_to_a_point_without_a_step() {
+        // the reflection swept across a rectangle's and a disc's edge a millimetre at a time,
+        // satin and mirror, the mirror on a flat surface and on one curved enough that the
+        // reflection turns a hundredth of a radian across half a pixel: the image fades in over
+        // the lobe's width, never by more than the millimetre's share of that width
+        let plan_of = |shape: EmitterShape| {
+            let mut lit = dark();
+            lit.lights = vec![shaped(overhead(2.0), shape, [2.0, 2.0])];
+            emitter_plan(&lit).emitters[0].clone()
+        };
+        for shape in [EmitterShape::Rect, EmitterShape::Disc, EmitterShape::Sphere] {
+            let emitter = plan_of(shape);
+            for (roughness, turn) in [(0.3f32, 0.0f32), (0.0, 0.0), (0.0, 0.01), (0.12, 0.05)] {
+                let spread = lobe_spread(lobe_exponent(roughness), turn);
+                let covered =
+                    |x: f32| emitter_coverage(&emitter, [0.0; 3], normalize([x, 0.0, 2.0]), spread);
+                assert_eq!(covered(0.0), 1.0, "{shape:?} {roughness}: its middle");
+                assert_eq!(covered(2.2), 0.0, "{shape:?} {roughness}: well beside it");
+                // the lobe's half-width where it lands, 2 m away: no narrower than this
+                let most = 0.001 / (2.0 * 2.0 * spread) * 1.5;
+                let mut last = 1.0f32;
+                for step in 1..=2200 {
+                    let here = covered(step as f32 * 0.001);
+                    assert!(
+                        (0.0..=1.0).contains(&here) && here <= last + 1e-4 && last - here <= most,
+                        "{shape:?} {roughness} {turn} at {step} mm: {here} after {last}"
+                    );
+                    last = here;
+                }
+            }
+        }
+        // a shape shrinking by a twentieth at a time, from a metre to a tenth of a millimetre:
+        // its image brightens as it shrinks inside the lobe, then holds at the point light's
+        // highlight; never a jump
+        for shape in [EmitterShape::Disc, EmitterShape::Sphere, EmitterShape::Rect] {
+            let material = Material {
+                roughness: 0.3,
+                ..Material::default()
+            };
+            let mut lit = dark();
+            lit.lights = vec![overhead(0.0)];
+            let point = reflecting(&lit, &material, landing(0.0, 0.0), 1.0, &[])[0];
+            let mut size = 1.0f32;
+            let mut last = None;
+            while size > 1e-4 {
+                lit.lights = vec![shaped(overhead(size), shape, [size, size])];
+                let here = reflecting(&lit, &material, landing(0.0, 0.0), 1.0, &[])[0];
+                if let Some(before) = last {
+                    assert!(
+                        here >= before * 0.999 && here <= before * 1.12,
+                        "{shape:?} at {size}: {here} after {before}"
+                    );
+                }
+                assert!(
+                    here <= point * 1.001,
+                    "{shape:?} at {size}: {here} over {point}"
+                );
+                last = Some(here);
+                size *= 0.95;
+            }
+            near(last.unwrap(), point);
+        }
+    }
+
+    #[test]
+    fn a_coat_adds_its_layer_and_nothing_without_it() {
+        let dry = Material {
+            roughness: 0.6,
+            ..Material::default()
+        };
+        let wet = Material {
+            coat: Some([1.0, 0.1]),
+            ..dry.clone()
+        };
+        let none = Material {
+            coat: Some([0.0, 0.1]),
+            ..dry.clone()
+        };
+        let head_on = landing(0.0, 0.0);
+        // under a point light: a second highlight at the coat's roughness and water's F0
+        let mut lit = dark();
+        lit.lights = vec![overhead(0.0)];
+        let under = reflecting(&lit, &dry, head_on, 1.0, &[])[0];
+        let coated = reflecting(&lit, &wet, head_on, 1.0, &[])[0];
+        near(
+            coated - under,
+            COAT_F0 * (lobe_exponent(0.1) + 8.0) / 8.0 / 4.0,
+        );
+        assert_eq!(reflecting(&lit, &none, head_on, 1.0, &[])[0], under);
+        // half a coat, half of it
+        let half = Material {
+            coat: Some([0.5, 0.1]),
+            ..dry.clone()
+        };
+        near(
+            reflecting(&lit, &half, head_on, 1.0, &[])[0] - under,
+            (coated - under) * 0.5,
+        );
+        // in the surroundings: their reflection by the coat's own fit, over the surface's
+        let mut around = dark();
+        around.sky = [0.3; 3];
+        around.ground = [0.3; 3];
+        let [scale, bias] = environment_brdf(0.1, 1.0);
+        let under = reflecting(&around, &dry, head_on, 1.0, &[])[0];
+        near(
+            reflecting(&around, &wet, head_on, 1.0, &[])[0] - under,
+            0.3 * (COAT_F0 * scale + bias),
+        );
+        assert_eq!(reflecting(&around, &none, head_on, 1.0, &[])[0], under);
+        // and a shape's image in it, sharp over the satin surface's blurred one
+        around.lights = vec![shaped(overhead(0.0), EmitterShape::Rect, [1.0, 0.5])];
+        let radiance = std::f32::consts::PI / 0.5;
+        let under = reflecting(&around, &dry, head_on, 1.0, &[])[0];
+        near(
+            reflecting(&around, &wet, head_on, 1.0, &[])[0] - under,
+            COAT_F0 * radiance + 0.3 * (COAT_F0 * scale + bias),
+        );
+    }
+
+    #[test]
+    fn hair_reflects_no_surroundings_and_has_no_coat() {
+        // hair keeps its own highlights: no reflection of the ambient or of a shape, no coat
+        for surface in [Surface::Hair, Surface::Strands] {
+            let hair = Material {
+                surface,
+                roughness: 0.1,
+                specular: 1.0,
+                ..Material::default()
+            };
+            let coated = Material {
+                coat: Some([1.0, 0.05]),
+                ..hair.clone()
+            };
+            let mut lit = dark();
+            lit.sky = [0.5; 3];
+            lit.ground = [0.5; 3];
+            assert_eq!(
+                reflecting(&lit, &hair, landing(1.0, 0.0), 1.0, &[]),
+                [0.0; 3]
+            );
+            lit.emitters = vec![Emitter {
+                shape: EmitterShape::Sphere,
+                position: [0.0, 0.0, 2.0],
+                direction: [0.0, -1.0, 0.0],
+                up: [0.0, 1.0, 0.0],
+                extent: [1.0, 1.0],
+                radiance: [5.0; 3],
+            }];
+            assert_eq!(
+                reflecting(&lit, &hair, landing(0.0, 0.0), 1.0, &[]),
+                [0.0; 3]
+            );
+            lit.lights = vec![overhead(0.0)];
+            assert_eq!(
+                reflecting(&lit, &coated, landing(0.2, 0.0), 1.0, &[]),
+                reflecting(&lit, &hair, landing(0.2, 0.0), 1.0, &[])
+            );
+        }
+    }
+
+    #[test]
+    fn the_emitters_are_planned_once_shaped_lights_first_eight_at_most() {
+        let mut lit = dark();
+        let window = Emitter {
+            shape: EmitterShape::Rect,
+            position: [1.0, 2.0, 3.0],
+            direction: [0.0, 0.0, 2.0],
+            up: [0.0, 1.0, 0.0],
+            extent: [1.5, 1.3],
+            radiance: [4.0, 5.0, 6.0],
+        };
+        lit.emitters = vec![window.clone(); MAX_EMITTERS];
+        lit.lights = vec![
+            overhead(0.0),
+            shaped(
+                Light {
+                    color: [2.0, 1.0, 0.5],
+                    ..overhead(0.5)
+                },
+                EmitterShape::Disc,
+                [0.0; 2],
+            ),
+            shaped(
+                Light {
+                    size: 0.02,
+                    ..Light::directional([0.0, -1.0, 0.0], [1.0; 3])
+                },
+                EmitterShape::Disc,
+                [0.0; 2],
+            ),
+        ];
+        let plan = emitter_plan(&lit);
+        assert_eq!(plan.shaped[..4], [false, true, true, false]);
+        assert_eq!(plan.emitters.len(), MAX_EMITTERS);
+        let disc = &plan.emitters[0];
+        assert_eq!((disc.shape, disc.light), (PlannedShape::Disc, Some(1)));
+        assert_eq!(disc.half[0], 0.25);
+        // π·color over its area, π r²: color / r²
+        for channel in 0..3 {
+            near(disc.radiance[channel], [2.0, 1.0, 0.5][channel] / 0.0625);
+        }
+        let sun = &plan.emitters[1];
+        assert_eq!((sun.shape, sun.light), (PlannedShape::Distant, Some(2)));
+        near(sun.half[0], 0.01);
+        near(sun.radiance[0], 1.0 / (0.01f32.tan() * 0.01f32.tan()));
+        // the scene's own after them: facing made unit, its width to the right of its facing
+        // with its height up
+        let planned = &plan.emitters[2];
+        assert_eq!((planned.shape, planned.light), (PlannedShape::Rect, None));
+        assert_eq!(planned.facing, [0.0, 0.0, 1.0]);
+        assert_eq!(
+            (planned.right, planned.up),
+            ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+        );
+        assert_eq!(planned.half, [0.75, 0.65]);
+        assert_eq!(planned.radiance, window.radiance);
+        assert_eq!(
+            [1, 2, 3, 4],
+            [
+                PlannedShape::Disc.code(),
+                PlannedShape::Rect.code(),
+                PlannedShape::Sphere.code(),
+                PlannedShape::Distant.code()
+            ]
+        );
+        // an `:up` along its facing still gives it a frame
+        let (right, up) = emitter_frame([0.0, 1.0, 0.0], [0.0, 1.0, 0.0]);
+        assert!((dot(right, right) - 1.0).abs() < 1e-6 && (dot(up, up) - 1.0).abs() < 1e-6);
+        assert!(dot(right, up).abs() < 1e-6 && dot(right, [0.0, 1.0, 0.0]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_pixel_spans_what_the_camera_says_and_a_curved_mirror_blurs_by_it() {
+        // `scene`'s camera is the identity over 16 pixels: clip −1 … 1 is 2 m across, so a
+        // pixel is an eighth of a metre
+        let seen = scene(draw());
+        near(pixel_span(&seen, [0.0; 3], [0.0, 0.0, -1.0]), 0.125);
+        // a mirror ball of 1 m radius there: its reflection turns a quarter of a radian across
+        // half a pixel, so a shape's edge in it is blurred over a pixel and its point
+        // highlight is no sharper than a pixel shows, where a flat mirror keeps both sharp
+        let turn = 2.0 * 1.0 * 0.125;
+        assert_eq!(lobe_spread(lobe_exponent(0.0), turn), turn);
+        assert!(lobe_spread(lobe_exponent(0.0), 0.0) < 0.003);
+        let mirror = Material {
+            roughness: 0.0,
+            ..Material::default()
+        };
+        let mut lit = scene(draw());
+        lit.sky = [0.0; 3];
+        lit.ground = [0.0; 3];
+        lit.lights = vec![Light::directional([0.0, 0.0, 1.0], [1.0; 3])];
+        let normal = [0.0, 0.0, -1.0];
+        let highlight = |curvature: f32| {
+            shade(
+                &lit,
+                &mirror,
+                [0.0; 3],
+                normal,
+                normal,
+                [0.0; 3],
+                1.0,
+                &[],
+                [0.0; 3],
+                curvature,
+                1.0,
+                normal,
+                &emitter_plan(&lit),
+            )[0]
+        };
+        near(highlight(0.0), 0.04 * (lobe_exponent(0.0) + 8.0) / 8.0);
+        near(highlight(1.0), 0.04 * (RESOLVED_EXPONENT + 8.0) / 8.0);
+        near(highlight(0.04), 0.04 * (resolved_at(0.01) + 8.0) / 8.0);
     }
 }

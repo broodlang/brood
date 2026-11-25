@@ -637,7 +637,9 @@ fn fs_particle(in: ParticleOut) -> @location(0) vec4<f32> {
 /// `ambient`, `sh_irradiance`, `fresnel`, `specular_lobes`, `light_arrival`,
 /// `shadow_visibility`, `sample_shadow`, `soft_shadow`, `receiver_slope`, `bilinear_tap`,
 /// `stored_depth`, `pixel_noise`, `disc_tap`, `skin_diffuse`, `detail_tilt`, `detail_normal`,
-/// `detail_specular`) — keep the two in step. Writes
+/// `detail_specular`, and ADR-795's `lobe_exponent`, `highlight_exponent`, `lobe_spread`,
+/// `pixel_span`, `sh_radiance`, `ambient_radiance`, `environment_brdf`, `specular_occlusion`,
+/// `horizon`, `overlap`, `emitter_coverage`) — keep the two in step. Writes
 /// premultiplied, sRGB-encoded colour, the space the scene's picture is composited in.
 /// `vs_shadow` / `fs_shadow` render a shadow map: the same posing, seen through the shadow
 /// view the instance index names, alpha-tested for a `:cutout` or `:blend` surface.
@@ -647,7 +649,14 @@ struct Light {
     direction: vec4<f32>,       // xyz: the way the light travels, size (metres; radians directional)
     color: vec4<f32>,           // rgb, shadow softness (metres at the receiver; 0 and no size: 3×3)
     cone: vec4<f32>,            // cos inner, cos outer, shadow bias, shadow normal bias
-    shadow: vec4<u32>,          // kind (0 directional, 1 point, 2 spot), first view, view count
+    shadow: vec4<u32>,          // kind (0 directional, 1 point, 2 spot), first view, view count, shaped (0 or 1)
+};
+// a shape glossy surfaces show (`mesh::PlannedEmitter`, ADR-795)
+struct Emitter {
+    centre: vec4<f32>,          // xyz, shape (1 disc, 2 rect, 3 sphere, 4 a directional light's disc)
+    facing: vec4<f32>,          // xyz: the unit way its light travels, one past its light's index (0: none)
+    right: vec4<f32>,           // xyz: a rectangle's width direction, its half width (a disc's or sphere's radius)
+    radiance: vec4<f32>,        // rgb, a rectangle's half height
 };
 struct ShadowView {
     view_proj: mat4x4<f32>,
@@ -663,13 +672,14 @@ struct SceneU {
     ambient_sh: array<vec4<f32>, 9>,    // L00, L1-1, L10, L11, L2-2, L2-1, L20, L21, L22 (rgb)
     shadows: array<ShadowView, 24>,
     occlusion: vec4<f32>,       // ambient occlusion radius (metres; 0: none), strength, view + 1 (0: none)
-    picture: vec4<f32>,         // the picture's width and height in pixels
+    picture: vec4<f32>,         // the picture's width and height in pixels, how many emitters
+    emitters: array<Emitter, 8>,
 };
 struct DrawU {
     model: mat4x4<f32>,
     color: vec4<f32>,
-    skin: vec4<f32>,            // a `:skin` surface: its curvature (1 / mesh units) to 1 / mm, times `:scatter`
-    material: vec4<f32>,        // roughness, specular, rim, cutoff
+    skin: vec4<f32>,            // a `:skin` surface: its curvature (1 / mesh units) to 1 / mm, times `:scatter`; the `:coat`'s strength, its roughness
+    material: vec4<f32>,        // roughness, specular, spare, cutoff
     lobes: vec4<f32>,           // roughness times a, times b, mix of a, F0
     flags: vec4<u32>,           // surface, texture bits (`scenes::texture_bits`), palette offset, skinned
     morph_info: vec4<u32>,      // morphed (0 or 1), vertex count, palette joint count, first offset
@@ -1177,19 +1187,136 @@ fn fresnel(f0: f32, view_dot_half: f32) -> f32 {
     return f0 + (min(50.0 * f0, 1.0) - f0) * grazing;
 }
 
+// `mesh::lobe_exponent`: `shininess` with no ceiling of 4096, the roughness held to 0.04 … 1
+fn lobe_exponent(roughness: f32) -> f32 {
+    let clamped = clamp(roughness, 0.04, 1.0);
+    return max(2.0 / (clamped * clamped * clamped * clamped) - 2.0, 1.0);
+}
+
+// `mesh::highlight_exponent`: past 4096 only as sharp as a pixel resolves where the
+// reflection turns `turn` radians across half of one
+fn highlight_exponent(roughness: f32, turn: f32) -> f32 {
+    let exponent = lobe_exponent(roughness);
+    if (exponent <= 4096.0 || turn <= 0.0) {
+        return exponent;
+    }
+    let resolved = 2.0 * 3.14159265 / (turn * turn) - 8.0;
+    return min(exponent, max(resolved, 4096.0));
+}
+
+// `mesh::lobe_spread`: half the side of the box a lobe of solid angle 8π / (n + 8) is
+fn lobe_spread(exponent: f32, turn: f32) -> f32 {
+    return max(sqrt(8.0 * 3.14159265 / (exponent + 8.0)) * 0.5, turn);
+}
+
+// `mesh::pixel_span`: the metres a picture pixel spans at `world`
+fn pixel_span(world: vec3<f32>, view: vec3<f32>) -> f32 {
+    let across = right_of(view);
+    let near = scene.view_proj * vec4<f32>(world, 1.0);
+    let far = scene.view_proj * vec4<f32>(world + across * 0.01, 1.0);
+    if (near.w > 1e-6 && far.w > 1e-6) {
+        let moved = (far.xy / far.w - near.xy / near.w) * scene.picture.xy * 0.5;
+        let pixels = length(moved);
+        if (pixels > 1e-6) {
+            return 0.01 / pixels;
+        }
+    }
+    return 0.0;
+}
+
 // one Blinn-Phong lobe normalised to (n + 8) / 8, the BRDF's 1/π folded into the light
-fn specular_lobe(roughness: f32, normal_dot_half: f32) -> f32 {
-    let exponent = shininess(roughness);
+fn specular_lobe(roughness: f32, normal_dot_half: f32, turn: f32) -> f32 {
+    let exponent = highlight_exponent(roughness, turn);
     return (exponent + 8.0) / 8.0 * pow(max(normal_dot_half, 0.0), exponent);
 }
 
 // the CPU's `specular_lobes`
-fn specular_lobes(normal_dot_half: f32) -> f32 {
-    let first = specular_lobe(draw.material.x * draw.lobes.x, normal_dot_half);
+fn specular_lobes(normal_dot_half: f32, turn: f32) -> f32 {
+    let first = specular_lobe(draw.material.x * draw.lobes.x, normal_dot_half, turn);
     if (draw.lobes.z >= 1.0) {
         return first;
     }
-    return draw.lobes.z * first + (1.0 - draw.lobes.z) * specular_lobe(draw.material.x * draw.lobes.y, normal_dot_half);
+    return draw.lobes.z * first + (1.0 - draw.lobes.z) * specular_lobe(draw.material.x * draw.lobes.y, normal_dot_half, turn);
+}
+
+// `mesh::sh_radiance`: the scene's nine coefficients along `direction`, band l scaled by
+// exp(−2 l² / n), held at 0
+fn sh_radiance(direction: vec3<f32>, exponent: f32) -> vec3<f32> {
+    let x = direction.x;
+    let y = direction.y;
+    let z = direction.z;
+    let first = exp(-2.0 / exponent);
+    let second = exp(-8.0 / exponent);
+    let sh = scene.ambient_sh;
+    let radiance = 0.282095 * sh[0].rgb
+        + 0.488603 * first * (y * sh[1].rgb + z * sh[2].rgb + x * sh[3].rgb)
+        + 1.092548 * second * (x * y * sh[4].rgb + y * z * sh[5].rgb + x * z * sh[7].rgb)
+        + 0.315392 * (3.0 * z * z - 1.0) * second * sh[6].rgb
+        + 0.546274 * (x * x - y * y) * second * sh[8].rgb;
+    return max(radiance, vec3<f32>(0.0));
+}
+
+// `mesh::ambient_radiance`
+fn ambient_radiance(direction: vec3<f32>, exponent: f32) -> vec3<f32> {
+    if (scene.params.w > 0.5) {
+        return sh_radiance(direction, exponent);
+    }
+    return mix(scene.ground.rgb, scene.sky.rgb, direction.y * exp(-2.0 / exponent) * 0.5 + 0.5);
+}
+
+// `mesh::environment_brdf`: Karis's EnvBRDFApprox, (scale, bias)
+fn environment_brdf(roughness: f32, normal_dot_view: f32) -> vec2<f32> {
+    let rough = clamp(roughness, 0.0, 1.0);
+    let curve = vec4<f32>(1.0 - rough, 0.0425 - 0.0275 * rough, 1.04 - 0.572 * rough, 0.022 * rough - 0.04);
+    let grazing = min(curve.x * curve.x, exp2(-9.28 * normal_dot_view)) * curve.x + curve.y;
+    // held to 0 … 1 together, as the CPU holds them
+    let scale = max(curve.z - 1.04 * grazing, 0.0);
+    return vec2<f32>(scale, clamp(curve.w + 1.04 * grazing, 0.0, 1.0 - scale));
+}
+
+// `mesh::specular_occlusion`: Lagarde's
+fn specular_occlusion(normal_dot_view: f32, occlusion: f32, roughness: f32) -> f32 {
+    let power = exp2(-16.0 * clamp(roughness, 0.0, 1.0) - 1.0);
+    return clamp(pow(max(normal_dot_view + occlusion, 0.0), power) - 1.0 + occlusion, 0.0, 1.0);
+}
+
+// `mesh::horizon`
+fn horizon(reflected: vec3<f32>, surface_normal: vec3<f32>) -> f32 {
+    let above = clamp(1.0 + dot(reflected, surface_normal), 0.0, 1.0);
+    return above * above;
+}
+
+// `mesh::overlap`
+fn overlap(offset: f32, half: f32, reach: f32) -> f32 {
+    return clamp((min(offset + reach, half) - max(offset - reach, -half)) / (2.0 * reach), 0.0, 1.0);
+}
+
+// `mesh::emitter_coverage`: how much of a lobe leaving `world` along `reflected` lands on it
+fn emitter_coverage(emitter: Emitter, world: vec3<f32>, reflected: vec3<f32>, spread: f32) -> f32 {
+    let shape = u32(emitter.centre.w);
+    var centre = emitter.centre.xyz;
+    var facing = emitter.facing.xyz;
+    if (shape == 3u) {
+        facing = safe_normalize(world - centre);
+    } else if (shape == 4u) {
+        centre = world - facing;
+    }
+    let toward = -dot(reflected, facing);
+    let height = dot(world - centre, facing);
+    if (!(toward > 1e-4 && height > 0.0)) {
+        return 0.0;
+    }
+    let distance = height / toward;
+    let reach = max(distance * spread / sqrt(toward), 1e-9);
+    let hit = world + reflected * distance - centre;
+    if (shape == 2u) {
+        let up = cross(facing, emitter.right.xyz);
+        return overlap(dot(hit, emitter.right.xyz), emitter.right.w, reach)
+            * overlap(dot(hit, up), emitter.radiance.w, reach);
+    }
+    let radius = emitter.right.w;
+    let edge = clamp((radius + reach - length(hit)) / (2.0 * min(radius, reach)), 0.0, 1.0);
+    return edge * min(3.14159265 * radius * radius / (4.0 * reach * reach), 1.0);
 }
 
 // `mesh::view_distance` (the CPU's name): how far along the camera's view a clip depth lies
@@ -1315,6 +1442,19 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
     let f0 = draw.lobes.w;
     // a `:hair` surface's highlights: as sharp as its roughness asks
     let exponent = shininess(draw.material.x);
+    let reflects = draw.flags.x != 4u && draw.flags.x != 5u;
+    // how far the reflection turns across half a pixel: twice the curvature, times the pixel
+    var reflection_turn = 0.0;
+    if (reflects && curvature > 0.0) {
+        reflection_turn = 2.0 * curvature * pixel_span(world, view);
+    }
+    // the `:coat`: its strength, its roughness
+    var coat = vec2<f32>(0.0);
+    if (reflects && draw.skin.y > 0.0) {
+        coat = draw.skin.yz;
+    }
+    // per light: how much of its shape's image is left by its shadow, cone and range window
+    var shaping: array<f32, 8>;
     let count = u32(scene.params.y);
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let light = scene.lights[slot];
@@ -1342,7 +1482,22 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             out = out + light.color.rgb * arriving * hair_light(seen, base) * (base * hair_diffuse + shine);
             continue;
         }
-        let specular = fresnel(f0, dot(view, half_vector)) * specular_lobes(dot(normal, half_vector)) * lambert * specular_kept;
+        // a shaped light's highlight is its shape's image, below: its inverse square is the
+        // image's size, so only its cone and range window are kept
+        var specular = 0.0;
+        if (light.shadow.w != 0u) {
+            var spread_out = 1.0;
+            if (light.shadow.x != 0u) {
+                let toward = light.position.xyz - world;
+                spread_out = max(dot(toward, toward), 1e-4);
+            }
+            shaping[slot] = seen * arriving * spread_out;
+        } else {
+            specular = fresnel(f0, dot(view, half_vector)) * specular_lobes(dot(normal, half_vector), reflection_turn) * lambert * specular_kept;
+            if (coat.x > 0.0) {
+                specular = specular + coat.x * fresnel(0.02, dot(view, half_vector)) * specular_lobe(coat.y, dot(normal, half_vector), reflection_turn) * lambert;
+            }
+        }
         var diffuse = vec3<f32>(lambert * seen);
         if (draw.flags.x == 0u) {
             // the CPU's: the light under the skin in place of Lambert's, the shadow fading out
@@ -1353,8 +1508,47 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         }
         out = out + light.color.rgb * arriving * (base * diffuse + vec3<f32>(specular * seen));
     }
-    let rim = draw.material.z * specular_kept * pow(1.0 - max(dot(normal, view), 0.0), 3.0);
-    return out + rim * scene.sky.rgb;
+    if (!reflects) {
+        return out;
+    }
+    // the surroundings, reflected (ADR-795): a layer at a time, each a weight, a roughness and
+    // a reflectance at normal incidence — the material's lobes, then its coat (`mesh::shade`)
+    let facing_view = dot(normal, view);
+    let normal_dot_view = clamp(facing_view, 0.0, 1.0);
+    let reflected = 2.0 * facing_view * normal - view;
+    let kept = horizon(reflected, surface_normal);
+    let weights = vec3<f32>(draw.lobes.z * specular_kept, (1.0 - draw.lobes.z) * specular_kept, coat.x);
+    let roughnesses = vec3<f32>(draw.material.x * draw.lobes.x, draw.material.x * draw.lobes.y, coat.y);
+    let reflectances = vec3<f32>(f0, f0, 0.02);
+    let emitter_count = u32(scene.picture.z);
+    for (var layer = 0u; layer < 3u; layer = layer + 1u) {
+        let weight = weights[layer];
+        if (weight <= 0.0) {
+            continue;
+        }
+        let roughness = roughnesses[layer];
+        let reflectance = reflectances[layer];
+        let lobe = lobe_exponent(roughness);
+        let open = weight * kept * specular_occlusion(normal_dot_view, occlusion, roughness);
+        let fit = environment_brdf(roughness, normal_dot_view);
+        let surrounding = open * (reflectance * fit.x + min(50.0 * reflectance, 1.0) * fit.y);
+        out = out + ambient_radiance(reflected, lobe) * surrounding;
+        let mirrored = open * fresnel(reflectance, normal_dot_view);
+        let spread = lobe_spread(lobe, reflection_turn);
+        for (var index = 0u; index < emitter_count; index = index + 1u) {
+            let emitter = scene.emitters[index];
+            var left = 1.0;
+            let owner = u32(emitter.facing.w);
+            if (owner > 0u) {
+                left = shaping[owner - 1u];
+            }
+            if (left <= 0.0) {
+                continue;
+            }
+            out = out + emitter.radiance.rgb * (mirrored * left * emitter_coverage(emitter, world, reflected, spread));
+        }
+    }
+    return out;
 }
 
 fn tone(color: vec3<f32>, exposure: f32) -> vec3<f32> {
