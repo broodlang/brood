@@ -164,6 +164,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Window id's input-to-present times since it opened as a distribution, keys apart from the pointer: {:key h :pointer h}, each h a map of :count (inputs answered), :max-us (the slowest, microseconds) and :buckets, a map from a bucket's largest value in microseconds to how many inputs fell in it — exact below 16 us, then 16 buckets per power of two, so a bucket is at most 6.25% wide. A key is a press, an OS repeat or an input method's commit; the pointer a button or a wheel step. Histograms add bucket by bucket (gui/latency-merge, gui/latency-since) and gui/latency-percentiles reads p50 / p99 / p99.9 off one. Both empty headless. ADR-612.",
         gui_latency_histogram);
     primitives.def(
+        "%gui-scene-gpu-times",
+        Arity::exact(0),
+        Sig::new(vec![], vec_ty),
+        &[],
+        "How long the GPU itself took on the 3D scenes of recent frames, oldest first (at most 64), each a map of milliseconds: :shadow (from the start of the first shadow-map pass to the end of the last) and :scene (the colour pass: rasterising, shading, the multisample resolve), summed over the frame's scenes, with :scenes, how many were timed (at most 4). Read from the card's timestamp queries a few frames after the frame they measure, so nothing waits on it. Empty where nothing measures: the CPU painter, an adapter without timestamp queries, BROOD_GUI_GPU_TIMES=0. One log for the process. BROOD_GUI_TRACE=1 prints the newest beside each paint line. ADR-801.",
+        gui_scene_gpu_times);
+    primitives.def(
         "%gui-key-repeat?",
         Arity::exact(1),
         Sig::new(vec![int], bool_ty),

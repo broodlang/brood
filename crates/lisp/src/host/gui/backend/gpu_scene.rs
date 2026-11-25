@@ -522,3 +522,53 @@ fn hair_covers_and_shines_on_the_gpu_as_on_the_cpu() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The scene passes' timestamps (ADR-801): a few frames drawn, the card's time on the scene is
+/// read back into `scene_gpu_times`, never waited on, and is a time a frame could take.
+#[test]
+fn a_scene_is_timed_on_the_gpu_a_few_frames_late() {
+    use crate::host::gui::scene_gpu_times::scene_gpu_times;
+    let adapters: Vec<_> = hardware_adapters()
+        .into_iter()
+        .filter(|adapter| adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY))
+        .collect();
+    if adapters.is_empty() {
+        eprintln!("skipped: no hardware GPU adapter with timestamp queries here");
+        return;
+    }
+    let mesh = mesh();
+    let scene = scene();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let mut gpu = match GpuWindow::offscreen(adapter, SIDE, SIDE) {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                eprintln!("skipped {name}: {error}");
+                continue;
+            }
+        };
+        gpu.upload_mesh(1, &mesh);
+        let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+        let before = scene_gpu_times().len();
+        // each read-back waits for the card, so the frame after it finds the stamps mapped
+        for _ in 0..4 {
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            gpu.read_pixels();
+        }
+        let times = scene_gpu_times();
+        let newest = times.last().copied();
+        eprintln!(
+            "{name}: {} frames timed, newest {newest:?}",
+            times.len() - before.min(times.len())
+        );
+        let newest = newest.unwrap_or_else(|| panic!("{name}: no frame was timed"));
+        assert_eq!(newest.scenes, 1, "{name}: one scene a frame");
+        assert!(
+            newest.scene_us > 0.0 && newest.scene_us < 1_000_000.0,
+            "{name}: the scene pass took {} us",
+            newest.scene_us
+        );
+    }
+}

@@ -2846,6 +2846,25 @@ pub(in crate::builtins) fn gui_capture(args: &[Value], _: EnvId, heap: &mut Heap
 }
 
 /// `(%gui-windows)` — the ids of the open windows, oldest first.
+/// `(%gui-scene-gpu-times)` — the GPU's own time on recent frames' scenes (ADR-801), oldest
+/// first, as maps of milliseconds: `:shadow`, `:scene`, and `:scenes` timed.
+pub(in crate::builtins) fn gui_scene_gpu_times(
+    _: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let samples = crate::host::gui::scene_gpu_times::scene_gpu_times();
+    let mut maps = Vec::with_capacity(samples.len());
+    for sample in samples {
+        maps.push(heap.map_from_pairs(vec![
+            (value::kw("shadow"), Value::float(sample.shadow_us / 1000.0)),
+            (value::kw("scene"), Value::float(sample.scene_us / 1000.0)),
+            (value::kw("scenes"), Value::int(i64::from(sample.scenes))),
+        ]));
+    }
+    Ok(heap.alloc_vector(maps))
+}
+
 pub(in crate::builtins) fn gui_windows(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let ids = crate::host::gui::window_ids()
         .into_iter()

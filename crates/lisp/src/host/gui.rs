@@ -1561,6 +1561,9 @@ pub(crate) mod effects; // lighting, post-processing and particles, shared by bo
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub mod mesh;
 
+// the GPU's own time on a frame's scenes, empty where nothing measures it (ADR-801)
+pub mod scene_gpu_times;
+
 #[cfg(feature = "gui-gpu")]
 pub(crate) mod gpu; // the wgpu render target behind `BROOD_GUI_GPU=1`
 

@@ -114,6 +114,8 @@ pub(super) struct MeshGpu {
     sampler: wgpu::Sampler,
     pub(super) meshes: HashMap<u32, GpuMesh>,
     pub(super) targets: Vec<SceneTarget>,
+    /// The scene passes' timestamps where the device has them (ADR-801).
+    pub(super) timer: Option<super::scene_timer::SceneTimer>,
 }
 
 fn floats_bytes(values: &[f32]) -> Vec<u8> {
@@ -538,6 +540,7 @@ impl MeshGpu {
             }),
             meshes: HashMap::new(),
             targets: Vec::new(),
+            timer: super::scene_timer::SceneTimer::new(device, queue),
         }
     }
 
@@ -968,6 +971,9 @@ impl MeshGpu {
                 resource: self.morph_offset_buffer.as_entire_binding(),
             }],
         });
+        if let Some(timer) = &mut self.timer {
+            timer.begin_frame(device);
+        }
         for (index, scene) in scenes.iter().enumerate() {
             // the material bind groups this scene's draws sample
             let materials: Vec<wgpu::BindGroup> = scene
@@ -1023,14 +1029,32 @@ impl MeshGpu {
             // the shadow maps: every casting draw, once a view, the view by instance index, into
             // the layer of the array its `map` names (ADR-800)
             if let Some(shadow) = &target.shadow {
-                for (view_index, view) in shadow_plans[index].views.iter().enumerate() {
-                    let Some(layer) = shadow
-                        .layers
-                        .get(view.map.array as usize)
-                        .and_then(|layers| layers.get(view.map.layer as usize))
-                    else {
-                        continue;
-                    };
+                let drawn: Vec<_> = shadow_plans[index]
+                    .views
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(view_index, view)| {
+                        shadow
+                            .layers
+                            .get(view.map.array as usize)
+                            .and_then(|layers| layers.get(view.map.layer as usize))
+                            .map(|layer| (view_index, view, layer))
+                    })
+                    .collect();
+                // the span of the scene's shadow passes: the first one's start, the last one's
+                // end (ADR-801)
+                let stamps = match &mut self.timer {
+                    Some(timer) if !drawn.is_empty() => timer.shadow_stamps(index),
+                    _ => None,
+                };
+                let last = drawn.len().saturating_sub(1);
+                for (order, (view_index, view, layer)) in drawn.into_iter().enumerate() {
+                    let timestamp_writes = stamps.and_then(|(start, end)| {
+                        self.timer.as_ref()?.writes(
+                            (order == 0).then_some(start),
+                            (order == last).then_some(end),
+                        )
+                    });
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("scene shadow"),
                         color_attachments: &[],
@@ -1042,7 +1066,7 @@ impl MeshGpu {
                             }),
                             stencil_ops: None,
                         }),
-                        timestamp_writes: None,
+                        timestamp_writes,
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
@@ -1110,6 +1134,13 @@ impl MeshGpu {
                 b: (background[2].clamp(0.0, 1.0) * opacity) as f64,
                 a: opacity as f64,
             };
+            let colour_stamps = self
+                .timer
+                .as_mut()
+                .and_then(|timer| timer.colour_stamps(index));
+            let timestamp_writes = colour_stamps.and_then(|(start, end)| {
+                self.timer.as_ref()?.writes(Some(start), Some(end))
+            });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1129,7 +1160,7 @@ impl MeshGpu {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1146,6 +1177,9 @@ impl MeshGpu {
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
+        }
+        if let Some(timer) = &mut self.timer {
+            timer.end_frame(encoder);
         }
     }
 }
