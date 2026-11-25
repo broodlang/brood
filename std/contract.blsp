@@ -344,7 +344,7 @@ kernel's policy hook — calls this once per contracted binding, having already 
 binding is to be enforced.
 
     ((contract/shim 'f (fn (x) x) '(int -> int)) 3)   ;=> 3
-    (let (id (fn (x) x)) (identical? id (contract/shim 'f id '(?A -> ?A))))   ;=> true"
+    (let (id (fn (x) x)) (= id (contract/shim 'f id '(?A -> ?A))))   ;=> true"
   (if (%contract-unchecked? type)
     orig
     (%contract-shim name orig (%contract-spec type))))
