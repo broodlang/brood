@@ -145,6 +145,9 @@ pub const DEFAULT_STRAND_WIDTH: [f32; 2] = [0.0005, 0.0002];
 /// The least of its width a `:strands` ribbon keeps when the strand runs straight at the eye
 /// ([`strand_vertex`]).
 pub const STRAND_END_ON: f32 = 0.3;
+/// The share of a pixel a `:strands` ribbon covers at or above which it counts as whole: its
+/// texture's alpha is then dithered in [`HAIR_COVERAGE_STEPS`], not at samples its position picks.
+pub const STRAND_WHOLE: f32 = 0.999;
 pub const HAIR_COVERAGE_STEPS: [[f32; 2]; 2] = [[0.125, 0.625], [0.875, 0.375]];
 
 /// The reach of the ambient occlusion, in metres, when `:ambient-occlusion` names none: the
@@ -2932,10 +2935,18 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     // its own position picks (`strand_sample_step`): strands overlapping in a
                     // pixel fill different samples and add up, where one dither would have them
                     // all cover the same few
-                    let step = if material.surface == Surface::Strands {
-                        coverage *= corners[0].tangent[3] * weights[0]
+                    // … a strand as wide as a pixel or wider (a wisp: a ribbon with a texture
+                    // of hairs) has no such share to add up: its texture's alpha is dithered
+                    // as a card's is, in fixed steps, for clean edges with no speckle
+                    let share = if material.surface == Surface::Strands {
+                        corners[0].tangent[3] * weights[0]
                             + corners[1].tangent[3] * weights[1]
-                            + corners[2].tangent[3] * weights[2];
+                            + corners[2].tangent[3] * weights[2]
+                    } else {
+                        1.0
+                    };
+                    let step = if share < STRAND_WHOLE {
+                        coverage *= share;
                         strand_sample_step(
                             blend3(|vertex| vertex.world),
                             (row % 2) * 2 + column % 2,

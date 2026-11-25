@@ -1400,7 +1400,8 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
             | select(0u, 4u, coverage > 0.875) | select(0u, 8u, coverage > 0.375);
         // a strand thinner than a pixel covers only its share of one, at samples its own
         // position picks, so overlapping strands add up (`mesh::strand_sample_step`)
-        if (draw.flags.x == 5u) {
+        // (a strand as wide as a pixel, a wisp, keeps the fixed steps above: `mesh::STRAND_WHOLE`)
+        if (draw.flags.x == 5u && fragment.tangent.w < 0.999) {
             coverage = coverage * fragment.tangent.w;
             mask = 0u;
             for (var sample = 0u; sample < 4u; sample = sample + 1u) {
