@@ -1530,7 +1530,8 @@ struct EyeSeen {
 
 // `mesh::eye_seen` (ADR-796): the line through the fragment met with the cornea's sphere on the
 // viewer's side, bent there (Snell), followed to the iris's plane; the texture read at that
-// point's place on the iris's disc. A line that misses the cornea's cap is left as the mesh has it.
+// point's place on the iris's disc. A line that misses the cornea's cap (the white) reflects
+// about the eyeball's own normal, the rest as the mesh has it (ADR-804).
 fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world: vec3<f32>, view: vec3<f32>, uv: vec2<f32>, normal: vec3<f32>, curvature: f32) -> EyeSeen {
     var seen: EyeSeen;
     seen.through = false;
@@ -1545,6 +1546,9 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
     if (scale <= 1e-12) {
         return seen;
     }
+    // the white reflects as the ball it is (ADR-804): its own normal, not the mesh's
+    let ball = safe_normalize(world - centre.xyz);
+    seen.normal = ball;
     let axis = frame_axis / scale;
     let iris_radius = draw.eye_shape.y * scale;
     let cornea_radius = draw.eye_shape.z * scale;
@@ -1599,7 +1603,8 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
     }
     seen.through = true;
     seen.uv = iris_uv + vec2<f32>(across, -above) * draw.eye_iris.x;
-    seen.normal = safe_normalize(normal + (cornea_normal - normal) * cornea);
+    // the cornea's normal, giving way to the ball's toward the limbus (ADR-804)
+    seen.normal = safe_normalize(ball + (cornea_normal - ball) * cornea);
     seen.cornea = cornea;
     seen.curvature = curvature + (1.0 / cornea_radius - curvature) * cornea;
     // the iris as a shallow bowl: its normal leans toward the axis, more the further out
@@ -1883,6 +1888,11 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
             diffuse_normal = seen.iris_normal;
             under_cornea = vec4<f32>(seen.axis, 1.0 / max(draw.eye_up.w, 1.0));
             curvature = seen.curvature;
+        } else {
+            // the white: reflecting as the ball; the light still falls on the mesh's normal
+            // (ADR-804)
+            normal = seen.normal;
+            mirror_surface = seen.normal;
         }
     }
     // the ambient's occlusion: its map's, times the scene's screen-space ambient occlusion
