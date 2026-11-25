@@ -573,7 +573,9 @@ pub(super) fn emit_arith(
 }
 
 /// Float arithmetic/comparison lowering (f64). Returns an `Op::Float`/`Op::Int`,
-/// or None if `op` is not lowered for floats (e.g. structural `=`).
+/// or None if `op` is not lowered for floats (e.g. structural `=`). Exhaustive on purpose: a
+/// new `PrimOp` must decide its float lowering here, not fall into a catch-all that bails the
+/// whole arm under another op's reason (float `max`/`min` did, until ADR-808).
 pub(super) fn emit_float_arith(
     b: &mut FunctionBuilder,
     op: PrimOp,
@@ -608,7 +610,22 @@ pub(super) fn emit_float_arith(
         // arm to the VM, whose `prim_apply_float` likewise returns `None` for `Eq`
         // and defers to the structural native `prim_eq`. (Lt/Le are safe: ordering
         // coerces int↔float identically on both engines.)
-        _ => return super::bail("float-eq-mixed-int-float-unsafe"),
+        PrimOp::Eq => return super::bail("float-eq-mixed-int-float-unsafe"),
+        // The answer is an OPERAND, not an f64 (an int that wins stays an int), so these take
+        // `min_max`, which every caller routes them to first. Reaching here is a routing gap.
+        PrimOp::Max | PrimOp::Min => return super::bail("float-min-max-not-routed"),
+        // Int-domain operations: a float operand is the VM's type error (or its numeric tower).
+        PrimOp::Rem | PrimOp::Quot | PrimOp::BitAnd | PrimOp::BitOr | PrimOp::BitXor => {
+            return super::bail("float-operand-to-int-op");
+        }
+        // Not arithmetic: their callers lower them before the float path is considered.
+        PrimOp::Cons
+        | PrimOp::VectorRef
+        | PrimOp::TableHas
+        | PrimOp::TableGet
+        | PrimOp::MapGet
+        | PrimOp::SetHas
+        | PrimOp::ContractAwait => return super::bail("float-path-not-arithmetic"),
     })
 }
 

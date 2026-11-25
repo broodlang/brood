@@ -19,10 +19,11 @@
 #   scripts/ab-bench.sh --floor fib nbody      # + each row's own noise floor + a verdict
 #   scripts/ab-bench.sh --json /tmp/ab.json    # + machine-readable rows
 #   scripts/ab-bench.sh --tier 1 pfib          # measure on the VM (see `ab_tier` below)
+#   scripts/ab-bench.sh --contracts fib        # with every `sig` armed, as `nest run` runs
 #
 # Env: BROOD_BENCH_DIR (default: scripts/bench-dir.sh — ../brood-benchmarks or
 #      ../brood-benchmark, whichever is checked out), AB_PIN_CPU (default 2),
-#      AB_TIER (default: the binary's own default ceiling).
+#      AB_TIER (default: the binary's own default ceiling), AB_CONTRACTS (1 = --contracts).
 #
 # ---------------------------------------------------------------------------
 # The five footguns this encodes, each of which has cost a real session:
@@ -77,6 +78,10 @@ pin_cpu="${AB_PIN_CPU:-2}"
 # as flat here while being a 3x on any workload whose arms don't lower (KI-40 read +1.3% at
 # the default ceiling against 3.19x at ceiling 1).
 ab_tier="${AB_TIER:-}"
+# Contracts armed (`--contracts`, ADR-381): `nest run` and `nest test` arm every `sig`, so that
+# is the mode programs actually run in, and a shim's cost shows only there — `math/clamp` was
+# 34 ns unarmed and 980 armed (ADR-808), and no unarmed row could see it.
+ab_contracts="${AB_CONTRACTS:-}"
 base_ref="HEAD"
 reps=7
 prebuilt_base=""
@@ -113,6 +118,7 @@ while [ $# -gt 0 ]; do
     --json)       json_out="${2:?--json needs a path}"; shift 2 ;;
     --floor)      measure_floor=1; shift ;;
     --tier)       ab_tier="$2"; shift 2 ;;
+    --contracts)  ab_contracts=1; shift ;;
     --all)        rows=(ALL); shift ;;
     --list)       ls "$bench_dir/bench/brood/" | sed 's/\.blsp$//' | tr '\n' ' '; echo; exit 0 ;;
     -h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
@@ -292,7 +298,7 @@ best_of() { # $1 binary  $2 program  $3 cpu spec -> best wall ms
     # 205 ms (measured 2026-07-28), so putting it inside the timed region silently
     # destroys fidelity — every row read the same value and every delta read +0.0%.
     # The hang guard lives on the warmup below, outside the measurement.
-    env ${ab_tier:+BROOD_TIER=$ab_tier} taskset -c "$3" "$1" "$2" >/dev/null 2>&1 || true
+    env ${ab_tier:+BROOD_TIER=$ab_tier} ${ab_contracts:+BROOD_CONTRACTS=1} taskset -c "$3" "$1" "$2" >/dev/null 2>&1 || true
     t1=$(date +%s%N)
     ms=$(( (t1 - t0) / 1000000 ))
     [ "$ms" -lt "$best" ] && best=$ms
@@ -300,8 +306,8 @@ best_of() { # $1 binary  $2 program  $3 cpu spec -> best wall ms
   echo "$best"
 }
 
-printf 'ab-bench: base=%s  new=working tree  reps=best-of-%s  pin=cpu%s (concurrency rows: all cores)  tier=%s\n\n' \
-  "$base_desc" "$reps" "$pin_cpu" "${ab_tier:-default}" >&2
+printf 'ab-bench: base=%s  new=working tree  reps=best-of-%s  pin=cpu%s (concurrency rows: all cores)  tier=%s  contracts=%s\n\n' \
+  "$base_desc" "$reps" "$pin_cpu" "${ab_tier:-default}" "$([ -n "$ab_contracts" ] && echo armed || echo off)" >&2
 if [ "$measure_floor" -eq 1 ]; then
   printf '%-16s %9s %9s %9s %9s %-10s\n' row base new delta floor verdict
   printf '%-16s %9s %9s %9s %9s %-10s\n' ---------------- --------- --------- --------- --------- ----------
@@ -327,7 +333,7 @@ for r in "${rows[@]}"; do
     local err rc=0
     err="$(mktemp)"
     # `|| rc=$?` keeps a failure out of errexit's reach so we can name it below.
-    timeout "$timeout_s" env ${ab_tier:+BROOD_TIER=$ab_tier} taskset -c "$cpus" "$1" "$prog" >/dev/null 2>"$err" || rc=$?
+    timeout "$timeout_s" env ${ab_tier:+BROOD_TIER=$ab_tier} ${ab_contracts:+BROOD_CONTRACTS=1} taskset -c "$cpus" "$1" "$prog" >/dev/null 2>"$err" || rc=$?
     if [ $rc -ne 0 ]; then
       if [ -s "$err" ]; then
         echo "ab-bench: row '$r' failed on $2 (exit $rc$([ $rc -eq 124 ] && echo ", timeout ${timeout_s}s")) — its stderr:" >&2

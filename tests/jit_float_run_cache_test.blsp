@@ -61,19 +61,17 @@
 ;; A read, an allocation, a read: the allocation ends the decoded storage.
 (defn- around-a-literal (v) (let (a (nth v 0) pair [a a] b (nth v 1)) [pair b]))
 
-(defn- settle-on (f argc thunk)
-  (when (%native-tier?)
-    (assert= :native (settle f argc thunk 500))))
-
 (describe "the JIT's straight-line number and vector caches"
   (test "a destructured 4x4 product matches the reference once native"
-    (settle-on product 2 (fn () (fold (range 300) nil (fn (_acc _i) (product matrix-a matrix-b)))))
+    (assert-settles-native product
+      2
+      (fn () (fold (range 300) nil (fn (_acc _i) (product matrix-a matrix-b)))))
     (assert= (product matrix-a matrix-b) (reference-product matrix-a matrix-b))
     (assert= (product identity-4 matrix-b) matrix-b)
     (assert= (product matrix-a identity-4) matrix-a))
 
   (test "an int read earlier in the run still multiplies as an int beside an int"
-    (settle-on promote-then-ints
+    (assert-settles-native promote-then-ints
       1
       (fn () (fold (range 300) nil (fn (_acc _i) (promote-then-ints [1.5 2.5 2.0])))))
     (assert= (promote-then-ints [1.5 2.5 2.0]) [3.0 3.75])
@@ -81,7 +79,7 @@
     (assert= (promote-then-ints [2 3 4]) [8 6]))
 
   (test "repeated reads of one vector answer as nth does, in every storage"
-    (settle-on first-three
+    (assert-settles-native first-three
       1
       (fn () (fold (range 300) nil (fn (_acc _i) (first-three [1.0 2.0 3.0])))))
     (assert= (first-three [1.0 2.0 3.0]) 6.0)
@@ -90,13 +88,13 @@
     (assert= (first-three (list 1.0 2.0 4.0)) 7.0))
 
   (test "a read past the end deopts to nth's own error"
-    (settle-on first-three
+    (assert-settles-native first-three
       1
       (fn () (fold (range 300) nil (fn (_acc _i) (first-three [1.0 2.0 3.0])))))
     (assert-error (first-three [1.0 2.0])))
 
   (test "an allocation between two reads of a vector leaves the second read right"
-    (settle-on around-a-literal
+    (assert-settles-native around-a-literal
       1
       (fn () (fold (range 300) nil (fn (_acc _i) (around-a-literal [1.5 2.5])))))
     (assert= (around-a-literal [1.5 2.5]) [[1.5 1.5] 2.5])

@@ -11,6 +11,8 @@ use crate::error::LispError;
 use std::path::Path;
 
 mod fatal_signal;
+#[cfg(feature = "native-kernels")]
+pub(crate) use fatal_signal::brood_state_dir;
 pub use fatal_signal::crash_record_dir;
 #[cfg(any(feature = "treesit", feature = "native-kernels"))]
 pub(crate) use fatal_signal::literal_safe;

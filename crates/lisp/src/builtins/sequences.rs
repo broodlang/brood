@@ -594,18 +594,56 @@ fn record_redirect(heap: &mut Heap, args: &[Value], shim: &str, v: Value) -> Opt
     Some(heap.redirect(callee, &[v]))
 }
 
+/// Does `first`, `rest` or `empty?` of `v` need the evaluator — a record's `Seqable`/`Counted`
+/// method, a lazy seq-view's realisation? The JIT's fallbacks below decline exactly these
+/// (the caller deopts, and the VM's builtin runs them), and answer everything else here.
+///
+/// Exhaustive over every value kind on purpose: the decline list was once `Map`, from when a
+/// record WAS a map, and stayed so after ADR-542 made records their own kind — a plain map
+/// deopted on every call and a record ran its method nested under native code. A new kind
+/// now has to be placed here.
+#[cfg(feature = "jit")]
+fn seq_op_needs_evaluator(v: Value) -> bool {
+    match v {
+        Value::Record { .. } | Value::SeqView(_) => true,
+        Value::Nil
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::BigInt(_)
+        | Value::Float(_)
+        | Value::Sym(_)
+        | Value::Keyword(_)
+        | Value::Str(_)
+        | Value::Rope(_)
+        | Value::Pair(_)
+        | Value::Vector(_)
+        | Value::Range(_)
+        | Value::Map(_)
+        | Value::Fn(_)
+        | Value::Macro(_)
+        | Value::Native(_)
+        | Value::Ref(_)
+        | Value::Pid { .. }
+        | Value::Socket(_)
+        | Value::Subprocess(_)
+        | Value::Table(_)
+        | Value::Bytes(_)
+        | Value::Decimal(_)
+        | Value::Set(_)
+        | Value::Ratio(_)
+        | Value::Failure(_) => false,
+    }
+}
+
 /// `first` / `rest` for the JIT's non-pair fallback (`brood_rt_first`/`_rest`): the cases
 /// the kernel decides on its own — nil, vector, range, bytes, set, map, and the type error —
 /// answered; `None` for the two that need the evaluator (a record's `Seqable` dispatch,
 /// a lazy seq-view's realisation), which the caller turns into a deopt so the VM's own
-/// `first`/`rest` runs them. Everything else here is exactly the builtin.
-///
-/// A record is its own value kind (ADR-542), not a map: this declined every `Map` from when
-/// it was, so a plain map deopted on every call (and latched the arm off native code) while
-/// a record slipped through to run its `Seqable` method nested under native code.
+/// `first`/`rest` runs them ([`seq_op_needs_evaluator`]). Everything else here is exactly the
+/// builtin.
 #[cfg(feature = "jit")]
 pub(crate) fn first_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult> {
-    if matches!(v, Value::Record { .. } | Value::SeqView(_)) {
+    if seq_op_needs_evaluator(v) {
         return None;
     }
     let genv = heap.global();
@@ -615,7 +653,7 @@ pub(crate) fn first_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult
 /// See [`first_without_eval`].
 #[cfg(feature = "jit")]
 pub(crate) fn rest_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult> {
-    if matches!(v, Value::Record { .. } | Value::SeqView(_)) {
+    if seq_op_needs_evaluator(v) {
         return None;
     }
     let genv = heap.global();
@@ -628,7 +666,7 @@ pub(crate) fn rest_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult>
 /// method decides) and a lazy seq-view (it realises) need the evaluator and deopt.
 #[cfg(feature = "jit")]
 pub(crate) fn is_empty_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult> {
-    if matches!(v, Value::Record { .. } | Value::SeqView(_)) {
+    if seq_op_needs_evaluator(v) {
         return None;
     }
     let genv = heap.global();

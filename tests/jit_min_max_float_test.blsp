@@ -23,8 +23,7 @@
   (when (> i 0) (apply f args) (mm-drive f args (- i 1))))
 
 (defn- settle-on (f argc args)
-  (when (%native-tier?)
-    (assert= :native (settle f argc (fn () (mm-drive f args 300)) 500))))
+  (assert-settles-native f argc (fn () (mm-drive f args 300))))
 
 (describe "max, min and clamp with floats in native code"
   (test "clamp settles native and constrains"

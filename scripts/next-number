@@ -1,0 +1,34 @@
+#!/bin/bash
+# Print the next free ADR or KI number, taken from origin/main AND the working tree.
+#
+#   scripts/next-number adr     # → 809
+#   scripts/next-number ki      # → KI-404
+#
+# Parallel sessions each append to the same logs, so a number read from the local tree alone
+# collides with whatever another session pushed in the meantime (ADR-801/802/805 were taken
+# under three of this repo's sessions' feet on 2026-11-25). Fetch first, then take the larger
+# of the two highest numbers. Run it when WRITING the entry, and again right before the commit
+# (the merge's union driver keeps both entries; `doc_refs` refuses the duplicate number).
+set -euo pipefail
+kind="${1:-}"
+cd "$(dirname "$0")/.."
+git fetch -q origin main 2>/dev/null || echo "next-number: fetch failed, using the last fetched origin/main" >&2
+
+case "$kind" in
+  adr)
+    local_max=$(grep -ohE '^## ADR-[0-9]+' docs/decisions/adr-*.md | grep -oE '[0-9]+' | sort -n | tail -1)
+    remote_max=$(git ls-tree --name-only origin/main docs/decisions/ |
+      while read -r file; do git show "origin/main:$file"; done |
+      grep -ohE '^## ADR-[0-9]+' | grep -oE '[0-9]+' | sort -n | tail -1)
+    echo $(( (local_max > remote_max ? local_max : remote_max) + 1 ))
+    ;;
+  ki)
+    local_max=$(grep -ohE '\| KI-[0-9]+' docs/known-issues.md | grep -oE '[0-9]+' | sort -n | tail -1)
+    remote_max=$(git show origin/main:docs/known-issues.md | grep -ohE '\| KI-[0-9]+' | grep -oE '[0-9]+' | sort -n | tail -1)
+    echo "KI-$(( (local_max > remote_max ? local_max : remote_max) + 1 ))"
+    ;;
+  *)
+    echo "usage: scripts/next-number adr|ki" >&2
+    exit 2
+    ;;
+esac

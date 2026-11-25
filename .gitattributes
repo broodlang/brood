@@ -5,3 +5,12 @@
 # a Rust implementation of a Lisp, not a Clojure project) while still applying
 # the grammar for highlighting.
 *.blsp linguist-language=Clojure linguist-detectable=false
+
+# The append-only logs: parallel sessions each add an entry at the bottom, and a plain
+# merge then conflicts on every pair of pushes (three times on 2026-11-25 alone). A union
+# merge keeps both sides' lines, which for an entry appended at the end is exactly right;
+# an edit to an EARLIER entry on both sides is still worth reading in the diff, and
+# `doc_refs` refuses a duplicate ADR number, so a collision is caught, not silently kept.
+docs/devlog.md merge=union
+docs/decisions/adr-*.md merge=union
+docs/known-issues.md merge=union

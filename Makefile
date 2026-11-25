@@ -48,6 +48,11 @@ STDIMAGE_FEATURES := $(if $(filter-out 0,$(WITH_STDIMAGE)),--features brood/stdi
 # builds `--no-default-features`, so it's named here (cargo unions repeated
 # `--features` flags, so this composes with GUI_FEATURES). Not gated on configure.
 TS_FEATURES := --features brood/treesit-grammars
+# Native numeric kernels (ADR-807): `libloading` is already in for tree-sitter, so the lean
+# runtime carries them too. Left out, a `release-fast` `brood` beside a default-feature `nest`
+# could not load a kernel at all, and a test whose child runtime is that `brood` failed for
+# the binary, not the code (2026-11-25).
+NK_FEATURES := --features brood/native-kernels
 
 # Optional cross-compile target triple (empty = build for the host). When set, e.g.
 # `make release TARGET=x86_64-apple-darwin`, cargo builds for that triple and emits into
@@ -81,7 +86,7 @@ PERF_RUSTFLAGS := $(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off
 # RUN_FEATURES is the LEAN set: no `dev-tools`, so no `repl`/`test`/`observer`/`mcp`
 # DEV_MODULES. It builds the brood that gets EMBEDDED into nest for `nest release`
 # app bundling (small apps) and that `make ab` measures — both want it lean.
-RUN_FEATURES := --no-default-features $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES) $(STDIMAGE_FEATURES)
+RUN_FEATURES := --no-default-features $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(NK_FEATURES) $(JIT_FEATURES) $(STDIMAGE_FEATURES)
 # INSTALL_FEATURES is RUN_FEATURES + `dev-tools`: the set for the brood/nest
 # actually INSTALLED onto your PATH, where the REPL, `nest test`, `nest observe`,
 # and `nest mcp` must work. `make install` builds the lean brood (embed base) AND
@@ -340,7 +345,7 @@ benchmark: ## Run benchmarks; archive results to docs/benchmarks/<timestamp>.md
 quickbench: ## Fast (~10s) benchmark for iteration — no archive, few samples
 	./scripts/bench.sh --quick $(ARGS)
 
-ab: ## A/B the working tree against a git ref on the cross-language rows: make ab BASE=<ref> ROWS="fib pfib" N=7
+ab: ## A/B the working tree against a git ref on the cross-language rows: make ab BASE=<ref> ROWS="fib pfib" N=7 (ARGS=--contracts: armed, as `nest run` runs)
 	./scripts/ab-bench.sh $(if $(BASE),-b $(BASE),) $(if $(N),-n $(N),) $(ROWS) $(ARGS)
 
 green: ## Answer one question honestly: is this tree green? (completed CI runs + the gates `make check` skips)
@@ -407,6 +412,18 @@ ab-clean: ## Remove the baseline worktrees + builds that `make ab` created under
 
 check-cost: ## Instruction cost of `brood --check` per program, this tree vs BASE (callgrind, deterministic): make check-cost BASE=<ref> [SCAN_ALIVE=1]
 	@./scripts/check-cost.sh --base $(or $(BASE),HEAD) $(if $(SCAN_ALIVE),--scan-alive,)
+
+test-file: ## Run TEST="tests/a_test.blsp …" BOTH ways CI does: contracts armed (`nest test`'s default, the contracts-armed job) and unarmed (the cargo suite) — sabotage-check a guard here, since one that holds in only one mode reads green locally and tests nothing in the other
+	@test -n "$(TEST)" || { echo 'test-file: name the files, TEST="tests/a_test.blsp …"'; exit 2; }
+	cargo build -q --release -p cli -p nest
+	@echo ">>> contracts armed"
+	$(RUN_CAP) env BROOD_CONTRACTS=1 target/release/nest test $(TEST)
+	@echo ">>> contracts unarmed"
+	$(RUN_CAP) env BROOD_CONTRACTS=0 target/release/nest test $(TEST)
+
+test-eager: ## The whole in-language suite with BROOD_JIT_EAGER=1 (tier up after 2 calls, not 128): nearly everything runs native, so a behaviour only native code gets wrong fails here, not just in a test's hot loop. Slow by design; full.yml runs it weekly
+	cargo build -q --release -p cli -p nest
+	$(RUN_CAP) env BROOD_JIT_EAGER=1 BROOD_CONTRACTS=0 target/release/nest test
 
 suite: ## Run the in-language suite via the project runner (discovers tests/**/*_test.blsp)
 	cargo build -q -p nest

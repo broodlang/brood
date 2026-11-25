@@ -19,9 +19,7 @@
 
 (describe "contains? in native code"
   (test "contains? on a set settles native"
-    (when (%native-tier?)
-      (assert= :native
-        (settle contains? 2 (fn () (cn-count-members cn-set 300 0)) 500))))
+    (assert-settles-native contains? 2 (fn () (cn-count-members cn-set 300 0))))
 
   (test "set membership"
     (assert= 64 (cn-count-members cn-set 100 0))

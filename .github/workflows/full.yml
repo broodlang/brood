@@ -499,3 +499,22 @@ jobs:
           path: tree-walker-nextest.log
           retention-days: 14
 
+
+  # The whole in-language suite with every arm tiering after 2 calls (ADR-809): nearly all of
+  # it runs native, so a behaviour only native code gets wrong fails here rather than in the
+  # one test whose loop happened to run long enough. Its first run found KI-411. Slow by
+  # design (the boot path's compiles), so weekly, not per push.
+  eager-tier:
+    name: suite native-first (BROOD_JIT_EAGER=1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Build brood + nest
+        run: cargo build --release -p cli -p nest
+      - name: nest test, every arm tiering after 2 calls
+        shell: bash
+        run: make test-eager

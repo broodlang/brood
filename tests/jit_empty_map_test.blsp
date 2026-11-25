@@ -28,8 +28,7 @@
 (describe "empty?, first and rest of a map in native code"
   (test "an arm fed maps settles native and stays there"
     (when (%native-tier?)
-      (assert= :native
-        (settle em-hot 1 (fn () (em-sum {:a 1} 300 0) (em-sum {} 300 0)) 500))
+      (assert-settles-native em-hot 1 (fn () (em-sum {:a 1} 300 0) (em-sum {} 300 0)))
       (em-sum {:a 1} 5000 0)
       (em-sum {} 5000 0)
       (let (state (%jit-arm-state em-hot 1))

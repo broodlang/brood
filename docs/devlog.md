@@ -2992,3 +2992,17 @@ assert on `math/clamp`'s own arm and the prim table; red under sabotage after. A
 tiered before the 0.1 s program ended); 30/30 alone and beside a suite since — a load-sensitive
 test to watch. Disk was full mid-run; `target/debug` and `target/release-fast` cleared (asked).
 
+2026-11-25. **Guards against the day's failure classes (ADR-809), and KI-411.** `make test-file`
+(armed and unarmed), a shared `assert-settles-native`, exhaustive `emit_float_arith` and
+`seq_op_needs_evaluator`, `BROOD_JIT_EAGER`/`make test-eager`, `merge=union` for the logs,
+`scripts/next-number`, `native-kernels` in `RUN_FEATURES`, `make ab ARGS=--contracts`, and a
+harder disk cleaner. `make test-eager`'s first run (8850/8851) found KI-411: a native loop never
+ran a collection its builtin calls made due (warm `str` build: 1 collection, the VM's 3). Fixed by
+the allocator flagging the crossing of the byte budget and `Heap::collect_if_bytes_spent` acting on
+it after each builtin called from native code — one flag load a call (wordcount +4% against a
+control build; asking `gc_due` every call had cost 13%). CI on the previous push
+went red in the armed-from-source job: `contract.blsp`'s new `%contract-unchecked?` called
+`string/starts-with?`, which the contract machinery may not load at boot; now `string/substring`
+(a kernel native). Refactors: `probe_callback` (one table of JIT heap probes),
+`cli_support::brood_state_dir`.
+

@@ -41,6 +41,20 @@ pub(crate) use unwind::*;
 #[cfg(feature = "jit")]
 pub(crate) const TIER_THRESHOLD: u32 = 128;
 
+/// The threshold an untried arm is held to: [`TIER_THRESHOLD`], or 2 under `BROOD_JIT_EAGER=1`,
+/// which puts nearly every function a test calls twice on the native tier — so a behaviour
+/// only native code gets wrong shows up in the whole suite (`make test-eager`), not just in
+/// the hot loops a test happens to run long enough. Correctness lever only: the boot path's
+/// compiles make it slow.
+#[cfg(feature = "jit")]
+fn tier_threshold() -> u32 {
+    if crate::diagnostics::debug_flags::jit_eager() {
+        2
+    } else {
+        TIER_THRESHOLD
+    }
+}
+
 /// What one back-edge boundary exit counts for toward [`TIER_THRESHOLD`].
 ///
 /// A self-tail loop is ONE activation; it reaches the compiler by exiting to the driver
@@ -445,7 +459,7 @@ fn jit_tier_in_frame_slow(
     }
     if code.is_null() {
         // Count the invocation; only enqueue once the arm is hot.
-        if arm.jit_calls.fetch_add(1, Relaxed) + 1 < TIER_THRESHOLD {
+        if arm.jit_calls.fetch_add(1, Relaxed) + 1 < tier_threshold() {
             return None;
         }
         // Hot. Refuse to JIT an arm whose inlined operators are no longer native (a `def`

@@ -1218,7 +1218,14 @@ pub unsafe extern "C" fn brood_rt_call_native_fl(
         };
         // ERROR, not the DEOPT a builtin's own failure would read as under the shared status
         // protocol: a builtin's error is the answer, and the arm exits via its error block.
-        answer_or_park(h, out, r)
+        let status = answer_or_park(h, out, r);
+        // And the collection the builtin's allocation made due (KI-411): no VM safepoint
+        // follows a builtin called from native code, so a native loop would never collect.
+        // After the answer is written, so the hot path adds one load and a compare.
+        if status == status::DONE {
+            *out = h.collect_if_bytes_spent(*out);
+        }
+        status
     }
 }
 

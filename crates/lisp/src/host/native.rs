@@ -70,17 +70,9 @@ fn kernel_err(who: &str, message: impl std::fmt::Display) -> LispError {
     LispError::runtime(format!("{who}: {message}"))
 }
 
-/// `$XDG_STATE_HOME/brood/kernel-verdicts`, else `~/.local/state/brood/kernel-verdicts`.
+/// `kernel-verdicts` under brood's state directory, beside the crash records.
 fn verdict_dir() -> Option<PathBuf> {
-    let absolute = |name: &str| {
-        std::env::var_os(name)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-    };
-    absolute("XDG_STATE_HOME")
-        .or_else(|| absolute("HOME").map(|home| home.join(".local").join("state")))
-        .map(|base| base.join("brood").join("kernel-verdicts"))
+    crate::cli_support::brood_state_dir().map(|dir| dir.join("kernel-verdicts"))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

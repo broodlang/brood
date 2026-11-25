@@ -329,12 +329,16 @@ type; `i` is the position of the first rest argument."
 ;; ~980 ns a call armed against ~34 ns unarmed, and hid `math/max`/`min` from the compiler,
 ;; which inlines them only when it sees the primitive. Arity is the original's to check
 ;; either way.
+;;
+;; Prelude and kernel functions only (`string/substring` is a kernel native): this module is
+;; loaded at boot when contracts are armed, where it must not load another module — a
+;; `string/starts-with?` here left `contract/shim` unbound under the eager load policy.
 (defn- %contract-unchecked? (type)
   (every? type
     (fn (part)
       (and (symbol? part)
         (or (contains? #{'-> '& '&optional 'any} part)
-          (string/starts-with? (->string part) "?"))))))
+          (= (string/substring (->string part) 0 1) "?"))))))
 
 (defn shim (name orig type)
   "The checking shim to bind for the global `name` declared `type` (an arrow), wrapping

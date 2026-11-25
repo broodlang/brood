@@ -147,7 +147,7 @@ pub(crate) fn jit_dispatch_call(
                 let r = crate::eval::call_native(heap, $nid, &argv, env);
                 heap.truncate_roots(stage_base);
                 return match r {
-                    Ok(v) => Some(v),
+                    Ok(v) => Some(heap.collect_if_bytes_spent(v)),
                     Err(e) => {
                         heap.jit_pending_error = Some(e);
                         None

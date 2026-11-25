@@ -302,11 +302,16 @@ commits in this repo.**
    entry point a caller reaches, not on the piece you just wrote** (a flag the fix sets, a
    helper it added, a loop that runs before its inputs exist have all passed against the bug
    they were written for). When a change has no clean inverse to sabotage, find an argument
-   from construction instead — do not settle for a weaker test.
+   from construction instead — do not settle for a weaker test. **Run the sabotage in both
+   contract modes** (`make test-file TEST=…`): `nest test` arms every `sig`, which turns a
+   function like `math/max` into a shim the compiler cannot inline — a JIT guard checked only
+   that way passed with its fix removed (ADR-808).
 4. Update `docs/language.md` (it documents the language *as implemented*).
 5. Tick it off in `ROADMAP.md`; add a dated entry to `docs/devlog.md`.
 6. If it reflects a real design choice, record an ADR at the bottom of the newest file in
-   `docs/decisions/` (`docs/decisions.md` is the index).
+   `docs/decisions/` (`docs/decisions.md` is the index). Take its number from
+   `scripts/next-number adr` (`ki` for a known issue), which reads origin as well as the
+   tree, and run it again before the commit: parallel sessions append to the same logs.
 
 ## When you RENAME or REORDER a stdlib function
 

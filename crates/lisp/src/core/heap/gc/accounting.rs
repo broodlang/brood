@@ -28,7 +28,12 @@ impl Heap {
     /// the nursery's budget, the byte half of [`gc_due`](Self::gc_due).
     #[inline]
     pub(in crate::core::heap) fn note_fresh_buffer(&mut self, bytes: usize) {
-        self.nursery_budget_left = self.nursery_budget_left.saturating_sub(budget_units(bytes));
+        let before = self.nursery_budget_left;
+        self.nursery_budget_left = before.saturating_sub(budget_units(bytes));
+        // The crossing, for a builtin called from native code (`collect_if_bytes_spent`).
+        if before != 0 && self.nursery_budget_left == 0 {
+            self.byte_budget_spent = true;
+        }
     }
 
     /// Nursery growth factor: the next collection triggers at `growth × live`. Default **2.0**,

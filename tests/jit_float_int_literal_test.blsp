@@ -59,38 +59,36 @@
 ;; A float compared with an int literal: ordering coerces the int on both engines.
 (defn- below-zero? (x) (< x 0))
 
-(defn- settle-on (f argc thunk)
-  (when (%native-tier?)
-    (assert= :native (settle f argc thunk 500))))
-
 (describe "an unboxed int beside a float on the JIT's float path"
   (test "a negated float settles native and is the VM's answer"
-    (settle-on negated 1 (fn () (fold (range 300) nil (fn (_acc _i) (negated 1.5)))))
+    (assert-settles-native negated 1 (fn () (fold (range 300) nil (fn (_acc _i) (negated 1.5)))))
     (assert= -1.5 (negated 1.5))
     (assert= 2.25 (negated -2.25))
     ;; 0 - 0.0, as the VM computes it: a positive zero
     (assert= "0.0" (pr-str (negated 0.0))))
 
   (test "a negated int keeps an int answer after the arm has settled on floats"
-    (settle-on negated 1 (fn () (fold (range 300) nil (fn (_acc _i) (negated 1.5)))))
+    (assert-settles-native negated 1 (fn () (fold (range 300) nil (fn (_acc _i) (negated 1.5)))))
     (assert= -3 (negated 3))
     (assert= "-3" (pr-str (negated 3))))
 
   (test "a float's reciprocal settles native and is the VM's answer"
-    (settle-on inverted 1 (fn () (fold (range 300) nil (fn (_acc _i) (inverted 4.0)))))
+    (assert-settles-native inverted 1 (fn () (fold (range 300) nil (fn (_acc _i) (inverted 4.0)))))
     (assert= 0.25 (inverted 4.0))
     ;; an int's reciprocal is exact, never a float
     (assert= 1/4 (inverted 4)))
 
   (test "a quaternion product with negated terms settles native and matches the reference"
-    (settle-on quaternion-product
+    (assert-settles-native quaternion-product
       2
       (fn () (fold (range 300) nil (fn (_acc _i) (quaternion-product turn-a turn-b)))))
     (assert= (pr-str (reference-product turn-a turn-b)) (pr-str (quaternion-product turn-a turn-b)))
     (assert= (pr-str (reference-product turn-b turn-a)) (pr-str (quaternion-product turn-b turn-a))))
 
   (test "a float ordered against an int literal is the VM's answer"
-    (settle-on below-zero? 1 (fn () (fold (range 300) nil (fn (_acc _i) (below-zero? -0.5)))))
+    (assert-settles-native below-zero?
+      1
+      (fn () (fold (range 300) nil (fn (_acc _i) (below-zero? -0.5)))))
     (assert= true (below-zero? -0.5))
     (assert= false (below-zero? 0.5))
     (assert= false (below-zero? 0.0))
@@ -108,7 +106,7 @@
 
 (describe "math/sqrt's inline at zero"
   (test "an arm that roots zeros stays native and answers the wrapper's 0.0"
-    (settle-on length-of
+    (assert-settles-native length-of
       1
       (fn ()
         (fold (range 300)
@@ -118,12 +116,12 @@
     (assert= 5.0 (length-of [3.0 4.0])))
 
   (test "either sign of zero roots to a positive zero, as the wrapper says"
-    (settle-on root-of 1 (fn () (fold (range 300) nil (fn (_acc _i) (root-of 2.25)))))
+    (assert-settles-native root-of 1 (fn () (fold (range 300) nil (fn (_acc _i) (root-of 2.25)))))
     (assert= 1.5 (root-of 2.25))
     (assert= "0.0" (pr-str (root-of 0.0)))
     (assert= "0.0" (pr-str (root-of (* -1.0 0.0))))
     (assert= "0.0" (pr-str (root-of 0))))
 
   (test "a negative still raises the wrapper's error once the arm is native"
-    (settle-on root-of 1 (fn () (fold (range 300) nil (fn (_acc _i) (root-of 2.25)))))
+    (assert-settles-native root-of 1 (fn () (fold (range 300) nil (fn (_acc _i) (root-of 2.25)))))
     (assert-error (root-of -1.0))))

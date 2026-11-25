@@ -49,6 +49,37 @@ impl Heap {
     /// threshold so the next collection fires when the live set doubles (amortized
     /// O(1) copying per allocation; `BROOD_GC_STRESS=1` ⇒ every safepoint). No-op
     /// while GC is disabled (the builder heap during prelude construction).
+    /// Run the collection a builtin called from NATIVE code made due by spending the last of
+    /// the byte budget, holding `value` — its fresh, unrooted answer — across it; the value,
+    /// relocated. No VM safepoint follows such a call, so without this a native loop over
+    /// `str` or `%vector-concat` never ran the byte trigger (KI-411, KI-307's growth back for
+    /// native loops): a warm 3 000-step `str` build collected once where the VM collects three
+    /// times.
+    ///
+    /// Acts only on the CROSSING, which the allocator flags (`byte_budget_spent`), so a call
+    /// pays one load of that flag and holds nothing across the builtin. Acting clears it, so
+    /// a collection that may not run now is not retried on every call. (Asked by reading the
+    /// budget around each call, it cost wordcount 6%; by `gc_due` every call, 13%.)
+    #[inline(always)]
+    pub(crate) fn collect_if_bytes_spent(&mut self, value: Value) -> Value {
+        if !self.byte_budget_spent {
+            return value;
+        }
+        self.byte_budget_spent = false;
+        self.collect_holding(value)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn collect_holding(&mut self, value: Value) -> Value {
+        if crate::process::macro_block_active() || !self.gc_due() {
+            return value;
+        }
+        let mut held = [value];
+        self.collect(&mut held, &mut []);
+        held[0]
+    }
+
     pub fn collect(&mut self, extra_roots: &mut [Value], extra_envs: &mut [EnvId]) {
         // Pause-duration accounting (the observability timing tier): time the
         // whole collection and fold it into the per-process totals `(dev/gc-stats)`
@@ -166,6 +197,7 @@ impl Heap {
             buffer_bytes_since(&self.local, BufferMark::default())
         };
         let retained_bytes = young_bytes.saturating_add(old_bytes);
+        self.byte_budget_spent = false;
         self.nursery_budget_left = budget_units(std::cmp::max(
             nursery_byte_floor(),
             (((retained_bytes as f64) * Self::gc_growth()) as usize).min(NURSERY_BYTE_MAX),

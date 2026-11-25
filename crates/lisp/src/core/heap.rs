@@ -990,6 +990,10 @@ pub struct Heap {
     /// process is held to a floor (`tests/process_floor.rs`). `u32::MAX` while GC is off or
     /// an override pins the object floor: 64 GiB, never spent in practice.
     nursery_budget_left: u32,
+    /// Set when an allocation spends the last of `nursery_budget_left`, cleared by the refill
+    /// and by `collect_if_bytes_spent`, which acts on it after a builtin called from native
+    /// code (KI-411). A `bool` beside the countdown, for the per-process floor.
+    byte_budget_spent: bool,
     /// [`park_trim_probe`] as of this process's last park-time trim — the baseline
     /// [`Heap::trim_parked`] measures growth against, in slab elements.
     park_trim_mark: usize,
@@ -1997,6 +2001,7 @@ impl Heap {
             env_roots: Vec::new(),
             gc_threshold: gc_floor(),
             nursery_budget_left: budget_units(nursery_byte_floor()),
+            byte_budget_spent: false,
             park_trim_mark: 0,
             rt_gc_threshold: rt_gc_floor(),
             gc_enabled: true,

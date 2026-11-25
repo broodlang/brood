@@ -26,13 +26,9 @@
 
 (def- pose [{:turn 0.0 :at 1.0} {:turn 0.5 :at 2.0} {:turn 1.0 :at 3.0}])
 
-(defn- settle-on (f argc thunk)
-  (when (%native-tier?)
-    (assert= :native (settle f argc thunk 500))))
-
 (describe "assoc on a vector in compiled code"
   (test "replacing an element settles native and is the wrapper's answer"
-    (settle-on with-element
+    (assert-settles-native with-element
       3
       (fn () (fold (range 300) nil (fn (_acc i) (with-element [1 2 3] (math/rem i 3) 9)))))
     (assert= [9 2 3] (with-element [1 2 3] 0 9))
@@ -40,7 +36,7 @@
     (assert= [1 :x 3] (with-element [1 2 3] 1 :x)))
 
   (test "the vector given is unchanged"
-    (settle-on with-element
+    (assert-settles-native with-element
       3
       (fn () (fold (range 300) nil (fn (_acc i) (with-element [1 2 3] (math/rem i 3) 9)))))
     (let (before [1.0 2.0 3.0]
@@ -49,7 +45,7 @@
       (assert= [1.0 7.0 3.0] after)))
 
   (test "an index out of range still raises the wrapper's error once the arm is native"
-    (settle-on with-element
+    (assert-settles-native with-element
       3
       (fn () (fold (range 300) nil (fn (_acc i) (with-element [1 2 3] (math/rem i 3) 9)))))
     (assert-error (with-element [1 2 3] 3 9))
@@ -57,13 +53,13 @@
     (assert-error (with-element [] 0 9)))
 
   (test "a map through the same arm is still a map's assoc"
-    (settle-on with-element
+    (assert-settles-native with-element
       3
       (fn () (fold (range 300) nil (fn (_acc i) (with-element [1 2 3] (math/rem i 3) 9)))))
     (assert= {:a 1 :b 2} (with-element {:a 1} :b 2)))
 
   (test "one joint of a pose replaced settles native and leaves the others as they were"
-    (settle-on with-local
+    (assert-settles-native with-local
       4
       (fn () (fold (range 300) nil (fn (_acc i) (with-local pose (math/rem i 3) :turn 2.0)))))
     (assert= [{:turn 0.0 :at 1.0} {:turn 2.0 :at 2.0} {:turn 1.0 :at 3.0}]

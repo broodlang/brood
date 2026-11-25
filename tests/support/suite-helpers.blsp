@@ -5,7 +5,7 @@
 
 (defmodule suite-helpers
   "Helpers shared by the in-language suite: `settle` drives a function until the JIT has
-decided on it, `ascending?` is the span invariant every highlighter test checks,
+decided on it (`assert-settles-native` asserts it went native), `ascending?` is the span invariant every highlighter test checks,
 `sibling-binary` finds the `brood`/`nest` binary next to the runner, and
 `queued-while-idle` (with `await-paused`, `take-chunks`, `queued-count` and
 `high-water-bound`) measures what a paused reader left queued in this process's mailbox,
@@ -33,6 +33,14 @@ own (`settle-queued`) and spends no round, so a slow queue reads as slow, not as
             :to *err*)
           state)
       else (settle f argc batch (- rounds 1)))))
+
+(defn assert-settles-native (f argc thunk)
+  "Under a native tier, call `thunk` until arity `argc` of `f` is decided and assert it settled
+`:native`; nothing under a lower ceiling, where the value checks around it run on whatever
+engine is live. The tier half of a JIT guard: assert on the function a caller reaches, and run
+the file both ways (`make test-file`), since armed contracts turn some functions into shims."
+  (when (%native-tier?)
+    (assert= :native (settle f argc thunk 500))))
 
 (defn settle-queued (f argc tries)
   "The state of arity `argc` of `f` once a queued compile has finished, waiting up to

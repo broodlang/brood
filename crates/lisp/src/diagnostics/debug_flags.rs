@@ -151,6 +151,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "per-lowered-arm opcode fingerprint + CLIF (and the scalar-register worker). Absence = did not lower",
     ),
     f(
+        "BROOD_JIT_EAGER",
+        JIT,
+        "`=1`: tier an arm up after 2 calls instead of 128, so nearly everything a test runs is native — the whole suite then tests native code's semantics, not just the hot loops' (`make test-eager`; a correctness lever, slow by design)",
+    ),
+    f(
         "BROOD_JIT_BAIL_TRACE",
         JIT,
         "name each arm the profitability gate refuses, and why — the complement of DUMP_IR; `[jit-relower]` lines say when deopt feedback re-tiers an arm (a polymorphic param boxed, or float context for floats read out of vectors, ADR-378), and a `deopt-thrash-latched` line carries its `last-deopt` reason",
@@ -724,6 +729,12 @@ pub fn jit_bail_trace() -> bool {
 pub fn trace_compile() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     is_set(&ON, "BROOD_TRACE_COMPILE")
+}
+
+/// `BROOD_JIT_EAGER=1`: the tier-up threshold drops to 2 (`jit_runtime::tier_threshold`).
+pub fn jit_eager() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    is_armed(&ON, "BROOD_JIT_EAGER")
 }
 
 /// `BROOD_TRACE_LOWER` is set — read once. Times each JIT lowering (`[lower] …` lines).

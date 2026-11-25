@@ -41,6 +41,20 @@
           after (collections))
       (do
         (assert= (count built) 30000)
+        (assert (>= (- after before) 2)))))
+
+  ;; Warmed first, so `fold`'s loop and the step are native from the first iteration. A
+  ;; builtin called from native code is followed by no VM safepoint, and until
+  ;; `Heap::collect_if_bytes_spent` ran after it, this build collected once where the VM
+  ;; collects three times: a native loop never ran the byte trigger at all. Unarmed only
+  ;; shows it (armed, `str` is a contract shim, whose VM frames collect): `make test-file`.
+  (test "a str build already running native collects too"
+    (doseq (_ (range 20)) (str-build 200))
+    (let (before (collections)
+          built (str-build 3000)
+          after (collections))
+      (do
+        (assert= (count built) 30000)
         (assert (>= (- after before) 2))))))
 
 (describe "the byte trigger across processes"

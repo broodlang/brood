@@ -362,11 +362,11 @@ mod windows {
     }
 }
 
-/// Where the record would go, from the environment: an absolute `XDG_STATE_HOME`, else
-/// `HOME/.local/state`, then `brood/crashes` (an empty or relative `XDG_STATE_HOME` is
-/// ignored, as the XDG spec says).
-#[cfg(unix)]
-fn record_dir_from_env() -> Option<std::path::PathBuf> {
+/// Brood's state directory, from the environment: an absolute `XDG_STATE_HOME`, else
+/// `HOME/.local/state`, then `brood` (an empty or relative `XDG_STATE_HOME` is ignored, as the
+/// XDG spec says). Crash records and the native-kernel quarantines (ADR-807) live under it.
+#[cfg_attr(not(any(unix, feature = "native-kernels")), allow(dead_code))]
+pub(crate) fn brood_state_dir() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
     let set = |name| std::env::var_os(name).filter(|value| !value.is_empty());
     set("XDG_STATE_HOME")
@@ -378,7 +378,13 @@ fn record_dir_from_env() -> Option<std::path::PathBuf> {
                 .filter(|path| path.is_absolute())
                 .map(|home| home.join(".local").join("state"))
         })
-        .map(|base| base.join("brood").join("crashes"))
+        .map(|base| base.join("brood"))
+}
+
+/// Where the record would go: `brood/crashes` under [`brood_state_dir`].
+#[cfg(unix)]
+fn record_dir_from_env() -> Option<std::path::PathBuf> {
+    brood_state_dir().map(|dir| dir.join("crashes"))
 }
 
 /// `text` safe inside a Brood string literal and on one line: a quote or backslash becomes

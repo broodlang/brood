@@ -844,6 +844,18 @@ pub(super) fn emit_prim3_table_put(
     Some(())
 }
 
+/// The runtime callback answering `op` as a two-operand heap PROBE — a read of a collection
+/// by key that allocates nothing, `table_prim`'s protocol (0 answers, 1 deopts to the VM's real
+/// function) — or `None` for any other op. One table for both `Prim2` sites, so a new probe is
+/// one arm here and its callback (adding `SetHas`, ADR-808, took a branch in each site).
+fn probe_callback(op: PrimOp, funcs: Funcs) -> Option<cranelift_codegen::ir::FuncRef> {
+    match op {
+        PrimOp::MapGet => Some(funcs.mget),
+        PrimOp::SetHas => Some(funcs.shas),
+        _ => None,
+    }
+}
+
 /// `Inst::Prim2` — a binary primitive over two operand-stack values. Dispatches by op:
 /// `cons`/`table-has?`/`table-get`/`vector-ref` (with hoisted-table / hoisted-vec inline
 /// fast paths), runtime-dispatched `=`, float arith/compare, and integer arith/compare.
@@ -986,22 +998,13 @@ pub(super) fn emit_prim2(
             let h = table_prim(b, fref, tbl, key, frame, funcs);
             stack.push(h);
         }
-    } else if matches!(op, PrimOp::SetHas) {
-        // `(%set-has? s x)`: source 0 the set, source 1 the element (`[0,1]`, the native's
-        // own order). A non-set receiver deopts, and the VM's native raises its error.
-        let set = read_words(b, aa_op, frame);
-        let element = read_words(b, bb_op, frame);
-        let h = table_prim(b, funcs.shas, set, element, frame, funcs);
-        stack.push(h);
-    } else if matches!(op, PrimOp::MapGet) {
-        // `(get m k)` on a map: `map` is always `[0,1]` here (`resolve_prim` returns only
-        // that for `get`), so source 0 is the map and source 1 the key. Status 1 — a
-        // non-map receiver, an absent key, or a stored `nil` — deopts, and the VM re-runs
-        // the real `get`, which owns those branches and `%lookup-miss`.
-        let m = read_words(b, aa_op, frame);
-        let k = read_words(b, bb_op, frame);
-        let h = table_prim(b, funcs.mget, m, k, frame, funcs);
-        stack.push(h);
+    } else if let Some(probe) = probe_callback(*op, funcs) {
+        // `(get m k)`, `(%set-has? s x)`: `map` is always `[0,1]` for these, so source 0 is
+        // the collection and source 1 the key. Status 1 — a receiver or case the inline does
+        // not answer — deopts, and the VM re-runs the real function, which owns them.
+        let collection = read_words(b, aa_op, frame);
+        let key = read_words(b, bb_op, frame);
+        stack.push(table_prim(b, probe, collection, key, frame, funcs));
     } else if matches!(op, PrimOp::VectorRef) {
         // `(vector-ref v i)` / inlined `(nth v i)`: map is `[0,1]`, so source 0 (`aa`)
         // is the vector, source 1 (`bb`) the index.
@@ -1155,18 +1158,11 @@ pub(super) fn emit_prim2_slot_slot(
         };
         let h = table_prim(b, fref, tbl, key, frame, funcs);
         stack.push(h);
-    } else if matches!(op, PrimOp::SetHas) {
-        // `(%set-has? slot_a slot_b)` — the slot/slot twin of the operand form above.
-        let set = read_words(b, Op::Slot(slot_a), frame);
-        let element = read_words(b, Op::Slot(slot_b), frame);
-        let h = table_prim(b, funcs.shas, set, element, frame, funcs);
-        stack.push(h);
-    } else if matches!(op, PrimOp::MapGet) {
-        // `(get slot_a slot_b)` on a map — the slot/slot twin of the operand form above.
-        let m = read_words(b, Op::Slot(slot_a), frame);
-        let k = read_words(b, Op::Slot(slot_b), frame);
-        let h = table_prim(b, funcs.mget, m, k, frame, funcs);
-        stack.push(h);
+    } else if let Some(probe) = probe_callback(*op, funcs) {
+        // `(get slot_a slot_b)`, `(%set-has? slot_a slot_b)` — the slot/slot twin above.
+        let collection = read_words(b, Op::Slot(slot_a), frame);
+        let key = read_words(b, Op::Slot(slot_b), frame);
+        stack.push(table_prim(b, probe, collection, key, frame, funcs));
     } else if matches!(op, PrimOp::VectorRef) {
         // `(nth slot_a slot_b)`: source 0 = vector slot, source 1 = index slot (map `[0,1]`).
         if let Some(&(ptr, vlen)) = hoisted.get(&slot_a) {
