@@ -6,8 +6,8 @@
 
 use super::*;
 use crate::host::gui::mesh::{
-    EmitterPlan, LightKind, MAX_EMITTERS, MAX_LIGHTS, MAX_SHADOW_VIEWS, Mesh, MeshBounds, Morph,
-    SKIN_TABLE_HEIGHT, SKIN_TABLE_WIDTH, Scene, ShadowPlan, Surface, add_morphs_packed,
+    EmitterPlan, LightKind, MAX_EMITTERS, MAX_EYES, MAX_LIGHTS, MAX_SHADOW_VIEWS, Mesh, MeshBounds,
+    Morph, SKIN_TABLE_HEIGHT, SKIN_TABLE_WIDTH, Scene, ShadowPlan, Surface, add_morphs_packed,
     draw_bounds, emitter_plan, shadow_plan, skin_table, union,
 };
 
@@ -16,8 +16,9 @@ use crate::host::gui::mesh::{
 pub(super) const VERTEX_FLOATS: usize = 21;
 /// The `SceneU` uniform (3360 bytes), padded to the dynamic-offset alignment.
 pub(super) const SCENE_BYTES: u64 = 3584;
-/// The `DrawU` uniform, padded to the dynamic-offset alignment.
-pub(super) const DRAW_BYTES: u64 = 256;
+/// The `DrawU` uniform (320 bytes with an `:eye` surface's optics, ADR-796), padded to the
+/// dynamic-offset alignment.
+pub(super) const DRAW_BYTES: u64 = 512;
 const SAMPLES: u32 = 4;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -773,6 +774,7 @@ impl MeshGpu {
                     Surface::Blend => 3,
                     Surface::Hair => 4,
                     Surface::Strands => 5,
+                    Surface::Eye => 6,
                 };
                 let bits = texture_bits(
                     [base, normal, occlusion, detail].map(|texture| {
@@ -1146,7 +1148,37 @@ pub(super) fn draw_uniform(
         material.detail_strength,
         material.detail_cavity,
     ]));
+    bytes.extend(floats_bytes(&eye_floats(material)));
     bytes
+}
+
+/// A material's `:eye` as `DrawU` holds it (ADR-796), all zeros for any surface but `:eye`:
+/// `eye_centres` (each eye's centre at rest; the first's fourth float how many eyes there
+/// are), `eye_axes`, `eye_up` (and the refractive index), `eye_shape` (the eyeball's, iris's
+/// and cornea's radius, the iris's depth), `eye_uv` (each eye's iris in the texture) and
+/// `eye_iris` (the iris's radius in the texture, the pupil's share of it).
+fn eye_floats(material: &crate::host::gui::mesh::Material) -> [f32; 32] {
+    let mut floats = [0.0f32; 32];
+    let Some(eye) = material.eye_optics() else {
+        return floats;
+    };
+    for (slot, at) in eye.eyes.iter().take(MAX_EYES).enumerate() {
+        floats[slot * 4..slot * 4 + 3].copy_from_slice(&at.centre);
+        floats[8 + slot * 4..8 + slot * 4 + 3].copy_from_slice(&at.axis);
+        floats[24 + slot * 2..24 + slot * 2 + 2].copy_from_slice(&at.iris_uv);
+    }
+    floats[3] = eye.eyes.len().min(MAX_EYES) as f32;
+    floats[16..19].copy_from_slice(&eye.up);
+    floats[19] = eye.ior;
+    floats[20..24].copy_from_slice(&[
+        eye.radius,
+        eye.iris_radius,
+        eye.cornea_radius,
+        eye.iris_depth,
+    ]);
+    floats[28] = eye.iris_uv_radius;
+    floats[29] = eye.pupil;
+    floats
 }
 
 /// One draw of a scene as the passes issue it.

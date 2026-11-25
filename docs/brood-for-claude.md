@@ -998,7 +998,10 @@ code paints to a terminal or a GUI window unchanged.
   SHAPES of lights — `:shape :disc` or `:sphere` as wide as `:size`, or on a spot `:shape :rect
   :extent [w h] :up [x y z]` — and of `:emitters [{:shape :position :direction :extent (or
   :size) :radiance}]`, seen only in reflections, 8 shapes at most; `:coat [strength
-  roughness]` is a clear wet layer; there is no `:rim`, ADR-795), composited in op order — 2D
+  roughness]` is a clear wet layer; there is no `:rim`, ADR-795; `:surface :eye` draws an
+  eyeball by optics from `:eye {:eyes [{:centre :axis :iris-uv} …] :iris-uv-radius r}`, its
+  eyes in the mesh at rest — the iris read through the cornea's refraction, the pupil drawn
+  (`:pupil`), the highlights the cornea's — and is refused without it, ADR-796), composited in op order — 2D
   before it is behind, after it in front (ADR-786). A malformed light raises from `gui/draw`. Both window painters draw it;
   the browser tab does not yet.
 - **A picture** (a page, a photo) = `(editor/display/image row col w h source opts)`: PNG / JPEG
@@ -1006,9 +1009,6 @@ code paints to a terminal or a GUI window unchanged.
   half-block cells by a terminal (pixels through the kitty graphics protocol where the terminal
   has it, ADR-695) — one op for both, decoded once per content (ADR-686). No
   texture to manage; a sprite is for a game's many moving copies of one texture.
-
-```lisp
-(defmodule main "a counter app" (:use editor/ui) (:use editor/frontend) (:use editor/display))
 - **Looking at a window with nobody's screen** = run the program under
   `BROOD_GUI_HEADLESS=paint` (no window; the CPU painter paints it in memory, ADR-609) or
   `BROOD_GUI_HEADLESS=gpu` (no window; the GPU painter draws it into a texture on the
@@ -1016,6 +1016,9 @@ code paints to a terminal or a GUI window unchanged.
   hardware GPU, ADR-798), find the window with `(gui/windows)` and take
   `(gui/write-png (gui/capture id) path)`. The program runs by its own timers; no input
   arrives. `gui/render-frame` paints one frame with no program at all (CPU painter).
+
+```lisp
+(defmodule main "a counter app" (:use editor/ui) (:use editor/frontend) (:use editor/display))
 
 (defn view (m cols rows)
   (frame (clear) (text 0 0 (str "count: " (get m :count)))))

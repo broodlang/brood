@@ -639,10 +639,11 @@ fn fs_particle(in: ParticleOut) -> @location(0) vec4<f32> {
 /// `stored_depth`, `pixel_noise`, `disc_tap`, `skin_diffuse`, `detail_tilt`, `detail_normal`,
 /// `detail_specular`, and ADR-795's `lobe_exponent`, `highlight_exponent`, `lobe_spread`,
 /// `pixel_span`, `sh_radiance`, `ambient_radiance`, `environment_brdf`, `specular_occlusion`,
-/// `horizon`, `overlap`, `emitter_coverage`) — keep the two in step. Writes
+/// `horizon`, `overlap`, `emitter_coverage`, and ADR-796's `eye_frame` (in `vs_mesh`) and
+/// `eye_seen`) — keep the two in step. Writes
 /// premultiplied, sRGB-encoded colour, the space the scene's picture is composited in.
 /// `vs_shadow` / `fs_shadow` render a shadow map: the same posing, seen through the shadow
-/// view the instance index names, alpha-tested for a `:cutout` or `:blend` surface.
+/// view the instance index names, alpha-tested for a `:cutout`, `:blend` or `:eye` surface.
 pub(super) const MESH_SRC: &str = r#"
 struct Light {
     position: vec4<f32>,        // xyz, range (0: no window)
@@ -685,6 +686,13 @@ struct DrawU {
     morph_info: vec4<u32>,      // morphed (0 or 1), vertex count, palette joint count, first offset
     strand: vec4<f32>,          // a `:strands` surface's width at the root and the tip (metres)
     detail: vec4<f32>,          // the detail tile's repeats along u and v, its strength, its cavity
+    // an `:eye` surface's optics (`mesh::Eye`, ADR-796; zeros on any other surface)
+    eye_centres: array<vec4<f32>, 2>,   // each eye's centre in the mesh at rest; [0].w: how many eyes
+    eye_axes: array<vec4<f32>, 2>,      // each eye's unit axis at rest
+    eye_up: vec4<f32>,          // xyz: up in the iris's texture, at rest; the refractive index
+    eye_shape: vec4<f32>,       // the eyeball's radius, the iris's, the cornea's, the iris's depth under the cornea's top
+    eye_uv: vec4<f32>,          // the middle of the first eye's iris in the texture, then the second's
+    eye_iris: vec4<f32>,        // the iris's radius in the texture, the pupil's share of the iris
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
@@ -723,6 +731,11 @@ struct VertexOut {
     @location(2) uv: vec2<f32>,
     @location(3) tangent: vec4<f32>,
     @location(4) curvature: f32,
+    // an `:eye` surface's frame in the world (`mesh::EyeFrame`; zeros on any other surface):
+    // its eye's centre and which eye it is, the eye's axis, its texture's up
+    @location(5) eye_centre: vec4<f32>,
+    @location(6) eye_axis: vec3<f32>,
+    @location(7) eye_up: vec3<f32>,
 };
 
 // a vertex morphed, and the matrix that skins and places it
@@ -774,6 +787,21 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
     out.uv = input.uv;
     out.tangent = vec4<f32>((posed.matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz, input.tangent.w);
     out.curvature = input.curvature;
+    out.eye_centre = vec4<f32>(0.0);
+    out.eye_axis = vec3<f32>(0.0);
+    out.eye_up = vec3<f32>(0.0);
+    if (draw.flags.x == 6u && draw.eye_centres[0].w > 0.0) {
+        // `mesh::eye_frame`: the eye whose centre at rest is nearest, moved as this vertex is
+        var index = 0u;
+        let first = posed.position - draw.eye_centres[0].xyz;
+        let second = posed.position - draw.eye_centres[1].xyz;
+        if (draw.eye_centres[0].w > 1.0 && dot(second, second) < dot(first, first)) {
+            index = 1u;
+        }
+        out.eye_centre = vec4<f32>((posed.matrix * vec4<f32>(draw.eye_centres[index].xyz, 1.0)).xyz, f32(index));
+        out.eye_axis = (posed.matrix * vec4<f32>(draw.eye_axes[index].xyz, 0.0)).xyz;
+        out.eye_up = (posed.matrix * vec4<f32>(draw.eye_up.xyz, 0.0)).xyz;
+    }
     if (draw.flags.x == 5u) {
         // a ribbon turned to face the camera: its tangent the strand's direction (the mesh's
         // normal), its fourth the coverage
@@ -1437,8 +1465,95 @@ fn detail_specular(cavity: f32, amount: f32) -> f32 {
     return clamp(1.0 - amount * (1.0 - cavity), 0.0, 1.0);
 }
 
-fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>, curvature: f32, specular_kept: f32) -> vec3<f32> {
-    var out = base * ambient(normal) * occlusion;
+// `mesh::EyeSeen`: what a sight line meets in an eye
+struct EyeSeen {
+    through: bool,
+    uv: vec2<f32>,
+    pupil: f32,
+    normal: vec3<f32>,
+    cornea: f32,
+    curvature: f32,
+};
+
+// `mesh::eye_seen` (ADR-796): the line through the fragment met with the cornea's sphere on the
+// viewer's side, bent there (Snell), followed to the iris's plane; the texture read at that
+// point's place on the iris's disc. A line that misses the cornea's cap is left as the mesh has it.
+fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world: vec3<f32>, view: vec3<f32>, uv: vec2<f32>, normal: vec3<f32>, curvature: f32) -> EyeSeen {
+    var seen: EyeSeen;
+    seen.through = false;
+    seen.uv = uv;
+    seen.pupil = 0.0;
+    seen.normal = normal;
+    seen.cornea = 0.0;
+    seen.curvature = curvature;
+    let scale = sqrt(dot(frame_axis, frame_axis));
+    if (scale <= 1e-12) {
+        return seen;
+    }
+    let axis = frame_axis / scale;
+    let iris_radius = draw.eye_shape.y * scale;
+    let cornea_radius = draw.eye_shape.z * scale;
+    let ball_radius = draw.eye_shape.x * scale;
+    let limbus_height = sqrt(max(ball_radius * ball_radius - iris_radius * iris_radius, 0.0));
+    let cornea_height = limbus_height - sqrt(max(cornea_radius * cornea_radius - iris_radius * iris_radius, 0.0));
+    let iris_height = cornea_height + cornea_radius - draw.eye_shape.w * scale;
+    let from_cornea = world - centre.xyz - axis * cornea_height;
+    let along = dot(from_cornea, view);
+    let discriminant = along * along - (dot(from_cornea, from_cornea) - cornea_radius * cornea_radius);
+    if (discriminant < 0.0) {
+        return seen;
+    }
+    let travel = sqrt(discriminant) - along;
+    if (travel < 0.0) {
+        return seen;
+    }
+    let entry = from_cornea + view * travel;
+    let entry_along = dot(entry, axis);
+    if (entry_along + cornea_height < limbus_height) {
+        return seen;
+    }
+    let cornea_normal = entry / cornea_radius;
+    let cosine = dot(cornea_normal, view);
+    let ratio = 1.0 / max(draw.eye_up.w, 1.0);
+    let inside = max(1.0 - ratio * ratio * (1.0 - cosine * cosine), 0.0);
+    let bend = ratio * cosine - sqrt(inside);
+    let bent = bend * cornea_normal - ratio * view;
+    let sinking = dot(bent, axis);
+    if (sinking > -1e-6) {
+        return seen;
+    }
+    let reach = (iris_height - entry_along - cornea_height) / sinking;
+    let hit = entry + axis * cornea_height + bent * reach;
+    let up = safe_normalize(frame_up - axis * dot(frame_up, axis));
+    let right = cross(up, axis);
+    let across = dot(hit, right) / iris_radius;
+    let above = dot(hit, up) / iris_radius;
+    let rim = sqrt(across * across + above * above);
+    let pupil_share = draw.eye_iris.y;
+    if (pupil_share > 0.0) {
+        // (`mesh::PUPIL_EDGE`)
+        seen.pupil = 1.0 - smoothstep(pupil_share * (1.0 - 0.08), pupil_share * (1.0 + 0.08), rim);
+    }
+    let entry_out = entry - axis * entry_along;
+    let entry_rim = sqrt(dot(entry_out, entry_out)) / iris_radius;
+    // (`mesh::CORNEA_EDGE`)
+    let cornea = 1.0 - smoothstep(0.85, 1.0, entry_rim);
+    var iris_uv = draw.eye_uv.xy;
+    if (centre.w >= 0.5) {
+        iris_uv = draw.eye_uv.zw;
+    }
+    seen.through = true;
+    seen.uv = iris_uv + vec2<f32>(across, -above) * draw.eye_iris.x;
+    seen.normal = safe_normalize(normal + (cornea_normal - normal) * cornea);
+    seen.cornea = cornea;
+    seen.curvature = curvature + (1.0 / cornea_radius - curvature) * cornea;
+    return seen;
+}
+
+// (`diffuse_normal` is what the light falls on and `mirror_surface` the surface a reflection must
+// not go under: `normal` and `surface_normal` but for an `:eye` under its cornea, ADR-796)
+fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>, curvature: f32, specular_kept: f32, diffuse_normal: vec3<f32>, mirror_surface: vec3<f32>) -> vec3<f32> {
+    var out = base * ambient(diffuse_normal) * occlusion;
     let f0 = draw.lobes.w;
     // a `:hair` surface's highlights: as sharp as its roughness asks
     let exponent = shininess(draw.material.x);
@@ -1470,8 +1585,9 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             }
         }
         let to_light = arrival.to_light;
-        let facing = dot(normal, to_light);
+        let facing = dot(diffuse_normal, to_light);
         let lambert = max(facing, 0.0);
+        let mirror_lambert = max(dot(normal, to_light), 0.0);
         let half_vector = safe_normalize(to_light + view);
         if (draw.flags.x == 4u || draw.flags.x == 5u) {
             let primary = hair_highlight(strand, normal, half_vector, -0.08, exponent);
@@ -1493,9 +1609,9 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             }
             shaping[slot] = seen * arriving * spread_out;
         } else {
-            specular = fresnel(f0, dot(view, half_vector)) * specular_lobes(dot(normal, half_vector), reflection_turn) * lambert * specular_kept;
+            specular = fresnel(f0, dot(view, half_vector)) * specular_lobes(dot(normal, half_vector), reflection_turn) * mirror_lambert * specular_kept;
             if (coat.x > 0.0) {
-                specular = specular + coat.x * fresnel(0.02, dot(view, half_vector)) * specular_lobe(coat.y, dot(normal, half_vector), reflection_turn) * lambert;
+                specular = specular + coat.x * fresnel(0.02, dot(view, half_vector)) * specular_lobe(coat.y, dot(normal, half_vector), reflection_turn) * mirror_lambert;
             }
         }
         var diffuse = vec3<f32>(lambert * seen);
@@ -1516,7 +1632,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
     let facing_view = dot(normal, view);
     let normal_dot_view = clamp(facing_view, 0.0, 1.0);
     let reflected = 2.0 * facing_view * normal - view;
-    let kept = horizon(reflected, surface_normal);
+    let kept = horizon(reflected, mirror_surface);
     let weights = vec3<f32>(draw.lobes.z * specular_kept, (1.0 - draw.lobes.z) * specular_kept, coat.x);
     let roughnesses = vec3<f32>(draw.material.x * draw.lobes.x, draw.material.x * draw.lobes.y, coat.y);
     let reflectances = vec3<f32>(f0, f0, 0.02);
@@ -1574,8 +1690,11 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     // the detail tile at its own repeats, so its mip level follows them (the CPU's `detail_lod`)
     let detail_texel = straight(textureSample(detail_texture, texture_sampler, fragment.uv * draw.detail.xy), (draw.flags.y & 128u) != 0u);
     let texel = select(vec4<f32>(1.0), base_texel, (draw.flags.y & 1u) != 0u);
+    // the texture's footprint at this pixel, for an eye's second read (taken before any branch)
+    let uv_dx = dpdx(fragment.uv);
+    let uv_dy = dpdy(fragment.uv);
     var alpha = texel.a * draw.color.a;
-    if (draw.flags.x == 2u) {
+    if (draw.flags.x == 2u || draw.flags.x == 6u) {
         if (alpha < draw.material.w) {
             discard;
         }
@@ -1608,7 +1727,7 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
             discard;
         }
     }
-    let base = srgb_to_linear(texel.rgb) * draw.color.rgb;
+    var base = srgb_to_linear(texel.rgb) * draw.color.rgb;
     var normal = safe_normalize(fragment.normal);
     if (!front) {
         normal = -normal;
@@ -1641,6 +1760,23 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
         normal = safe_normalize(tangent * local.x + sign * bitangent * local.y + normal * local.z);
     }
     let view = safe_normalize(scene.eye.xyz - fragment.world);
+    // an eye (ADR-796), as the CPU's `fill_triangle`: under the cornea the texture is read where
+    // the bent sight line meets the iris, the pupil is drawn there, and the highlights are the
+    // cornea's; the light still falls on the surface's own normal
+    var curvature = fragment.curvature;
+    let diffuse_normal = normal;
+    var mirror_surface = surface_normal;
+    if (draw.flags.x == 6u && draw.eye_centres[0].w > 0.0) {
+        let seen = eye_seen(fragment.eye_centre, fragment.eye_axis, fragment.eye_up, fragment.world, view, fragment.uv, normal, curvature);
+        if (seen.through) {
+            let under = straight(textureSampleGrad(base_texture, texture_sampler, seen.uv, uv_dx, uv_dy), (draw.flags.y & 2u) != 0u);
+            let under_texel = select(vec4<f32>(1.0), under, (draw.flags.y & 1u) != 0u);
+            base = srgb_to_linear(under_texel.rgb) * draw.color.rgb * (1.0 - seen.pupil);
+            normal = seen.normal;
+            mirror_surface = seen.normal;
+            curvature = seen.curvature;
+        }
+    }
     // the ambient's occlusion: its map's, times the scene's screen-space ambient occlusion
     let occlusion = select(1.0, occlusion_texel.r, (draw.flags.y & 16u) != 0u)
         * ambient_occlusion(fragment.world, surface_normal);
@@ -1652,7 +1788,7 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     if (draw.flags.x == 5u) {
         strand = safe_normalize(fragment.tangent.xyz);
     }
-    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand, fragment.curvature, specular_kept), scene.params.x);
+    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand, curvature, specular_kept, diffuse_normal, mirror_surface), scene.params.x);
     return MeshFragment(vec4<f32>(lit * alpha, alpha), mask);
 }
 
@@ -1682,7 +1818,7 @@ fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> Shado
 fn fs_shadow(fragment: ShadowOut) {
     let base_texel = straight(textureSampleLevel(base_texture, texture_sampler, fragment.uv, 0.0), (draw.flags.y & 2u) != 0u);
     let alpha = select(1.0, base_texel.a, (draw.flags.y & 1u) != 0u) * draw.color.a;
-    if ((draw.flags.x == 2u || draw.flags.x == 3u || draw.flags.x == 4u || draw.flags.x == 5u) && alpha < draw.material.w) {
+    if ((draw.flags.x == 2u || draw.flags.x == 3u || draw.flags.x == 4u || draw.flags.x == 5u || draw.flags.x == 6u) && alpha < draw.material.w) {
         discard;
     }
 }

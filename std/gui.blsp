@@ -778,7 +778,8 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; `:exposure`, a `:background` ([r g b a], transparent by default), the skeletons' joint
 ;; `:palettes` (16 numbers a joint, or f32 bytes), and the `:draws` — each `{:mesh handle
 ;; :model [16] :palette i :morphs [[target weight] …] :material {…}}`. A material is the fixed
-;; shading model's parameters: `:surface` (:skin, :standard, :cutout, :blend, :hair — strands
+;; shading model's parameters: `:surface` (:skin, :standard, :cutout, :blend, :eye — an eyeball
+;; drawn by optics, with its `:eye`, below — :hair — strands
 ;; lit along the bitangent, their alpha coverage — or :strands, ribbons turned to the camera, a
 ;; pixel wide at least, `:width [root tip]` metres), `:base`, `:normal` and `:occlusion` (texture
 ;; handles), `:color`, `:roughness`, `:specular`, `:lobes`, `:scatter` (light under the skin,
@@ -864,6 +865,28 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; WITHOUT a shape keeps sharpening on a flat surface, and on a curved one only as far as a
 ;; pixel can show (by the mesh's own curvature), so it never sparkles: give a light a shape
 ;; for a glossy surface to show.
+;;
+;; AN EYE (ADR-796). `:surface :eye` draws an eyeball's mesh by optics: the mesh says only
+;; which pixels the eye covers. Its material carries `:eye {:eyes [{:centre [x y z] :axis
+;; [x y z] :iris-uv [u v]} …] :iris-uv-radius r}` — one or two eyes in the MESH's space at
+;; rest: each eyeball's centre, the direction it looks along, and the middle of its iris in
+;; the `:base` texture, whose iris is a disc `:iris-uv-radius` (in UV) to its edge, u to the
+;; right of someone the eye looks at, v down. Each vertex belongs to the eye whose centre it
+;; is nearest and carries that eye's frame with it through its own skinning matrix, so an eye
+;; a bone turns needs nothing told to it each frame. The shape, in the mesh's units (a grown
+;; person's, in metres, by default): `:radius` 0.012 (the eyeball), `:iris-radius` 0.0059,
+;; `:cornea-radius` 0.0078 (the cornea is a cap of that sphere through the iris's edge),
+;; `:iris-depth` 0.0033 (the flat iris under the cornea's top), `:ior` 1.376 (1 … 3; 1 bends
+;; nothing), `:up [0 1 0]` (up in the iris's texture), `:pupil` 0.35 (its radius as a share
+;; of the iris's, 0 … 1; 0 draws none: set it as the light changes).
+;; Under the cornea the sight line is bent (Snell) and followed to the iris's plane, and the
+;; texture is read there: the iris is seen larger, and from the side it stays deep and shifts
+;; under the cornea, where a painted ball's flattens. The pupil is drawn there too, a soft
+;; black disc. The highlights (the material's own and its `:coat`: the tear film) are
+;; reflected by the cornea's sphere, whatever the mesh under it is shaped like. Past the
+;; cornea (the white) the mesh is drawn as a `:cutout` draws it, texels under `:cutoff` not at
+;; all — a clear shell over the eyeball. A malformed `:eye`, or an `:eye` surface without
+;; one, is an error raised by gui/draw; on any other surface the key is checked and unused.
 ;;
 ;; LIGHTS (ADR-788), linear, their keys saying their kind:
 ;;   directional  {:direction [x y z] :color [r g b] :angle a :shadow …}  (direction: its travel)

@@ -152,7 +152,7 @@ fn the_mesh_shader_validates() {
     assert_eq!(scenes::VERTEX_FLOATS, 21, "a vertex carries its curvature");
     assert!(MESH_SRC.contains("@location(6) curvature: f32"));
     // ADR-797: `draw_uniform` packs exactly the struct the shader declares, the detail tile's
-    // settings its last four floats; the shader's flat texel is the CPU painter's
+    // settings four floats before an eye's optics; the shader's flat texel is the CPU painter's
     use crate::host::gui::mesh::{DETAIL_FLAT, Draw, Material};
     let draw = Draw {
         mesh: 1,
@@ -174,7 +174,7 @@ fn the_mesh_shader_validates() {
         "DrawU is {draw_declared} bytes, draw_uniform packs {}",
         packed.len()
     );
-    let detail: Vec<f32> = packed[packed.len() - 16..]
+    let detail: Vec<f32> = packed[176..192]
         .as_chunks::<4>()
         .0
         .iter()
@@ -234,6 +234,79 @@ fn the_mesh_shader_validates() {
     );
     assert_eq!(floats[6], 0.0, "the rim is gone");
     assert!(MESH_SRC.contains("coat = draw.skin.yz;"));
+    // ADR-796: an eye's optics are `DrawU`'s last eight vec4s, zeros for any other surface; the
+    // shader's numbers are the CPU painter's; the vertices carry the eye's frame
+    use crate::host::gui::mesh::{CORNEA_EDGE, Eye, EyeAt, PUPIL_EDGE, Surface};
+    let optics = Eye {
+        eyes: vec![
+            EyeAt {
+                centre: [1.0, 2.0, 3.0],
+                axis: [0.0, 0.0, 1.0],
+                iris_uv: [0.3, 0.7],
+            },
+            EyeAt {
+                centre: [-1.0, 2.0, 3.0],
+                axis: [0.0, 1.0, 0.0],
+                iris_uv: [0.7, 0.2],
+            },
+        ],
+        up: [0.0, 1.0, 0.0],
+        radius: 0.012,
+        iris_radius: 0.006,
+        cornea_radius: 0.008,
+        iris_depth: 0.003,
+        ior: 1.4,
+        iris_uv_radius: 0.1,
+        pupil: 0.3,
+    };
+    let eye_floats = |surface: Surface| -> Vec<f32> {
+        let eyed = Draw {
+            mesh: 1,
+            model: [0.0; 16],
+            palette: None,
+            morphs: Vec::new(),
+            material: Material {
+                surface,
+                eye: Some(optics.clone()),
+                ..Material::default()
+            },
+        };
+        let packed = scenes::draw_uniform(&eyed, [0; 4], [0; 4]);
+        assert_eq!(packed.len() as u64, draw_declared);
+        packed[192..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| f32::from_le_bytes(*word))
+            .collect()
+    };
+    assert_eq!(
+        eye_floats(Surface::Eye),
+        [
+            1.0, 2.0, 3.0, 2.0, -1.0, 2.0, 3.0, 0.0, // the centres, and how many
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, // the axes
+            0.0, 1.0, 0.0, 1.4, // up, the index
+            0.012, 0.006, 0.008, 0.003, // the shape
+            0.3, 0.7, 0.7, 0.2, // the irises in the texture
+            0.1, 0.3, 0.0, 0.0, // the iris's radius there, the pupil
+        ]
+    );
+    assert_eq!(eye_floats(Surface::Cutout), [0.0; 32], "no other surface");
+    assert_eq!(draw_declared, 320);
+    assert_eq!(scenes::DRAW_BYTES % 256, 0, "a dynamic offset's alignment");
+    assert_eq!((PUPIL_EDGE, CORNEA_EDGE), (0.08, 0.85));
+    assert!(
+        MESH_SRC
+            .contains("smoothstep(pupil_share * (1.0 - 0.08), pupil_share * (1.0 + 0.08), rim)")
+    );
+    assert!(MESH_SRC.contains("let cornea = 1.0 - smoothstep(0.85, 1.0, entry_rim);"));
+    assert!(MESH_SRC.contains("if (draw.flags.x == 6u && draw.eye_centres[0].w > 0.0) {"));
+    assert!(MESH_SRC.contains("@location(5) eye_centre: vec4<f32>,"));
+    // its clear shell is cut out of the picture and of the shadow maps, as a cutout's is
+    assert!(MESH_SRC.contains("if (draw.flags.x == 2u || draw.flags.x == 6u) {"));
+    assert!(
+        MESH_SRC.contains("draw.flags.x == 5u || draw.flags.x == 6u) && alpha < draw.material.w")
+    );
 }
 
 #[test]

@@ -1511,7 +1511,8 @@ fn emitter_spec(
 /// :morphs [[target weight] …] :material {…}} …]`. Colours and light are linear. A key of the
 /// wrong shape keeps its default and a draw without a mesh handle is dropped — except the
 /// lights, `:ambient-sh`, and a material's `:cast-shadow`, `:lobes`, `:scatter` and `:detail`
-/// keys (ADR-797), where a mistake would light the scene wrongly without a word: those are
+/// keys (ADR-797) and its `:eye` (ADR-796), where a mistake would light the scene wrongly
+/// without a word: those are
 /// refused (`Err`, which `%gui-draw` raises).
 /// No 16-number `:camera` is no scene (`Ok(None)`).
 fn scene_spec(
@@ -1617,6 +1618,7 @@ fn scene_spec(
                 "blend" => Surface::Blend,
                 "hair" => Surface::Hair,
                 "strands" => Surface::Strands,
+                "eye" => Surface::Eye,
                 _ => Surface::Standard,
             };
         }
@@ -1756,6 +1758,15 @@ fn scene_spec(
                 ));
             }
         };
+        // an eye's optics (ADR-796): read and checked on any surface, used by `:eye` alone,
+        // which is nothing without them
+        material.eye = eye_spec(heap, get(material_map, "eye"), num)?;
+        if material.surface == Surface::Eye && material.eye.is_none() {
+            return Err(
+                "an :eye surface needs its :eye: {:eyes [{:centre [x y z] :axis [x y z] :iris-uv [u v]} …] :iris-uv-radius r}, where its eyes are in the mesh at rest and their irises in its texture"
+                    .to_string(),
+            );
+        }
         Ok(material)
     };
     let draws = match get(map, "draws") {
@@ -2065,6 +2076,223 @@ fn reflected_emitters_spec(
         .enumerate()
         .map(|(index, entry)| one(*entry).map_err(|why| format!("emitter {index}: {why}")))
         .collect()
+}
+
+/// A material's `:eye` (absent or nil: none) read into a `mesh::Eye` (ADR-796), or why it is
+/// not one: `{:eyes [{:centre [x y z] :axis [x y z] :iris-uv [u v]} …] :iris-uv-radius r}` —
+/// one or two eyes in the mesh's space at rest — with `:up [x y z]`, `:radius`,
+/// `:iris-radius`, `:cornea-radius`, `:iris-depth`, `:ior` and `:pupil` as it likes. A
+/// mistake here is an eye drawn flat or looking the wrong way without a word, so each is
+/// refused with what it should be.
+fn eye_spec(
+    heap: &Heap,
+    given: Option<Value>,
+    num: &dyn Fn(Value) -> f32,
+) -> Result<Option<crate::host::gui::mesh::Eye>, String> {
+    use crate::host::gui::mesh::{
+        DEFAULT_CORNEA_RADIUS, DEFAULT_EYE_IOR, DEFAULT_EYE_RADIUS, DEFAULT_IRIS_DEPTH,
+        DEFAULT_IRIS_RADIUS, DEFAULT_PUPIL, Eye, EyeAt, MAX_EYES,
+    };
+    let map = match given {
+        None | Some(Value::Nil) => return Ok(None),
+        Some(Value::Map(map)) => map,
+        Some(other) => {
+            return Err(format!(
+                "a material's :eye is a map of its eyes' optics ({{:eyes [{{:centre :axis :iris-uv}} …] :iris-uv-radius r …}}), not {}",
+                crate::syntax::printer::print(heap, other)
+            ));
+        }
+    };
+    let print = |value: Value| crate::syntax::printer::print(heap, value);
+    let is_number = |candidate: Value| {
+        matches!(
+            candidate,
+            Value::Int(_) | Value::Float(_) | Value::Ratio(_) | Value::Decimal(_)
+        )
+    };
+    // `count` finite numbers, or none
+    let numbers = |given: Value, count: usize| -> Option<Vec<f32>> {
+        match given {
+            Value::Vector(id) if heap.vector(id).len() == count => heap
+                .vector(id)
+                .iter()
+                .map(|item| Some(num(*item)).filter(|value| is_number(*item) && value.is_finite()))
+                .collect(),
+            _ => None,
+        }
+    };
+    let direction = |within, key: &str, whose: &str| -> Result<Option<[f32; 3]>, String> {
+        match heap.map_get(within, value::kw(key)) {
+            None | Some(Value::Nil) => Ok(None),
+            Some(given) => match numbers(given, 3) {
+                Some(values) => {
+                    let length = values.iter().map(|value| value * value).sum::<f32>().sqrt();
+                    if length > 1e-6 {
+                        Ok(Some([
+                            values[0] / length,
+                            values[1] / length,
+                            values[2] / length,
+                        ]))
+                    } else {
+                        Err(format!(
+                            "{whose} :{key} is a direction [x y z], not {}: it has no length",
+                            print(given)
+                        ))
+                    }
+                }
+                None => Err(format!(
+                    "{whose} :{key} is a direction [x y z], not {}",
+                    print(given)
+                )),
+            },
+        }
+    };
+    // a number above `least` and at most `most`, or the default when the key is absent
+    let sized =
+        |key: &str, least: f32, most: f32, default: f32, what: &str| -> Result<f32, String> {
+            match heap.map_get(map, value::kw(key)) {
+                None | Some(Value::Nil) => Ok(default),
+                Some(given) if is_number(given) && num(given) > least && num(given) <= most => {
+                    Ok(num(given))
+                }
+                Some(given) => Err(format!(
+                    "an :eye's :{key} is {what}, a number above {least} and at most {most}, not {}",
+                    print(given)
+                )),
+            }
+        };
+    let entries = match heap.map_get(map, value::kw("eyes")) {
+        Some(Value::Vector(id)) if (1..=MAX_EYES).contains(&heap.vector(id).len()) => {
+            heap.vector(id)
+        }
+        other => {
+            return Err(format!(
+                "an :eye's :eyes is a vector of one or two eyes, each {{:centre [x y z] :axis [x y z] :iris-uv [u v]}}, not {}",
+                other.map_or_else(|| "nothing".to_string(), print)
+            ));
+        }
+    };
+    let eyes = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let whose = format!("eye {index}'s");
+            let Value::Map(entry_map) = *entry else {
+                return Err(format!(
+                    "eye {index} is a map {{:centre [x y z] :axis [x y z] :iris-uv [u v]}}, not {}",
+                    print(*entry)
+                ));
+            };
+            let place = |key: &str, count: usize, what: &str| -> Result<Vec<f32>, String> {
+                match heap.map_get(entry_map, value::kw(key)) {
+                    Some(given) => numbers(given, count)
+                        .ok_or_else(|| format!("{whose} :{key} is {what}, not {}", print(given))),
+                    None => Err(format!("{whose} :{key} is missing: {what}")),
+                }
+            };
+            let centre = place(
+                "centre",
+                3,
+                "the eyeball's centre in the mesh at rest, [x y z]",
+            )?;
+            let iris_uv = place(
+                "iris-uv",
+                2,
+                "where the middle of its iris is in the base texture, [u v]",
+            )?;
+            let Some(axis) = direction(entry_map, "axis", &whose)? else {
+                return Err(format!(
+                    "{whose} :axis is missing: the direction it looks along in the mesh at rest, [x y z]"
+                ));
+            };
+            Ok(EyeAt {
+                centre: [centre[0], centre[1], centre[2]],
+                axis,
+                iris_uv: [iris_uv[0], iris_uv[1]],
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let up = direction(map, "up", "an :eye's")?.unwrap_or([0.0, 1.0, 0.0]);
+    if let Some(index) = eyes.iter().position(|eye| {
+        (eye.axis[0] * up[0] + eye.axis[1] * up[1] + eye.axis[2] * up[2]).abs() > 0.999
+    }) {
+        return Err(format!(
+            "an :eye's :up runs along eye {index}'s :axis: it is the direction that is up in the iris's texture, across the axis"
+        ));
+    }
+    let radius = sized(
+        "radius",
+        0.0,
+        1.0e6,
+        DEFAULT_EYE_RADIUS,
+        "the eyeball's radius",
+    )?;
+    let iris_radius = sized(
+        "iris-radius",
+        0.0,
+        1.0e6,
+        DEFAULT_IRIS_RADIUS,
+        "the iris's radius",
+    )?;
+    let cornea_radius = sized(
+        "cornea-radius",
+        0.0,
+        1.0e6,
+        DEFAULT_CORNEA_RADIUS,
+        "the radius of the cornea's curve",
+    )?;
+    if iris_radius >= radius || iris_radius >= cornea_radius {
+        return Err(format!(
+            "an :eye's :iris-radius ({iris_radius}) is under its :radius ({radius}) and its :cornea-radius ({cornea_radius}): the cornea is a cap through the iris's edge on the eyeball"
+        ));
+    }
+    let iris_depth = sized(
+        "iris-depth",
+        0.0,
+        1.0e6,
+        DEFAULT_IRIS_DEPTH,
+        "how far the iris lies under the cornea's top",
+    )?;
+    let ior = match heap.map_get(map, value::kw("ior")) {
+        None | Some(Value::Nil) => DEFAULT_EYE_IOR,
+        Some(given) if is_number(given) && (1.0..=3.0).contains(&num(given)) => num(given),
+        Some(given) => {
+            return Err(format!(
+                "an :eye's :ior is the refractive index its cornea bends light by, a number from 1 (not at all) to 3, not {}",
+                print(given)
+            ));
+        }
+    };
+    let pupil = match heap.map_get(map, value::kw("pupil")) {
+        None | Some(Value::Nil) => DEFAULT_PUPIL,
+        Some(given) if is_number(given) && (0.0..=1.0).contains(&num(given)) => num(given),
+        Some(given) => {
+            return Err(format!(
+                "an :eye's :pupil is the pupil's radius as a share of the iris's, a number from 0 (none drawn) to 1, not {}",
+                print(given)
+            ));
+        }
+    };
+    let iris_uv_radius = match heap.map_get(map, value::kw("iris-uv-radius")) {
+        Some(given) if is_number(given) && num(given) > 0.0 && num(given) <= 1.0 => num(given),
+        other => {
+            return Err(format!(
+                "an :eye's :iris-uv-radius is how far the iris's edge is from its middle in the base texture, a number above 0 and at most 1, not {}",
+                other.map_or_else(|| "nothing".to_string(), print)
+            ));
+        }
+    };
+    Ok(Some(Eye {
+        eyes,
+        up,
+        radius,
+        iris_radius,
+        cornea_radius,
+        iris_depth,
+        ior,
+        iris_uv_radius,
+        pupil,
+    }))
 }
 
 /// A scene spec's `:lights` (absent or nil: none) read into `mesh::Light`s, or why they are
@@ -4070,6 +4298,200 @@ mod gui_scene_light_tests {
             "true",
         ] {
             refused(scene_with("[]", &format!("{{:coat {given}}}")), coat);
+        }
+    }
+
+    #[test]
+    fn an_eyes_optics_read_and_default() {
+        // ADR-796: where its eyes are in the mesh at rest, and their shape
+        use crate::host::gui::mesh::{
+            DEFAULT_CORNEA_RADIUS, DEFAULT_EYE_IOR, DEFAULT_EYE_RADIUS, DEFAULT_IRIS_DEPTH,
+            DEFAULT_IRIS_RADIUS, DEFAULT_PUPIL, EyeAt, Surface,
+        };
+        let one = "{:centre [0.03 1.5 0.1] :axis [0 0 2] :iris-uv [0.3 0.7]}";
+        let scene = scene_with(
+            "[]",
+            &format!("{{:surface :eye :eye {{:eyes [{one}] :iris-uv-radius 0.1}}}}"),
+        )
+        .expect("an eye");
+        let material = &scene.draws[0].material;
+        assert_eq!(material.surface, Surface::Eye);
+        let eye = material.eye_optics().expect("its optics");
+        // the axis made unit length; everything it did not say a grown person's
+        assert_eq!(
+            eye.eyes,
+            [EyeAt {
+                centre: [0.03, 1.5, 0.1],
+                axis: [0.0, 0.0, 1.0],
+                iris_uv: [0.3, 0.7],
+            }]
+        );
+        assert_eq!(eye.up, [0.0, 1.0, 0.0]);
+        assert_eq!(
+            (
+                eye.radius,
+                eye.iris_radius,
+                eye.cornea_radius,
+                eye.iris_depth
+            ),
+            (
+                DEFAULT_EYE_RADIUS,
+                DEFAULT_IRIS_RADIUS,
+                DEFAULT_CORNEA_RADIUS,
+                DEFAULT_IRIS_DEPTH
+            )
+        );
+        assert_eq!(
+            (eye.ior, eye.pupil, eye.iris_uv_radius),
+            (DEFAULT_EYE_IOR, DEFAULT_PUPIL, 0.1)
+        );
+        // a pair, every key given
+        let other = "{:centre [-0.03 1.5 0.1] :axis [0 0 1] :iris-uv [0.7 0.3]}";
+        let scene = scene_with(
+            "[]",
+            &format!(
+                "{{:surface :eye :coat [1 0.04] :eye {{:eyes [{one} {other}] :iris-uv-radius 0.1 :up [0 3 0] :radius 0.016 :iris-radius 0.006 :cornea-radius 0.008 :iris-depth 0.003 :ior 1.3 :pupil 0}}}}"
+            ),
+        )
+        .expect("two eyes");
+        let material = &scene.draws[0].material;
+        let eye = material.eye_optics().expect("its optics");
+        assert_eq!(eye.eyes.len(), 2);
+        assert_eq!(eye.eyes[1].iris_uv, [0.7, 0.3]);
+        assert_eq!(eye.up, [0.0, 1.0, 0.0]);
+        assert_eq!(
+            (
+                eye.radius,
+                eye.iris_radius,
+                eye.cornea_radius,
+                eye.iris_depth
+            ),
+            (0.016, 0.006, 0.008, 0.003)
+        );
+        assert_eq!((eye.ior, eye.pupil), (1.3, 0.0));
+        assert_eq!(material.coat, Some([1.0, 0.04]), "an eye keeps its coat");
+        // on another surface the optics are read and checked, and used by none
+        let scene = scene_with(
+            "[]",
+            &format!("{{:surface :cutout :eye {{:eyes [{one}] :iris-uv-radius 0.1}}}}"),
+        )
+        .expect("a cutout");
+        assert!(scene.draws[0].material.eye.is_some());
+        assert!(scene.draws[0].material.eye_optics().is_none());
+        // nil is none
+        let scene = scene_with("[]", "{:eye nil}").expect("a scene");
+        assert_eq!(scene.draws[0].material.eye, None);
+    }
+
+    #[test]
+    fn a_malformed_eye_is_refused_with_why() {
+        let refused = |material: String, why: &str| {
+            let error = scene_with("[]", &material).expect_err(why);
+            assert!(
+                error.contains("%gui-draw") && error.contains(why),
+                "{error:?} does not say {why:?}"
+            );
+        };
+        let one = "{:centre [0 0 0] :axis [0 0 1] :iris-uv [0.5 0.5]}";
+        let eye = |keys: &str| {
+            format!("{{:surface :eye :eye {{:eyes [{one}] :iris-uv-radius 0.1 {keys}}}}}")
+        };
+        // an eye surface with nothing to draw an eye by
+        refused(
+            "{:surface :eye}".to_string(),
+            "an :eye surface needs its :eye",
+        );
+        refused(
+            "{:surface :eye :eye nil}".to_string(),
+            "an :eye surface needs its :eye",
+        );
+        for given in ["true", "[0 0 0]", ":left"] {
+            refused(format!("{{:eye {given}}}"), "a material's :eye is a map");
+        }
+        // its eyes: one or two, each whole
+        for given in [
+            "",
+            ":eyes []",
+            ":eyes 2",
+            &format!(":eyes [{one} {one} {one}]"),
+        ] {
+            refused(
+                format!("{{:eye {{{given} :iris-uv-radius 0.1}}}}"),
+                ":eyes is a vector of one or two eyes",
+            );
+        }
+        let with_eye = |entry: &str| format!("{{:eye {{:eyes [{entry}] :iris-uv-radius 0.1}}}}");
+        refused(with_eye("7"), "eye 0 is a map");
+        refused(
+            with_eye("{:axis [0 0 1] :iris-uv [0.5 0.5]}"),
+            "eye 0's :centre is missing",
+        );
+        refused(
+            with_eye("{:centre [0 0] :axis [0 0 1] :iris-uv [0.5 0.5]}"),
+            "eye 0's :centre is the eyeball's centre",
+        );
+        refused(
+            with_eye("{:centre [0 0 0] :iris-uv [0.5 0.5]}"),
+            "eye 0's :axis is missing",
+        );
+        refused(
+            with_eye("{:centre [0 0 0] :axis [0 0 0] :iris-uv [0.5 0.5]}"),
+            "it has no length",
+        );
+        refused(
+            with_eye("{:centre [0 0 0] :axis :forward :iris-uv [0.5 0.5]}"),
+            "eye 0's :axis is a direction [x y z]",
+        );
+        refused(
+            with_eye("{:centre [0 0 0] :axis [0 0 1]}"),
+            "eye 0's :iris-uv is missing",
+        );
+        refused(
+            with_eye("{:centre [0 0 0] :axis [0 0 1] :iris-uv [0.5 0.5 0.1]}"),
+            "eye 0's :iris-uv is where the middle of its iris is",
+        );
+        // the iris in the texture
+        for given in [
+            "",
+            ":iris-uv-radius 0",
+            ":iris-uv-radius 2",
+            ":iris-uv-radius [0.1]",
+        ] {
+            refused(
+                format!("{{:eye {{:eyes [{one}] {given}}}}}"),
+                ":iris-uv-radius is how far the iris's edge is",
+            );
+        }
+        // its shape
+        refused(eye(":up [0 0 0]"), "an :eye's :up is a direction");
+        refused(eye(":up [0 0 -5]"), ":up runs along eye 0's :axis");
+        for key in ["radius", "iris-radius", "cornea-radius", "iris-depth"] {
+            for given in ["0", "-1", ":big", "[1]"] {
+                refused(
+                    eye(&format!(":{key} {given}")),
+                    &format!("an :eye's :{key} is"),
+                );
+            }
+        }
+        refused(
+            eye(":iris-radius 0.02"),
+            ":iris-radius (0.02) is under its :radius",
+        );
+        refused(
+            eye(":cornea-radius 0.005"),
+            "and its :cornea-radius (0.005)",
+        );
+        for given in ["0.9", "4", ":glass"] {
+            refused(
+                eye(&format!(":ior {given}")),
+                ":ior is the refractive index",
+            );
+        }
+        for given in ["-0.1", "1.5", "[0.3]"] {
+            refused(
+                eye(&format!(":pupil {given}")),
+                ":pupil is the pupil's radius",
+            );
         }
     }
 }

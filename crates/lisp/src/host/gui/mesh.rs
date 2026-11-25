@@ -694,6 +694,83 @@ pub enum Surface {
     /// share of it, times its texture's coverage as `:hair`'s. Shaded as `:hair`, along its own
     /// direction, across a cylinder's normal ([`strand_vertex`]).
     Strands,
+    /// An eye (ADR-796): an eyeball's mesh, opaque, its texels under the material's `cutoff`
+    /// not drawn (a clear shell over it), what is under its cornea found by optics in the eye's
+    /// own frame ([`Eye`], [`eye_seen`]) — the iris read where the sight line, bent at the
+    /// cornea, meets the iris's plane; the pupil drawn there; its highlights the cornea's.
+    /// Without an [`Eye`] it is a `:cutout`.
+    Eye,
+}
+
+/// How many eyes one `:eye` material may place: a pair in one mesh.
+pub const MAX_EYES: usize = 2;
+/// The refractive index an eye bends light by unless its material says: the cornea's.
+pub const DEFAULT_EYE_IOR: f32 = 1.376;
+/// An eye's sizes unless its material says, metres: a grown person's.
+pub const DEFAULT_EYE_RADIUS: f32 = 0.012;
+pub const DEFAULT_IRIS_RADIUS: f32 = 0.0059;
+pub const DEFAULT_CORNEA_RADIUS: f32 = 0.0078;
+pub const DEFAULT_IRIS_DEPTH: f32 = 0.0033;
+/// The pupil's radius, a share of the iris's, unless the material says.
+pub const DEFAULT_PUPIL: f32 = 0.35;
+/// How soft the pupil's edge is: it fades over this share of its radius either side.
+pub const PUPIL_EDGE: f32 = 0.08;
+/// Where, as a share of the iris's radius from the eye's axis, the cornea's own normal begins
+/// to give way to the mesh's, which it is at the limbus (1).
+pub const CORNEA_EDGE: f32 = 0.85;
+
+/// One eye of an `:eye` material, in its mesh's space at rest.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EyeAt {
+    /// The eyeball's centre.
+    pub centre: [f32; 3],
+    /// The unit direction it looks along, out through the pupil.
+    pub axis: [f32; 3],
+    /// Where the middle of its iris is in the base texture.
+    pub iris_uv: [f32; 2],
+}
+
+/// An `:eye` surface's optics (ADR-796): where its eyes are in the mesh at rest, and their
+/// shape. The vertices carry the frame into the world ([`eye_frame`]: each vertex's own
+/// skinning matrix moves its eye's centre, axis and up), so an eye that turns with a bone
+/// needs nothing told to it each frame. Lengths are in the mesh's units.
+///
+/// The model: the eyeball a sphere of `radius` about the centre; the limbus the circle of
+/// `iris_radius` on it about the axis; the cornea a sphere of `cornea_radius` through the
+/// limbus, bulging out along the axis; the iris a flat disc of `iris_radius` across the axis,
+/// `iris_depth` under the cornea's top. The base texture holds the iris as a disc: its middle
+/// at the eye's `iris_uv`, its edge `iris_uv_radius` away, u running to the right of a viewer
+/// the eye looks at whose up is `up`, v running down.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Eye {
+    /// One or two eyes ([`MAX_EYES`]).
+    pub eyes: Vec<EyeAt>,
+    /// The direction that is up in the iris's texture, in the mesh at rest.
+    pub up: [f32; 3],
+    pub radius: f32,
+    pub iris_radius: f32,
+    pub cornea_radius: f32,
+    pub iris_depth: f32,
+    /// The refractive index the cornea bends the sight line by (1: not at all).
+    pub ior: f32,
+    pub iris_uv_radius: f32,
+    /// The pupil's radius as a share of the iris's (0: none drawn).
+    pub pupil: f32,
+}
+
+impl Eye {
+    /// The eye a vertex at `rest` (the mesh's space, morphed, not yet skinned) belongs to: the
+    /// one whose centre is nearest. The shader's `eye_frame` picks the same.
+    pub fn nearest(&self, rest: [f32; 3]) -> usize {
+        let apart = |eye: &EyeAt| {
+            let offset = subtract(rest, eye.centre);
+            dot(offset, offset)
+        };
+        match (self.eyes.first(), self.eyes.get(1)) {
+            (Some(first), Some(second)) if apart(second) < apart(first) => 1,
+            _ => 0,
+        }
+    }
 }
 
 /// A draw's material: the fixed shading model's parameters.
@@ -741,6 +818,8 @@ pub struct Material {
     /// roughness, `strength` (0 … 1) of it: saliva on lips and teeth, the film over an eye.
     /// None: no coat. Not read by a `:hair` or `:strands` surface.
     pub coat: Option<[f32; 2]>,
+    /// An `:eye` surface's optics (ADR-796). Read by no other surface.
+    pub eye: Option<Eye>,
     /// The alpha under which a cutout texel is not drawn.
     pub cutoff: f32,
     /// Draw back faces too (their normals turned to face the viewer).
@@ -769,6 +848,7 @@ impl Default for Material {
             lobes: None,
             scatter: None,
             coat: None,
+            eye: None,
             cutoff: 0.5,
             double_sided: false,
             cast_shadow: true,
@@ -809,7 +889,18 @@ impl Material {
     pub fn detail_texture(&self) -> Option<u32> {
         match self.surface {
             Surface::Hair | Surface::Strands => None,
-            Surface::Skin | Surface::Standard | Surface::Cutout | Surface::Blend => self.detail,
+            Surface::Skin | Surface::Standard | Surface::Cutout | Surface::Blend | Surface::Eye => {
+                self.detail
+            }
+        }
+    }
+
+    /// Its eyes' optics (ADR-796): its `:eye`, on an `:eye` surface only. Both painters ask
+    /// here, so no other surface pays for a key it does not read.
+    pub fn eye_optics(&self) -> Option<&Eye> {
+        match self.surface {
+            Surface::Eye => self.eye.as_ref().filter(|eye| !eye.eyes.is_empty()),
+            _ => None,
         }
     }
 }
@@ -1737,6 +1828,166 @@ pub fn detail_specular(cavity: f32, amount: f32) -> f32 {
     (1.0 - amount * (1.0 - cavity)).clamp(0.0, 1.0)
 }
 
+/// An eye's frame in the world, as a vertex of an `:eye` surface carries it to its fragments
+/// (ADR-796): the eye's centre, its axis and its texture's up — neither made unit length, the
+/// axis's length being how much the model is scaled — and which eye of the material it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EyeFrame {
+    pub centre: [f32; 3],
+    pub axis: [f32; 3],
+    pub up: [f32; 3],
+    pub index: f32,
+}
+
+/// The frame of the eye a vertex at `rest` (the mesh's space, morphed) belongs to
+/// ([`Eye::nearest`]), moved by `matrix`, the one that skins and places that vertex. The
+/// shader's `eye_frame` is the same.
+pub fn eye_frame(eye: &Eye, matrix: &[f32; 16], rest: [f32; 3]) -> EyeFrame {
+    let index = eye.nearest(rest);
+    let Some(at) = eye.eyes.get(index) else {
+        return EyeFrame::default();
+    };
+    let centre = transform(matrix, at.centre, 1.0);
+    let axis = transform(matrix, at.axis, 0.0);
+    let up = transform(matrix, eye.up, 0.0);
+    EyeFrame {
+        centre: [centre[0], centre[1], centre[2]],
+        axis: [axis[0], axis[1], axis[2]],
+        up: [up[0], up[1], up[2]],
+        index: index as f32,
+    }
+}
+
+/// What a sight line meets in an eye ([`eye_seen`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EyeSeen {
+    /// Whether it passed through the cornea. When not, the rest is the surface's own.
+    pub through: bool,
+    /// Where the base texture is read: under the cornea, where the bent line meets the iris.
+    pub uv: [f32; 2],
+    /// How much of the pupil is there, 0 … 1.
+    pub pupil: f32,
+    /// The normal the highlights are reflected about: the cornea's, the mesh's at the limbus.
+    pub normal: [f32; 3],
+    /// How much of that normal is the cornea's, 0 … 1.
+    pub cornea: f32,
+    /// How sharply the reflecting surface curves there.
+    pub curvature: f32,
+}
+
+/// What the sight line through a fragment of an `:eye` surface meets (ADR-796): `world` the
+/// fragment, `view` the unit direction from it to the viewer, `uv`, `normal` and `curvature`
+/// the mesh's there, `frame` its eye's. The mesh only says which pixels the eye covers: the
+/// line through the fragment is met with the cornea's sphere on the viewer's side, bent there
+/// by Snell's law (`ior`), and followed to the iris's plane, and the texture is read at that
+/// point's place on the iris's disc. A line that misses the cornea's cap (the white) is left
+/// as the mesh has it. The shader's `eye_seen` is the same.
+pub fn eye_seen(
+    eye: &Eye,
+    frame: &EyeFrame,
+    world: [f32; 3],
+    view: [f32; 3],
+    uv: [f32; 2],
+    normal: [f32; 3],
+    curvature: f32,
+) -> EyeSeen {
+    let missed = EyeSeen {
+        through: false,
+        uv,
+        pupil: 0.0,
+        normal,
+        cornea: 0.0,
+        curvature,
+    };
+    let scale = dot(frame.axis, frame.axis).sqrt();
+    let Some(at) = eye.eyes.get((frame.index + 0.5) as usize) else {
+        return missed;
+    };
+    if scale <= 1e-12 {
+        return missed;
+    }
+    let axis = [0, 1, 2].map(|index| frame.axis[index] / scale);
+    let iris_radius = eye.iris_radius * scale;
+    let cornea_radius = eye.cornea_radius * scale;
+    let ball_radius = eye.radius * scale;
+    // heights along the axis from the eye's centre: the limbus's plane, the cornea's centre,
+    // the iris's plane
+    let limbus_height = (ball_radius * ball_radius - iris_radius * iris_radius)
+        .max(0.0)
+        .sqrt();
+    let cornea_height = limbus_height
+        - (cornea_radius * cornea_radius - iris_radius * iris_radius)
+            .max(0.0)
+            .sqrt();
+    let iris_height = cornea_height + cornea_radius - eye.iris_depth * scale;
+    // the fragment from the cornea's centre, and where the line through it toward the viewer
+    // leaves the cornea's sphere: where the sight line came in
+    let from_cornea =
+        [0, 1, 2].map(|index| world[index] - frame.centre[index] - axis[index] * cornea_height);
+    let along = dot(from_cornea, view);
+    let discriminant =
+        along * along - (dot(from_cornea, from_cornea) - cornea_radius * cornea_radius);
+    if discriminant < 0.0 {
+        return missed;
+    }
+    let travel = discriminant.sqrt() - along;
+    if travel < 0.0 {
+        return missed;
+    }
+    let entry = [0, 1, 2].map(|index| from_cornea[index] + view[index] * travel);
+    let entry_along = dot(entry, axis);
+    if entry_along + cornea_height < limbus_height {
+        return missed;
+    }
+    let cornea_normal = [0, 1, 2].map(|index| entry[index] / cornea_radius);
+    // Snell: the line going in is −view, the index 1 outside
+    let cosine = dot(cornea_normal, view);
+    let ratio = 1.0 / eye.ior.max(1.0);
+    let inside = (1.0 - ratio * ratio * (1.0 - cosine * cosine)).max(0.0);
+    let bend = ratio * cosine - inside.sqrt();
+    let bent = [0, 1, 2].map(|index| bend * cornea_normal[index] - ratio * view[index]);
+    let sinking = dot(bent, axis);
+    if sinking > -1e-6 {
+        return missed;
+    }
+    let reach = (iris_height - entry_along - cornea_height) / sinking;
+    // where it meets the iris's plane, from the eye's centre, in the texture's directions
+    let hit =
+        [0, 1, 2].map(|index| entry[index] + axis[index] * cornea_height + bent[index] * reach);
+    let lean = dot(frame.up, axis);
+    let up = normalize([0, 1, 2].map(|index| frame.up[index] - axis[index] * lean));
+    let right = cross(up, axis);
+    let across = dot(hit, right) / iris_radius;
+    let above = dot(hit, up) / iris_radius;
+    let rim = (across * across + above * above).sqrt();
+    let pupil = if eye.pupil > 0.0 {
+        1.0 - smoothstep(
+            eye.pupil * (1.0 - PUPIL_EDGE),
+            eye.pupil * (1.0 + PUPIL_EDGE),
+            rim,
+        )
+    } else {
+        0.0
+    };
+    // the cornea's normal, giving way to the mesh's toward the limbus
+    let entry_out = [0, 1, 2].map(|index| entry[index] - axis[index] * entry_along);
+    let entry_rim = dot(entry_out, entry_out).sqrt() / iris_radius;
+    let cornea = 1.0 - smoothstep(CORNEA_EDGE, 1.0, entry_rim);
+    EyeSeen {
+        through: true,
+        uv: [
+            at.iris_uv[0] + across * eye.iris_uv_radius,
+            at.iris_uv[1] - above * eye.iris_uv_radius,
+        ],
+        pupil,
+        normal: normalize(
+            [0, 1, 2].map(|index| normal[index] + (cornea_normal[index] - normal[index]) * cornea),
+        ),
+        cornea,
+        curvature: curvature + (1.0 / cornea_radius - curvature) * cornea,
+    }
+}
+
 /// The light leaving a surface point toward the eye, linear and before exposure: `base` its
 /// linear colour, `normal` its unit normal facing the viewer's side, `view` the unit
 /// direction from it to the eye, `world` where it is, `occlusion` how much of the ambient
@@ -1748,7 +1999,10 @@ pub fn detail_specular(cavity: f32, amount: f32) -> f32 {
 /// pixel resolves), `specular_kept` how much of the specular its detail tile's cavity leaves
 /// there ([`detail_specular`]; 1 without one, and not read by a `:hair` or `:strands`
 /// surface's highlights), `surface_normal` the surface's own unit normal, no normal map's (a
-/// reflection under it is faded out), and `emitters` the scene's [`emitter_plan`].
+/// reflection under it is faded out), `emitters` the scene's [`emitter_plan`], and
+/// `diffuse_normal` the unit normal the diffuse and the ambient light fall on: `normal` itself
+/// for every surface but an `:eye` under its cornea (ADR-796), whose highlights are the
+/// cornea's (`normal`) while the light falls on what is under it.
 ///
 /// Every surface but `:hair` and `:strands` also reflects its surroundings (ADR-795), a lobe
 /// of its `:lobes` at a time and then its `:coat`: the ambient light's radiance along the
@@ -1781,8 +2035,9 @@ pub fn shade(
     specular_kept: f32,
     surface_normal: [f32; 3],
     emitters: &EmitterPlan,
+    diffuse_normal: [f32; 3],
 ) -> [f32; 3] {
-    let ambient = ambient(scene, normal);
+    let ambient = ambient(scene, diffuse_normal);
     let skin = (material.surface == Surface::Skin)
         .then(|| (skin_table(), curvature * material.scatter_scale()));
     let mut out = [0, 1, 2].map(|channel| base[channel] * ambient[channel] * occlusion);
@@ -1802,12 +2057,14 @@ pub fn shade(
     for (index, light) in scene.lights.iter().take(MAX_LIGHTS).enumerate() {
         let (to_light, arriving) = light_arrival(light, world);
         let seen = visibility.get(index).copied().unwrap_or(1.0);
-        let facing = dot(normal, to_light);
+        let facing = dot(diffuse_normal, to_light);
         // the light past the terminator is light under the skin, which the body's own shadow
         // there would cut off in a hard line: the shadow fades out of what the scattering
         // moved toward the terminator (ADR-793)
         let scattered_seen = 1.0 + (seen - 1.0) * smoothstep(0.0, 0.3, facing);
         let lambert = facing.max(0.0);
+        // the highlights' own: the reflecting normal's (the same number but under a cornea)
+        let mirror_lambert = dot(normal, to_light).max(0.0);
         let half = normalize([
             to_light[0] + view[0],
             to_light[1] + view[1],
@@ -1856,7 +2113,7 @@ pub fn shade(
         } else {
             let highlight = fresnel(f0, dot(view, half))
                 * specular_lobes(material, dot(normal, half), reflection_turn)
-                * lambert
+                * mirror_lambert
                 * specular_kept;
             match coat {
                 Some([strength, roughness]) => {
@@ -1864,7 +2121,7 @@ pub fn shade(
                         + strength
                             * fresnel(COAT_F0, dot(view, half))
                             * specular_lobe(roughness, dot(normal, half), reflection_turn)
-                            * lambert
+                            * mirror_lambert
                 }
                 None => highlight,
             }
@@ -3109,6 +3366,8 @@ struct ClipVertex {
     uv: [f32; 2],
     /// How sharply the mesh curves here ([`Mesh::curvature`]).
     curvature: f32,
+    /// Its eye's frame, on an `:eye` surface ([`eye_frame`]); zeros on any other.
+    eye: EyeFrame,
 }
 
 fn lerp_vertex(from: &ClipVertex, to: &ClipVertex, amount: f32) -> ClipVertex {
@@ -3129,6 +3388,10 @@ fn lerp_vertex(from: &ClipVertex, to: &ClipVertex, amount: f32) -> ClipVertex {
     );
     mix_n(&from.uv, &to.uv, &mut vertex.uv);
     vertex.curvature = mix(from.curvature, to.curvature);
+    mix_n(&from.eye.centre, &to.eye.centre, &mut vertex.eye.centre);
+    mix_n(&from.eye.axis, &to.eye.axis, &mut vertex.eye.axis);
+    mix_n(&from.eye.up, &to.eye.up, &mut vertex.eye.up);
+    vertex.eye.index = mix(from.eye.index, to.eye.index);
     vertex
 }
 
@@ -3389,7 +3652,8 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
             });
             let mut alpha = texel[3] * material.color[3];
             match material.surface {
-                Surface::Cutout => {
+                // (an eye's clear shell is cut out the same way: ADR-796)
+                Surface::Cutout | Surface::Eye => {
                     if alpha < material.cutoff {
                         return;
                     }
@@ -3436,7 +3700,7 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                 }
                 Surface::Skin | Surface::Standard => alpha = 1.0,
             }
-            let base = [
+            let mut base = [
                 srgb_to_linear(texel[0]) * material.color[0],
                 srgb_to_linear(texel[1]) * material.color[1],
                 srgb_to_linear(texel[2]) * material.color[2],
@@ -3493,6 +3757,42 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     tangent[1] * local[0] + sign * bitangent[1] * local[1] + normal[1] * local[2],
                     tangent[2] * local[0] + sign * bitangent[2] * local[1] + normal[2] * local[2],
                 ]);
+            }
+            let eye = scene.eye;
+            let view = normalize([eye[0] - world[0], eye[1] - world[1], eye[2] - world[2]]);
+            let mut curvature = corners[0].curvature * weights[0]
+                + corners[1].curvature * weights[1]
+                + corners[2].curvature * weights[2];
+            // an eye (ADR-796): the mesh says only which pixels it covers. Under the cornea the
+            // texture is read where the bent sight line meets the iris, the pupil is drawn
+            // there, and the highlights are the cornea's; the light still falls on the
+            // surface's own normal
+            let diffuse_normal = normal;
+            let mut mirror_surface = surface_normal;
+            if let Some(optics) = material.eye_optics() {
+                let frame = EyeFrame {
+                    centre: blend3(|vertex| vertex.eye.centre),
+                    axis: blend3(|vertex| vertex.eye.axis),
+                    up: blend3(|vertex| vertex.eye.up),
+                    index: corners[0].eye.index * weights[0]
+                        + corners[1].eye.index * weights[1]
+                        + corners[2].eye.index * weights[2],
+                };
+                let seen = eye_seen(optics, &frame, world, view, uv, normal, curvature);
+                if seen.through {
+                    let under = context.base_texture.as_ref().map_or([1.0; 4], |texture| {
+                        sample_lod(texture, seen.uv[0], seen.uv[1], base_lod)
+                    });
+                    let kept = 1.0 - seen.pupil;
+                    base = [
+                        srgb_to_linear(under[0]) * material.color[0] * kept,
+                        srgb_to_linear(under[1]) * material.color[1] * kept,
+                        srgb_to_linear(under[2]) * material.color[2] * kept,
+                    ];
+                    normal = seen.normal;
+                    mirror_surface = seen.normal;
+                    curvature = seen.curvature;
+                }
             }
             let occlusion = context
                 .occlusion_texture
@@ -3557,8 +3857,6 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     world,
                     surface_normal,
                 );
-            let eye = scene.eye;
-            let view = normalize([eye[0] - world[0], eye[1] - world[1], eye[2] - world[2]]);
             let lit = tone(
                 shade(
                     scene,
@@ -3570,12 +3868,11 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     occlusion,
                     &visibility,
                     strand,
-                    corners[0].curvature * weights[0]
-                        + corners[1].curvature * weights[1]
-                        + corners[2].curvature * weights[2],
+                    curvature,
                     specular_kept,
-                    surface_normal,
+                    mirror_surface,
                     context.emitters,
+                    diffuse_normal,
                 ),
                 scene.exposure,
             );
@@ -3663,6 +3960,7 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
     let mut positions = mesh.positions.clone();
     let mut normals = mesh.normals.clone();
     add_morphs(&mesh.morphs, &draw.morphs, &mut positions, &mut normals);
+    let eye = draw.material.eye_optics();
     (0..mesh.positions.len())
         .map(|index| {
             let position = positions[index];
@@ -3695,6 +3993,7 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
                     tangent: [direction[0], direction[1], direction[2], coverage],
                     uv,
                     curvature: 0.0,
+                    eye: EyeFrame::default(),
                 };
             }
             ClipVertex {
@@ -3707,6 +4006,8 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
                 },
                 uv: mesh.uvs[index],
                 curvature: mesh.curvature[index],
+                // an eye's frame goes with its vertices, moved as they are (ADR-796)
+                eye: eye.map_or_else(EyeFrame::default, |eye| eye_frame(eye, &matrix, position)),
             }
         })
         .collect()
@@ -3741,7 +4042,7 @@ fn each_clipped_triangle(
 }
 
 /// The depth map of shadow `view`: every draw of `posed` that casts a shadow, rasterised as
-/// the light sees it, both faces, a `:cutout`, `:blend` or `:hair` surface only where its alpha
+/// the light sees it, both faces, a `:cutout`, `:blend`, `:hair` or `:eye` surface only where its alpha
 /// reaches its `cutoff` — `resolution`² depths, row 0 the top, 1 where nothing is.
 fn render_shadow_map<'t>(
     view: &ShadowView,
@@ -3757,7 +4058,7 @@ fn render_shadow_map<'t>(
         }
         let alpha_tested = matches!(
             material.surface,
-            Surface::Cutout | Surface::Blend | Surface::Hair | Surface::Strands
+            Surface::Cutout | Surface::Blend | Surface::Hair | Surface::Strands | Surface::Eye
         );
         let base_texture = if alpha_tested {
             material.base.and_then(textures)
@@ -4162,6 +4463,7 @@ mod tests {
             1.0,
             [0.0, 0.0, 1.0],
             &emitter_plan(&lit),
+            [0.0, 0.0, 1.0],
         )
     }
 
@@ -4692,6 +4994,7 @@ mod tests {
                 1.0,
                 normal,
                 &emitter_plan(&lit),
+                normal,
             )[0]
         };
         let across = shine([1.0, 0.0, 0.0]);
@@ -4748,6 +5051,7 @@ mod tests {
             1.0,
             [0.0, 0.0, 1.0],
             &emitter_plan(&zero),
+            [0.0, 0.0, 1.0],
         );
         assert!(lit.iter().all(|channel| channel.is_finite()));
     }
@@ -4779,6 +5083,7 @@ mod tests {
             1.0,
             normal,
             &emitter_plan(&lit),
+            normal,
         )[0]
     }
 
@@ -5425,6 +5730,7 @@ mod tests {
                 1.0,
                 normal,
                 &emitter_plan(&sky),
+                normal,
             );
             let by_sh = shade(
                 &sh,
@@ -5440,6 +5746,7 @@ mod tests {
                 1.0,
                 normal,
                 &emitter_plan(&sh),
+                normal,
             );
             for channel in 0..3 {
                 assert!(
@@ -5482,6 +5789,7 @@ mod tests {
             1.0,
             normal,
             &emitter_plan(&lit),
+            normal,
         )[0]
     }
 
@@ -5945,6 +6253,7 @@ mod tests {
                 kept,
                 normal,
                 &emitter_plan(&lit),
+                normal,
             )
         };
         assert_eq!(shaded(&shiny, 0.0), shaded(&matte, 1.0));
@@ -6045,6 +6354,7 @@ mod tests {
             tangent: [1.0, 0.0, 0.0, 1.0],
             uv: [u, v],
             curvature: 0.0,
+            eye: EyeFrame::default(),
         };
         let corners = [
             corner(-1.0, -1.0, 0.0, 0.0),
@@ -6271,6 +6581,7 @@ mod tests {
             1.0,
             normal,
             &emitter_plan(lit),
+            normal,
         )
     }
 
@@ -6557,6 +6868,7 @@ mod tests {
                 1.0,
                 normal,
                 plan,
+                normal,
             )
         };
         let mut bare = unlit.clone();
@@ -6587,6 +6899,7 @@ mod tests {
                 1.0,
                 surface,
                 &emitter_plan(&bare),
+                tilted,
             )[0]
         };
         near(mapped(normal), kept * mapped(tilted));
@@ -6921,10 +7234,444 @@ mod tests {
                 1.0,
                 normal,
                 &emitter_plan(&lit),
+                normal,
             )[0]
         };
         near(highlight(0.0), 0.04 * (lobe_exponent(0.0) + 8.0) / 8.0);
         near(highlight(1.0), 0.04 * (RESOLVED_EXPONENT + 8.0) / 8.0);
         near(highlight(0.04), 0.04 * (resolved_at(0.01) + 8.0) / 8.0);
+    }
+
+    // --- an eye (ADR-796) ---------------------------------------------------------------------
+
+    /// A grown person's eye at the origin looking along +z, its iris a disc a quarter of the
+    /// texture wide about the texture's middle.
+    fn an_eye() -> Eye {
+        Eye {
+            eyes: vec![EyeAt {
+                centre: [0.0; 3],
+                axis: [0.0, 0.0, 1.0],
+                iris_uv: [0.5, 0.5],
+            }],
+            up: [0.0, 1.0, 0.0],
+            radius: DEFAULT_EYE_RADIUS,
+            iris_radius: DEFAULT_IRIS_RADIUS,
+            cornea_radius: DEFAULT_CORNEA_RADIUS,
+            iris_depth: DEFAULT_IRIS_DEPTH,
+            ior: DEFAULT_EYE_IOR,
+            iris_uv_radius: 0.25,
+            pupil: DEFAULT_PUPIL,
+        }
+    }
+
+    /// That eye's frame, unmoved.
+    fn at_rest() -> EyeFrame {
+        EyeFrame {
+            centre: [0.0; 3],
+            axis: [0.0, 0.0, 1.0],
+            up: [0.0, 1.0, 0.0],
+            index: 0.0,
+        }
+    }
+
+    /// How far along its axis `eye`'s cornea's centre and its iris's plane are from its centre.
+    fn heights(eye: &Eye) -> (f32, f32) {
+        let limbus = (eye.radius.powi(2) - eye.iris_radius.powi(2)).sqrt();
+        let cornea = limbus - (eye.cornea_radius.powi(2) - eye.iris_radius.powi(2)).sqrt();
+        (cornea, cornea + eye.cornea_radius - eye.iris_depth)
+    }
+
+    /// What is seen at `world` from the direction `view`, the mesh there flat on to +y with
+    /// the texture's corner.
+    fn seen_at(eye: &Eye, frame: &EyeFrame, world: [f32; 3], view: [f32; 3]) -> EyeSeen {
+        eye_seen(
+            eye,
+            frame,
+            world,
+            normalize(view),
+            [0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            7.0,
+        )
+    }
+
+    #[test]
+    fn a_sight_line_down_an_eyes_axis_is_not_bent_and_meets_the_middle_of_the_pupil() {
+        let eye = an_eye();
+        let (_, iris) = heights(&eye);
+        let seen = seen_at(&eye, &at_rest(), [0.0, 0.0, iris], [0.0, 0.0, 1.0]);
+        assert!(seen.through);
+        assert_eq!(seen.uv, [0.5, 0.5]);
+        assert_eq!(seen.pupil, 1.0);
+        // the highlights are the cornea's there: its normal, its curve, none of the mesh's
+        assert_eq!(seen.cornea, 1.0);
+        near(seen.normal[2], 1.0);
+        near(seen.curvature, 1.0 / DEFAULT_CORNEA_RADIUS);
+        // and wherever along that line the mesh happens to be: it only says which pixel
+        let deeper = seen_at(&eye, &at_rest(), [0.0, 0.0, iris - 0.003], [0.0, 0.0, 1.0]);
+        assert_eq!(deeper.uv, [0.5, 0.5]);
+    }
+
+    #[test]
+    fn the_cornea_bends_a_sight_line_as_snell_says_and_shows_the_iris_larger() {
+        // a line parallel to the axis, 3 mm off it, meets the cornea where its normal leans
+        // asin(x / R) from the axis, is bent to asin(sin θ / n) from that normal, and so
+        // crosses to the iris's plane leaning θ − θ′ toward the axis
+        let eye = an_eye();
+        let (cornea, iris) = heights(&eye);
+        let off_axis = 0.003f32;
+        let leaning = (off_axis / eye.cornea_radius).asin();
+        let bent = (leaning.sin() / eye.ior).asin();
+        let entry = cornea + eye.cornea_radius * leaning.cos();
+        let met = off_axis - (entry - iris) * (leaning - bent).tan();
+        let seen = seen_at(&eye, &at_rest(), [off_axis, 0.0, iris], [0.0, 0.0, 1.0]);
+        assert!(seen.through);
+        near(seen.uv[0], 0.5 + met / eye.iris_radius * eye.iris_uv_radius);
+        near(seen.uv[1], 0.5);
+        // nearer the iris's middle than where the straight line would have met it: larger
+        assert!(met < off_axis * 0.97, "{met}");
+        // up in the world is up in the texture, whose v runs down
+        let above = seen_at(&eye, &at_rest(), [0.0, off_axis, iris], [0.0, 0.0, 1.0]);
+        near(
+            above.uv[1],
+            0.5 - met / eye.iris_radius * eye.iris_uv_radius,
+        );
+        near(above.uv[0], 0.5);
+    }
+
+    #[test]
+    fn an_index_of_one_bends_nothing_and_from_the_side_the_iris_is_seen_nearer_the_viewer() {
+        let eye = an_eye();
+        let (_, iris) = heights(&eye);
+        let aside = [0.6, 0.0, 0.8];
+        // unbent, the line through a point of the iris's plane meets the iris there
+        let plain = Eye {
+            ior: 1.0,
+            ..an_eye()
+        };
+        let seen = seen_at(&plain, &at_rest(), [0.002, 0.001, iris], aside);
+        assert!(seen.through);
+        near(seen.uv[0], 0.5 + 0.002 / eye.iris_radius * 0.25);
+        near(seen.uv[1], 0.5 - 0.001 / eye.iris_radius * 0.25);
+        // bent, the line through the iris's middle goes down more steeply and meets the iris
+        // on the viewer's side of the middle: the middle itself is seen further from the
+        // viewer than it lies, the iris floating up toward the cornea, not painted on a ball
+        let middle = seen_at(&eye, &at_rest(), [0.0, 0.0, iris], aside);
+        assert!(middle.through);
+        assert!(middle.uv[0] > 0.5 + 0.01, "{:?}", middle.uv);
+        near(middle.uv[1], 0.5);
+    }
+
+    #[test]
+    fn the_white_of_an_eye_is_left_as_its_mesh_has_it() {
+        // a point of the eyeball 60° round from the axis, seen along its own normal: the line
+        // never meets the cornea
+        let eye = an_eye();
+        let on_the_white = [eye.radius * 0.866, 0.0, eye.radius * 0.5];
+        let seen = seen_at(&eye, &at_rest(), on_the_white, on_the_white);
+        assert_eq!(
+            seen,
+            EyeSeen {
+                through: false,
+                uv: [0.0, 0.0],
+                pupil: 0.0,
+                normal: [0.0, 1.0, 0.0],
+                cornea: 0.0,
+                curvature: 7.0,
+            }
+        );
+        // and a frame with no length (a vertex of another surface) is no eye at all
+        let nowhere = EyeFrame::default();
+        assert!(!seen_at(&eye, &nowhere, [0.0; 3], [0.0, 0.0, 1.0]).through);
+    }
+
+    #[test]
+    fn the_pupil_is_a_soft_disc_its_share_of_the_iris_wide_and_none_at_zero() {
+        let (_, iris) = heights(&an_eye());
+        let open = Eye {
+            ior: 1.0,
+            pupil: 0.5,
+            ..an_eye()
+        };
+        let pupil_at = |eye: &Eye, share: f32| {
+            let world = [share * DEFAULT_IRIS_RADIUS, 0.0, iris];
+            seen_at(eye, &at_rest(), world, [0.0, 0.0, 1.0]).pupil
+        };
+        assert_eq!(pupil_at(&open, 0.0), 1.0);
+        assert_eq!(pupil_at(&open, 0.5 * (1.0 - PUPIL_EDGE) - 0.01), 1.0);
+        near(pupil_at(&open, 0.5), 0.5);
+        assert_eq!(pupil_at(&open, 0.5 * (1.0 + PUPIL_EDGE) + 0.01), 0.0);
+        let none = Eye {
+            pupil: 0.0,
+            ..open.clone()
+        };
+        assert_eq!(pupil_at(&none, 0.0), 0.0);
+    }
+
+    #[test]
+    fn the_corneas_normal_gives_way_to_the_meshs_at_the_limbus() {
+        let eye = Eye {
+            ior: 1.0,
+            ..an_eye()
+        };
+        let (_, iris) = heights(&eye);
+        let cornea_at = |share: f32| {
+            let world = [share * DEFAULT_IRIS_RADIUS, 0.0, iris];
+            seen_at(&eye, &at_rest(), world, [0.0, 0.0, 1.0])
+        };
+        assert_eq!(cornea_at(CORNEA_EDGE - 0.02).cornea, 1.0);
+        let edge = cornea_at(0.999);
+        assert!(edge.through);
+        assert!(edge.cornea < 1e-3, "{}", edge.cornea);
+        // … where the normal is the mesh's again, and the curve the mesh's
+        assert!(edge.normal[1] > 0.999, "{:?}", edge.normal);
+        assert!((edge.curvature - 7.0).abs() < 0.2, "{}", edge.curvature);
+        // past it the line misses the cap
+        assert!(!cornea_at(1.01).through);
+        let between = cornea_at(0.93).cornea;
+        assert!(between > 0.1 && between < 0.9, "{between}");
+    }
+
+    #[test]
+    fn an_eyes_frame_goes_with_its_vertices_and_a_scaled_model_scales_the_eye() {
+        // two eyes; a matrix that doubles the model and moves it
+        let pair = Eye {
+            eyes: vec![
+                EyeAt {
+                    centre: [-0.03, 0.0, 0.0],
+                    axis: [0.0, 0.0, 1.0],
+                    iris_uv: [0.3, 0.7],
+                },
+                EyeAt {
+                    centre: [0.03, 0.0, 0.0],
+                    axis: [0.0, 0.0, 1.0],
+                    iris_uv: [0.7, 0.3],
+                },
+            ],
+            ior: 1.0,
+            ..an_eye()
+        };
+        let mut matrix = identity();
+        (matrix[0], matrix[5], matrix[10]) = (2.0, 2.0, 2.0);
+        (matrix[12], matrix[13], matrix[14]) = (1.0, 2.0, 3.0);
+        // a vertex belongs to the eye whose centre it is nearest at rest
+        assert_eq!(eye_frame(&pair, &matrix, [-0.02, 0.01, 0.0]).index, 0.0);
+        let frame = eye_frame(&pair, &matrix, [0.025, 0.01, 0.0]);
+        assert_eq!(
+            frame,
+            EyeFrame {
+                centre: [1.06, 2.0, 3.0],
+                axis: [0.0, 0.0, 2.0],
+                up: [0.0, 2.0, 0.0],
+                index: 1.0,
+            }
+        );
+        // the same point of the iris, twice as far from the moved centre, reads the same
+        // texel: the second eye's
+        let (_, iris) = heights(&pair);
+        let local = [0.002, 0.001, iris];
+        let world = [0, 1, 2].map(|axis| frame.centre[axis] + 2.0 * local[axis]);
+        let seen = seen_at(&pair, &frame, world, [0.6, 0.0, 0.8]);
+        assert!(seen.through);
+        near(seen.uv[0], 0.7 + 0.002 / DEFAULT_IRIS_RADIUS * 0.25);
+        near(seen.uv[1], 0.3 - 0.001 / DEFAULT_IRIS_RADIUS * 0.25);
+        near(seen.curvature, 0.5 / DEFAULT_CORNEA_RADIUS);
+        // one eye is every vertex's
+        assert_eq!(an_eye().nearest([9.0, 9.0, 9.0]), 0);
+    }
+
+    #[test]
+    fn the_highlights_follow_the_reflecting_normal_and_the_light_falls_on_the_other() {
+        let mut lit = scene(draw());
+        lit.lights = vec![Light::directional([0.0, 0.0, 1.0], [1.0; 3])];
+        let toward = [0.0, 0.0, -1.0];
+        let leaning = normalize([0.3, 0.0, -1.0]);
+        let shaded = |material: &Material, base: f32, normal: [f32; 3], diffuse: [f32; 3]| {
+            shade(
+                &lit,
+                material,
+                [base; 3],
+                normal,
+                toward,
+                [0.0; 3],
+                1.0,
+                &[],
+                [0.0; 3],
+                0.0,
+                1.0,
+                normal,
+                &emitter_plan(&lit),
+                diffuse,
+            )
+        };
+        // no specular: only the normal the light falls on matters
+        let matte = Material {
+            specular: 0.0,
+            ..Material::default()
+        };
+        assert_eq!(
+            shaded(&matte, 1.0, toward, leaning),
+            shaded(&matte, 1.0, leaning, leaning)
+        );
+        assert!(shaded(&matte, 1.0, toward, leaning)[0] < shaded(&matte, 1.0, toward, toward)[0]);
+        // a black surface: only the reflecting normal matters
+        let glossy = Material {
+            roughness: 0.3,
+            coat: Some([1.0, 0.1]),
+            ..Material::default()
+        };
+        assert_eq!(
+            shaded(&glossy, 0.0, toward, leaning),
+            shaded(&glossy, 0.0, toward, toward)
+        );
+        assert!(shaded(&glossy, 0.0, toward, toward)[0] > shaded(&glossy, 0.0, leaning, toward)[0]);
+    }
+
+    /// A 64-texel texture for an eye: red, a blue ring 0.15 … 0.25 from its middle (the outer
+    /// two fifths of an iris whose edge is 0.25 away), clear where u is more than 0.3 from the
+    /// middle.
+    fn eye_texture() -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(64 * 64 * 4);
+        for row in 0..64 {
+            for column in 0..64 {
+                let u = (column as f32 + 0.5) / 64.0 - 0.5;
+                let v = (row as f32 + 0.5) / 64.0 - 0.5;
+                let from_middle = (u * u + v * v).sqrt();
+                let ring = (0.15..0.25).contains(&from_middle);
+                let alpha = if u.abs() > 0.3 { 0 } else { 255 };
+                rgba.extend_from_slice(&[
+                    if ring { 0 } else { 255 },
+                    0,
+                    if ring { 255 } else { 0 },
+                    alpha,
+                ]);
+            }
+        }
+        rgba
+    }
+
+    /// A square ±0.8 across the middle of the picture at z = 0.5, its texture [`eye_texture`],
+    /// drawn with `material`: an eye a hundred times life size behind it looks at the viewer,
+    /// its iris in the square's plane.
+    fn paint_eye(material: Material) -> Vec<u8> {
+        let mesh = Arc::new(quad([
+            [-0.8, -0.8, 0.5],
+            [0.8, -0.8, 0.5],
+            [0.8, 0.8, 0.5],
+            [-0.8, 0.8, 0.5],
+        ]));
+        let mut seen = scene(Draw {
+            material: Material {
+                base: Some(5),
+                double_sided: true,
+                specular: 0.0,
+                ..material
+            },
+            ..draw()
+        });
+        // the viewer on the side the square faces, the light coming from there
+        seen.eye = [0.0, 0.0, 10.0];
+        seen.lights = vec![Light::directional([0.0, 0.0, -1.0], [1.0; 3])];
+        let rgba = eye_texture();
+        let (_, _, painted) = rasterize(&seen, &|_| Some(mesh.clone()), &|handle| {
+            (handle == 5).then_some(TextureRef {
+                w: 64,
+                h: 64,
+                rgba: &rgba,
+                levels: &[],
+            })
+        });
+        painted
+    }
+
+    /// The eye [`paint_eye`]'s square stands for.
+    fn a_big_eye() -> Eye {
+        let big = Eye {
+            radius: 1.2,
+            iris_radius: 0.59,
+            cornea_radius: 0.78,
+            iris_depth: 0.33,
+            ..an_eye()
+        };
+        let (_, iris) = heights(&big);
+        Eye {
+            eyes: vec![EyeAt {
+                centre: [0.0, 0.0, 0.5 - iris],
+                axis: [0.0, 0.0, 1.0],
+                iris_uv: [0.5, 0.5],
+            }],
+            ..big
+        }
+    }
+
+    #[test]
+    fn a_painted_eye_reads_its_iris_through_the_cornea_draws_its_pupil_and_cuts_its_shell_out() {
+        let pixel = |rgba: &[u8], column: usize, row: usize| {
+            let at = (row * 16 + column) * 4;
+            [rgba[at], rgba[at + 1], rgba[at + 2], rgba[at + 3]]
+        };
+        let cutout = paint_eye(Material {
+            surface: Surface::Cutout,
+            ..Material::default()
+        });
+        let eye = paint_eye(Material {
+            surface: Surface::Eye,
+            eye: Some(a_big_eye()),
+            ..Material::default()
+        });
+        // the middle: the pupil, black, where the texture itself is red
+        assert_eq!(pixel(&eye, 8, 8), [0, 0, 0, 255]);
+        assert!(pixel(&cutout, 8, 8)[0] > 100);
+        // 0.44 from the middle, inside the cornea: the iris's outer ring, which the square's
+        // own coordinates put elsewhere (0.27 from the texture's middle, red)
+        for row in [4, 11] {
+            let [red, _, blue, alpha] = pixel(&eye, 8, row);
+            assert!(
+                blue > 100 && red < 40 && alpha == 255,
+                "row {row}: {red} {blue}"
+            );
+            assert!(pixel(&cutout, 8, row)[0] > 100 && pixel(&cutout, 8, row)[2] < 40);
+        }
+        // 0.69 from the middle, past the cornea: the white, the very bytes a cutout draws
+        for row in [2, 13] {
+            assert_eq!(pixel(&eye, 8, row), pixel(&cutout, 8, row));
+            assert_eq!(pixel(&eye, 8, row)[3], 255);
+        }
+        // the clear texels are not drawn, in either
+        for column in [2, 3, 12, 13] {
+            assert_eq!(pixel(&eye, column, 8)[3], 0);
+            assert_eq!(pixel(&cutout, column, 8)[3], 0);
+        }
+        // an `:eye` surface without optics is a cutout
+        let bare = paint_eye(Material {
+            surface: Surface::Eye,
+            ..Material::default()
+        });
+        assert_eq!(bare, cutout);
+    }
+
+    #[test]
+    fn no_other_surface_reads_an_eye() {
+        // the same bytes with the optics as without, whatever the surface
+        for surface in [
+            Surface::Skin,
+            Surface::Standard,
+            Surface::Cutout,
+            Surface::Blend,
+            Surface::Hair,
+            Surface::Strands,
+        ] {
+            let plain = Material {
+                surface,
+                coat: Some([1.0, 0.1]),
+                ..Material::default()
+            };
+            let with_optics = Material {
+                eye: Some(a_big_eye()),
+                ..plain.clone()
+            };
+            assert!(with_optics.eye_optics().is_none());
+            assert_eq!(paint_eye(with_optics), paint_eye(plain), "{surface:?}");
+        }
     }
 }

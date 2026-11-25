@@ -83,6 +83,15 @@ travels under the skin (default 1: human skin on a mesh in metres; 0: none), and
 an error raised by `gui/draw`; `:wrap` is gone and ignored. Skin no longer turns red-brown at
 grazing angles.
 
+**Added: a headless window the GPU draws, `BROOD_GUI_HEADLESS=gpu` (ADR-798).** A program that
+opens a window gets none, as under `=paint`, but its frames are drawn by the GPU painter (the
+pipelines and passes a window's frames go through) into a texture of the window's size on the
+machine's own GPU: no display server, compositor, focus or unlocked screen. `gui/capture` reads
+that frame back and `BROOD_GUI_DUMP` writes every painted one, as from a window. The adapter is
+named once on stderr; with no hardware GPU (or without `gui-gpu`) `gui/open` fails rather than
+hand back the CPU painter's picture (`BROOD_GUI_GPU=1` accepts a software adapter, as a window
+does). Nothing is presented, so nothing waits for a vertical blank, and no input arrives.
+
 **Added: a detail tile for materials (ADR-797).** A material's `:detail` is a small texture of
 fine relief (pores, a weave, a grain) read `:detail-scale` times across the UV square, for what
 a map baked over a whole body is too coarse to hold: red and green a tangent-space normal's x
@@ -109,15 +118,6 @@ grazing reflection is the rim now; a `:roughness` under about 0.149 is no longer
 0.149 (the exponent's ceiling of 4096 is lifted, held to what a pixel resolves on a curved
 surface).
 
-## v0.59.0 — shadow like other languages, named fn, smooth textures, 3D meshes
-
-**Added: smooth textures (ADR-783).** `(gui/texture id image {:filter :smooth})` — and the same
-options map on the `rgba w h` form and on `editor/frontend/display-texture` — makes a texture's
-sprites filter bilinearly, so a painted or photographic sprite drawn scaled or turned keeps
-clean edges; edges fade by coverage, never fringing dark. `:nearest` stays the default, for
-pixel art. Both window painters and the browser page honour it. **Breaking:** a display map's
-`:texture` entry is now called `(f tex rgba w h filter)`, the attach protocol's `[:texture …]`
-message carries the filter, and `%gui-texture` takes it as a sixth argument.
 **Added: an eye surface (ADR-796).** `:surface :eye` draws an eyeball's mesh by optics. Its
 material's `:eye {:eyes [{:centre [x y z] :axis [x y z] :iris-uv [u v]} …] :iris-uv-radius r}`
 says where its one or two eyes are in the mesh at rest and where each iris is in the texture;
@@ -130,6 +130,15 @@ white is drawn as a `:cutout` is. `:radius`, `:iris-radius`, `:cornea-radius`, `
 and `:up` shape it (a grown person's by default). A malformed `:eye`, or an `:eye` surface
 without one, is an error raised by `gui/draw`. Every other surface draws as before.
 
+## v0.59.0 — shadow like other languages, named fn, smooth textures, 3D meshes
+
+**Added: smooth textures (ADR-783).** `(gui/texture id image {:filter :smooth})` — and the same
+options map on the `rgba w h` form and on `editor/frontend/display-texture` — makes a texture's
+sprites filter bilinearly, so a painted or photographic sprite drawn scaled or turned keeps
+clean edges; edges fade by coverage, never fringing dark. `:nearest` stays the default, for
+pixel art. Both window painters and the browser page honour it. **Breaking:** a display map's
+`:texture` entry is now called `(f tex rgba w h filter)`, the attach protocol's `[:texture …]`
+message carries the filter, and `%gui-texture` takes it as a sixth argument.
 
 **Added: 3D meshes in a frame (ADR-786).** `(gui/mesh id spec)` uploads a skinned, morphable mesh
 as the little-endian attribute bytes a glTF buffer holds (positions, normals, uvs, tangents,
