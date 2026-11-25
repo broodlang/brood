@@ -34,22 +34,26 @@ library's bytes are quarantined after a crash.
     (native/open \"native/target/release/libskeleton.so\")   ;~> an int handle, for native/call"
   (%native-open path))
 
-(defn call (lib:int name:string input out-count:int)
-  "Call entry point `name` of `lib` with `input` (a vector or list of numbers, passed as
-doubles — or of vectors of numbers, flattened one level in order, so sixteen-float
-matrices go in as they are) and `out-count` doubles for it to fill; answers them as a vector
-of floats. A nonzero return from the kernel raises an error naming it. Runs inline — for calls short
-enough not to hold a scheduler worker; see `call-blocking`.
+(defn call (lib:int name:string input out)
+  "Call entry point `name` of `lib` with `input` passed as doubles, and answer the doubles it
+writes. `input` is a vector or list of numbers; or of vectors of numbers, flattened one level
+in order (sixteen-float matrices go in as they are); or `{:records rs :keys ks}`, each record
+(a map or a `defrecord` value) in `rs` contributing its values under `ks` in order, each a
+number or a vector of numbers — a pose crosses with no gathering in Brood (ADR-810). `out` is
+an int, for a flat vector of that many floats, or `[count size]`, for `count` vectors of
+`size` floats. A nonzero return from the kernel raises an error naming it. Runs inline — for
+calls short enough not to hold a scheduler worker; see `call-blocking`.
 
-    (native/call lib \"scale\" [1.0 2.0] 2)   ;~> [2.0 4.0], for a kernel that doubles each input"
-  (%native-call lib name input out-count))
+    (native/call lib \"scale\" [1.0 2.0] 2)   ;~> [2.0 4.0], for a kernel that doubles each input
+    (native/call lib \"world-matrices\" {:records pose :keys [:translation :rotation :scale]} [176 16])   ;~> 176 sixteen-float matrices"
+  (%native-call lib name input out))
 
-(defn call-blocking (lib:int name:string input out-count:int)
+(defn call-blocking (lib:int name:string input out)
   "Like `call`, on the dirty-offload OS pool (ADR-144): only this process waits, never a
 scheduler worker. For long kernels.
 
     (native/call-blocking lib \"solve\" xs 4096)   ;~> the kernel's 4096 doubles, computed off the scheduler"
-  (proc/offload %native-call lib name input out-count))
+  (proc/offload %native-call lib name input out))
 
 (defn close (lib:int -> nil)
   "Close `lib`. A call still running on it finishes first.

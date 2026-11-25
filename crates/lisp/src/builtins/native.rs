@@ -25,7 +25,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     primitives.def(
         "%native-call",
         Arity::exact(4),
-        Sig::new(vec![int, string, any, int], any),
+        Sig::new(vec![int, string, any, any], any),
         &[],
         "",
         native_call,
@@ -57,9 +57,9 @@ pub(super) fn native_open(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         .map(|token| Value::Int(token as i64))
 }
 
-/// `(%native-call token name input out-count)` — call entry point `name` on `input` (a vector
-/// or list of numbers, or of vectors of numbers, flattened one level), asking `out-count`
-/// doubles back: a vector of floats.
+/// `(%native-call token name input out)` — call entry point `name` on `input` (`host::numbers`'
+/// shapes: numbers, vectors of numbers, or `{:records … :keys …}`), asking `out` doubles back:
+/// an int for a flat vector of floats, `[count size]` for `count` vectors of `size`.
 pub(super) fn native_call(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let who = "%native-call";
     let token = expect_int(heap, who, arg(args, 0))? as u64;
@@ -73,11 +73,9 @@ pub(super) fn native_call(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             other => Err(LispError::wrong_type(heap, who, "number", other)),
         })
         .collect::<Result<Vec<f64>, _>>()?;
-    let out_count = expect_int(heap, who, arg(args, 3))?;
-    let out_count = usize::try_from(out_count)
-        .map_err(|_| LispError::runtime(format!("{who}: out-count {out_count} is negative")))?;
+    let (out_count, row_size) = crate::host::numbers::out_shape(heap, who, arg(args, 3))?;
     let out = crate::host::native::call(token, &name, &input, out_count)?;
-    Ok(heap.alloc_vector(out.into_iter().map(Value::Float).collect()))
+    Ok(crate::host::numbers::shaped_floats(heap, out, row_size))
 }
 
 /// `(%native-close token)` — close a kernel library.

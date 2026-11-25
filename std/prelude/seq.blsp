@@ -330,7 +330,7 @@ Always true for `n` <= 0.
   (cond
     (nil? coll) (list x)
     ;; a flat copy plus one: the kernel op, not a trip through `into`/`append`
-    (vector? coll) (%vector-concat coll [x])
+    (vector? coll) (%vector-push coll x)
     (set? coll) (%set-add coll x)
     ;; a record (ADR-542) dispatches to its `Conjable` impl (default: the map behaviour
     ;; below); a custom-collection record defines its own insertion. `conj-onto` is only
@@ -351,8 +351,7 @@ Always true for `n` <= 0.
     (%impl-exact? '[Conjable conj-onto] (%identity-of coll)) (conj-onto coll x)
     else (error "conj: not a collection: " (pr-str coll))))
 
-(defn conj (coll: (or list vector set map record) & xs:any -> any)
-  "Add element(s) to `coll` at its natural insertion point (Clojure-style):
+(defn conj "Add element(s) to `coll` at its natural insertion point (Clojure-style):
 APPEND to a vector, PREPEND to a list (`nil` counts as an empty list), ADD to a
 set (a duplicate is a no-op), and `assoc` a `[k v]` pair — or merge a map — into
 a map. Returns a fresh collection; `coll` is untouched.
@@ -365,9 +364,13 @@ a map. Returns a fresh collection; `coll` is untouched.
 
 `set/disj` is the inverse (ADR-506); `conj` stays core, so a set takes the collection
 protocol without an import."
-  ;; a vector takes the whole tail in one kernel append (ADR-511's spare capacity), skipping
-  ;; the generic fold and its per-element dispatch: 3.7x on a `conj` loop
-  (if (vector? coll) (%vector-concat coll xs) (fold xs coll %conj-one)))
+  ;; Two arms: `(conj coll x)`, the call nearly every `conj` is, takes a FIXED arity, so it
+  ;; fast-links from native code with no rest list to build and appends with one kernel op —
+  ;; through the variadic arm alone it cost ~300 ns an element (ADR-810). A vector takes a
+  ;; whole tail in one kernel append (ADR-511's spare capacity), skipping the generic fold.
+  ((coll x) (if (vector? coll) (%vector-push coll x) (%conj-one coll x)))
+  ((coll & xs) (if (vector? coll) (%vector-concat coll xs) (fold xs coll %conj-one))))
+(sig conj ((or list vector set map record) & any -> any))
 
 (defn set/disj (s & xs)
   "A fresh set like `s` with each of `xs` removed (removing an absent element is a

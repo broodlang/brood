@@ -723,11 +723,11 @@ struct ContactList {
     count: vec4<u32>,
     // four vec4 a contact: `[x y z kind]`, `[x y z w]`, its drag, its own limb's joints
     // (`scenes::contact_words`)
-    shapes: array<vec4<f32>, 64>,
+    shapes: array<vec4<f32>, 256>,
 };
 @group(3) @binding(8) var<storage, read> mesh_vertices: array<f32>;
 @group(3) @binding(9) var<uniform> contact_list: ContactList;
-@group(3) @binding(10) var<storage, read_write> contact_depths: array<atomic<u32>, 16>;
+@group(3) @binding(10) var<storage, read_write> contact_depths: array<atomic<u32>, 64>;
 @group(3) @binding(11) var<storage, read_write> posed_out: array<vec4<f32>>;
 @group(3) @binding(12) var<storage, read> mesh_softness: array<f32>;
 
@@ -832,7 +832,7 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     if (contact_softness(id.x) <= 0.0) {
         return;
     }
-    let count = min(contact_list.count.x, 16u);
+    let count = min(contact_list.count.x, 64u);
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let distance = contact_distance(slot, world).w;
         if (distance < 0.0 && !contact_skipped(slot, input)) {
@@ -857,7 +857,7 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let input = vertex_at(id.x);
-    let count = min(contact_list.count.x, 16u);
+    let count = min(contact_list.count.x, 64u);
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         if (contact_skipped(slot, input)) {
             continue;

@@ -2333,10 +2333,17 @@ impl Heap {
         };
         let store = match appended {
             Some(store) => store,
+            // Inline in its slab entry: built in place, with no `Vec` to malloc, fill and free
+            // per append (a small vector's `conj` paid all three, ADR-810).
             None if total <= INLINE_VEC_CAP => {
-                let mut items = self.vector(id).to_vec();
-                items.extend_from_slice(tail);
-                VecStore::from_vec(items)
+                let head = self.vector(id);
+                VecStore::from_flushed(total, |index| {
+                    if index < head_len {
+                        head[index]
+                    } else {
+                        tail[index - head_len]
+                    }
+                })
             }
             None => {
                 let capacity = if appending { total * 2 } else { total };

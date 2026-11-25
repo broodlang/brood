@@ -248,6 +248,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         vector_concat,
     );
     primitives.def(
+        "%vector-push",
+        Arity::exact(2),
+        Sig::new(vec![vec_ty, any], vec_ty),
+        &["v", "x"],
+        "A fresh vector of v's elements followed by x — `%vector-concat` of one item, without the one-element collection. The kernel op behind `(conj v x)`, appending in place over an append buffer (ADR-511).",
+        vector_push,
+    );
+    primitives.def(
         "%subvec",
         Arity::range(2, 3),
         Sig::with_rest(vec![vec_ty, int], int, vec_ty),
@@ -1425,6 +1433,18 @@ pub(super) fn vector_concat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     };
     let tail = heap.seq_items(arg(args, 1))?;
     Ok(heap.vector_append(id, &tail))
+}
+
+/// `(%vector-push v x)` — `v` with `x` appended: [`vector_concat`] of one item, without the
+/// one-element collection to carry it. `(conj v x)` cost ~300 ns an element when it went
+/// through the variadic `conj` and `%vector-concat` (ADR-810).
+pub(super) fn vector_push(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let id = match v {
+        Value::Vector(id) => id,
+        _ => return Err(LispError::wrong_type(heap, "%vector-push", "vector", v)),
+    };
+    Ok(heap.vector_append(id, &[arg(args, 1)]))
 }
 
 /// `(subvec v start)` / `(subvec v start end)` — a fresh vector of the elements

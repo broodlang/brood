@@ -106,6 +106,19 @@ fn the_mesh_shader_validates() {
     use crate::host::gui::mesh::{MAX_LIGHTS, MAX_SHADOW_VIEWS};
     assert!(MESH_SRC.contains(&format!("lights: array<Light, {MAX_LIGHTS}>")));
     assert!(MESH_SRC.contains(&format!("shadows: array<ShadowView, {MAX_SHADOW_VIEWS}>")));
+    // ADR-805/810: the contact list and its depths, sized by the constant the CPU packs to (four
+    // vec4 a contact), and both loops bounded by it — the WGSL spells them as literals
+    use crate::host::gui::mesh::MAX_CONTACTS;
+    assert!(MESH_SRC.contains(&format!("shapes: array<vec4<f32>, {}>", MAX_CONTACTS * 4)));
+    assert!(MESH_SRC.contains(&format!(
+        "contact_depths: array<atomic<u32>, {MAX_CONTACTS}>"
+    )));
+    assert_eq!(
+        MESH_SRC
+            .matches(&format!("min(contact_list.count.x, {MAX_CONTACTS}u)"))
+            .count(),
+        2
+    );
     let module = wgpu::naga::front::wgsl::parse_str(MESH_SRC).expect("parses");
     let scene_type = module
         .types

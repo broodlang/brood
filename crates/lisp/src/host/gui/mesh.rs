@@ -1177,8 +1177,12 @@ pub struct Scene {
     pub contact_skips: Vec<[u16; 4]>,
 }
 
-/// The most contacts a scene presses its skin with (ADR-805).
-pub const MAX_CONTACTS: usize = 16;
+/// The most contacts a scene presses its skin with (ADR-805). 64 since ADR-810: womanblend's
+/// room takes 4 and her two arms 42 (a forearm and twenty hand bones each), and at 16 the
+/// bones past the twelfth were dropped and pressed nothing. The cost is per contact a scene
+/// USES, not per slot: both painters loop over the scene's count, so a scene of 4 pays for 4.
+/// The shader's three sizes follow this (`the_mesh_shader_validates` holds them to it).
+pub const MAX_CONTACTS: usize = 64;
 /// How far round a contact soft flesh rises, at the least (metres); the deeper the press, the
 /// wider: [`RING_WIDTH`] + [`RING_SPREAD`] × its depth (ADR-805).
 pub const RING_WIDTH: f32 = 0.012;

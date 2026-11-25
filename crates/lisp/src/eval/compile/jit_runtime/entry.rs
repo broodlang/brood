@@ -306,6 +306,23 @@ pub(crate) fn finish_nested(
             let args: SmallVec<[Value; 4]> = (staged + 1..end).map(|k| heap.root_at(k)).collect();
             heap.truncate_roots(frame.stage_base);
             let g = heap.global();
+            // A builtin in tail position — `(defn conj ((coll x) (… (%vector-push coll x) …)))`,
+            // every thin wrapper over a kernel op: call it directly, as a non-tail call from
+            // native code already does (`jit_dispatch_call`'s `call_native_direct`), not
+            // through `apply_value`'s general dispatch, which was most of a `conj` from native
+            // code (ADR-810). The builtin receives copies of its arguments, that path's
+            // contract, and a collection it made due runs after it (KI-411).
+            if let Value::Native(native) = target {
+                return match crate::eval::call_native(heap, native, &args, g) {
+                    Ok(value) => Nested::Done(heap.collect_if_bytes_spent(value)),
+                    Err(error) => {
+                        heap.jit_pending_error = Some(crate::eval::name_uncallable_local(
+                            heap, error, target, local,
+                        ));
+                        Nested::Raised
+                    }
+                };
+            }
             let r = jit_native_reenter(heap, frame.native_depth, |h| {
                 apply_value(h, target, &args, g)
                     .map_err(|e| crate::eval::name_uncallable_local(h, e, target, local))

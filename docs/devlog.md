@@ -3006,3 +3006,12 @@ went red in the armed-from-source job: `contract.blsp`'s new `%contract-unchecke
 (a kernel native). Refactors: `probe_callback` (one table of JIT heap probes),
 `cli_support::brood_state_dir`.
 
+2026-11-26. **Records by key, results in rows, a cheaper `conj`, 64 contacts (ADR-810).** b3d's
+asks: `{:records rs :keys ks}` for kernel inputs (native and WASM), `[count size]` /
+`wasm/call-shaped` for rows back — its pose 334 → 25 µs a call. `conj` got a fixed 2-arity arm
+over a new `%vector-push`, a builtin in tail position is now called directly from a native
+caller, and a small append builds its inline store without a `Vec`: a `conj` loop 300 → ~100 ns
+an element. `MAX_CONTACTS` 16 → 64 (womanblend's room + both arms want 46); cost is per contact
+used, and a test now holds the shader's literal sizes to the constant. Run: the touched suites
+both ways (471/471, 36/36), the GPU/CPU contact tests (41/41), clippy on CI's flags.
+

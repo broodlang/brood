@@ -131,6 +131,17 @@
       (assert-error (call inst "twice" [[1.0 :x]]))
       (close inst)))
 
+  (test "records read by named keys, and a result in rows"
+    (let (inst (instantiate *kernels-wat*)
+          pose [{:t [1.0 2.0] :s 3.0} {:t [4.0 5.0] :s 6.0}])
+      (assert= [2.0 4.0 6.0 8.0 10.0 12.0] (call inst "twice" {:records pose :keys [:t :s]}))
+      (assert= [[2.0 4.0 6.0] [8.0 10.0 12.0]]
+        (call-shaped inst "twice" 3 {:records pose :keys [:t :s]}))
+      (assert= [[2 1] [8 1]] (call-shaped inst "bump" 2 [1 0 7 0]))
+      ;; a result that does not split into the rows asked for
+      (assert-error (call-shaped inst "twice" 4 [1.0 2.0 3.0]))
+      (close inst)))
+
   (test "a float64 list and an s32 list together"
     (let (inst (instantiate *kernels-wat*))
       (assert= [30.0 10.0 30.0] (call inst "gather" [10.0 20.0 30.0] [2 0 2]))

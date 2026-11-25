@@ -28,8 +28,8 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     #[cfg(feature = "wasm")]
     primitives.def(
         "%wasm-call",
-        Arity::exact(3),
-        Sig::new(vec![int, string, any], any),
+        Arity::range(3, 4),
+        Sig::with_rest(vec![int, string, any], any, any),
         &[],
         "",
         wasm_call,
@@ -142,8 +142,10 @@ fn grants_arg(heap: &Heap, v: Value) -> Result<Option<crate::host::wasm::Grants>
     Ok(Some(grants))
 }
 
-/// `(%wasm-call inst name args)` — call export `name` of instance `inst` with
-/// `args` (a vector), marshalled by the export's WIT types. Fuel-metered.
+/// `(%wasm-call inst name args)` / `(%wasm-call inst name args size)` — call export `name` of
+/// instance `inst` with `args` (a vector), marshalled by the export's WIT types. Fuel-metered.
+/// With `size`, a list result comes back as vectors of `size` items (`wasm/call-shaped`,
+/// ADR-810): matrices ready to use, with no split in Brood.
 pub(super) fn wasm_call(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_int(heap, "%wasm-call", arg(args, 0))? as u64;
     let name = expect_string(heap, "%wasm-call", arg(args, 1))?;
@@ -151,7 +153,15 @@ pub(super) fn wasm_call(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
         Value::Vector(vid) => heap.vector(vid).to_vec(),
         Value::Nil => Vec::new(),
     )?;
-    crate::host::wasm::call(heap, id, &name, &call_args)
+    let result = crate::host::wasm::call(heap, id, &name, &call_args)?;
+    match arg(args, 3) {
+        Value::Nil => Ok(result),
+        size => {
+            let size = expect_int(heap, "%wasm-call", size)?;
+            let size = usize::try_from(size).unwrap_or(0);
+            crate::host::numbers::chunked(heap, "%wasm-call", result, size)
+        }
+    }
 }
 
 /// `(%wasm-exports inst)` — the instance's exported functions, as a vector of

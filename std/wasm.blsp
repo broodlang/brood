@@ -84,6 +84,15 @@ short compute. A trap (including out-of-fuel) raises a catchable error.
     (wasm/call inst \"add\" 2 3)   ;~> 5, for an export that adds its two ints"
   (%wasm-call inst name (into [] args)))
 
+(defn call-shaped (inst name size & args)
+  "Like `call`, with the export's list result answered as vectors of `size` items each — sixteen
+floats a matrix, say — built natively, with no split in Brood (ADR-810). The result's length
+must be a multiple of `size`. A numeric-list argument may also be `{:records rs :keys ks}`:
+each record's values under the keys, in order, read natively.
+
+    (wasm/call-shaped inst \"twice\" 2 [1.0 2.0 3.0 4.0])   ;~> [[2.0 4.0] [6.0 8.0]], for an export that doubles each element"
+  (%wasm-call inst name (into [] args) size))
+
 (defn call-blocking (inst name & args)
   "Like `call`, but on the dirty-offload OS pool (ADR-144): only this
 process waits, never a scheduler worker. For long-running guest calls — and
