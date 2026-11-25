@@ -1756,6 +1756,8 @@ fn scene_spec(
         };
         material.double_sided =
             matches!(get(material_map, "double-sided"), Some(Value::Bool(true)));
+        // its skin pressed by the scene's `:contacts` (ADR-805)
+        material.deform = matches!(get(material_map, "deform"), Some(Value::Bool(true)));
         material.cast_shadow = match get(material_map, "cast-shadow") {
             None | Some(Value::Bool(true)) => true,
             Some(Value::Bool(false)) => false,
@@ -1888,6 +1890,54 @@ fn scene_spec(
             emitters.len()
         ));
     }
+    // `:contacts [{:plane [nx ny nz d]} {:sphere [x y z r]} {:capsule [ax ay az bx by bz r]} …]`:
+    // what presses the skin of its `:deform` draws this frame (ADR-805), in world space
+    let mut contacts = Vec::new();
+    if let Some(given) = get(map, "contacts") {
+        let Value::Vector(list) = given else {
+            return Err(":contacts is a vector of contact maps".into());
+        };
+        let list = heap.vector(list).to_vec();
+        if list.len() > crate::host::gui::mesh::MAX_CONTACTS {
+            return Err(format!(
+                "{} :contacts are more than the {} a scene presses its skin with",
+                list.len(),
+                crate::host::gui::mesh::MAX_CONTACTS
+            ));
+        }
+        let shape = "a contact is {:plane [nx ny nz d]}, {:sphere [x y z r]} or {:capsule [ax ay az bx by bz r]}";
+        for item in list {
+            let Value::Map(contact) = item else {
+                return Err(shape.into());
+            };
+            use crate::host::gui::mesh::Contact;
+            let contact = if let Some(plane) = numbers(get(contact, "plane"), 4) {
+                let length =
+                    (plane[0] * plane[0] + plane[1] * plane[1] + plane[2] * plane[2]).sqrt();
+                if length <= 1e-9 {
+                    return Err("a :plane contact's normal has no length".into());
+                }
+                Contact::Plane {
+                    normal: [plane[0] / length, plane[1] / length, plane[2] / length],
+                    offset: plane[3] / length,
+                }
+            } else if let Some(sphere) = numbers(get(contact, "sphere"), 4) {
+                Contact::Sphere {
+                    centre: [sphere[0], sphere[1], sphere[2]],
+                    radius: sphere[3].max(0.0),
+                }
+            } else if let Some(capsule) = numbers(get(contact, "capsule"), 7) {
+                Contact::Capsule {
+                    start: [capsule[0], capsule[1], capsule[2]],
+                    end: [capsule[3], capsule[4], capsule[5]],
+                    radius: capsule[6].max(0.0),
+                }
+            } else {
+                return Err(shape.into());
+            };
+            contacts.push(contact);
+        }
+    }
     Ok(Some(Scene {
         x: rect[0],
         y: rect[1],
@@ -1905,6 +1955,7 @@ fn scene_spec(
         background,
         palettes,
         draws,
+        contacts,
     }))
 }
 
@@ -2773,6 +2824,7 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         indices: mesh_bytes(heap, map, "indices")?,
         indices_wide,
         morphs: Vec::new(),
+        softness: mesh_bytes(heap, map, "softness")?,
     };
     if let Some(Value::Vector(morphs)) = heap.map_get(map, value::kw("morphs")) {
         let targets = heap.vector(morphs).to_vec();

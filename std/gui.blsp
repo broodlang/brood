@@ -793,7 +793,11 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; handles), `:color`, `:roughness`, `:specular`, `:lobes`, `:scatter` (light under the skin,
 ;; below), `:detail` with `:detail-scale`, `:detail-strength` and `:detail-cavity` (a tiled
 ;; micro-relief, below), `:coat` (a clear wet layer, below), `:cutoff`, `:double-sided`,
-;; `:cast-shadow` (true by default).
+;; `:cast-shadow` (true by default), `:deform` (its skin pressed by the scene's `:contacts`).
+;; `:contacts [{:plane [nx ny nz d]} {:sphere [x y z r]} {:capsule [ax ay az bx by bz r]} …]`
+;; (at most 16, world space) press the skin of the `:deform` draws: laid onto what presses it,
+;; soft flesh rising in a ring round it by the mesh's `:softness` (f32 0 … 1 a vertex in its
+;; spec), ADR-805.
 ;; A glTF loader, a skeleton's maths, a camera — policy above this, in the engine. Both window
 ;; painters draw a scene: the GPU target with a depth buffer and 4× multisampling (8× with
 ;; `BROOD_GUI_SAMPLES=8` where the adapter has it; a hair surface's coverage takes as many

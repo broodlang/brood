@@ -65,6 +65,7 @@ fn scene() -> Scene {
         emitters: Vec::new(),
         background: [0.0, 0.0, 0.0, 0.0],
         palettes: vec![],
+        contacts: Vec::new(),
         draws: vec![Draw {
             mesh: 1,
             model: identity,
@@ -571,4 +572,146 @@ fn a_scene_is_timed_on_the_gpu_a_few_frames_late() {
             newest.scene_us
         );
     }
+}
+
+/// ADR-805: a soft slab facing the camera with a ball pressed 5 cm into it. Its skin is laid onto
+/// the ball (a bowl, facing into it) and rises in a ring round it, on both painters alike; the
+/// same slab unpressed (no contacts, or not `:deform`) is drawn as before.
+#[test]
+fn a_ball_pressed_into_soft_skin_dents_it_alike_on_both_painters() {
+    use crate::host::gui::mesh::Contact;
+    let side = 96u32;
+    // a 1 × 1 slab at z = 0.5 facing the camera (−z), 48 × 48 squares, all soft
+    let cells = 48usize;
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    for row in 0..=cells {
+        for column in 0..=cells {
+            let x = column as f32 / cells as f32 - 0.5;
+            let y = row as f32 / cells as f32 - 0.5;
+            positions.extend_from_slice(&[x, y, 0.5]);
+            normals.extend_from_slice(&[0.0, 0.0, -1.0]);
+        }
+    }
+    let mut indices = Vec::new();
+    for row in 0..cells {
+        for column in 0..cells {
+            let corner = (row * (cells + 1) + column) as u32;
+            let next = corner + (cells + 1) as u32;
+            // (wound to face the camera, so neither painter turns its normals round)
+            indices.extend_from_slice(&[corner, corner + 1, next, corner + 1, next + 1, next]);
+        }
+    }
+    let count = (cells + 1) * (cells + 1);
+    let slab = Arc::new(
+        Mesh::from_parts(MeshParts {
+            positions: bytes_of(&positions),
+            normals: bytes_of(&normals),
+            indices: indices
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect(),
+            indices_wide: true,
+            softness: bytes_of(&vec![1.0; count]),
+            ..MeshParts::default()
+        })
+        .expect("a slab"),
+    );
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    // seen from in front and a little to the side, lit from the upper left
+    scene.lights = vec![Light::directional([0.6, -0.5, 0.6], [1.0, 1.0, 1.0])];
+    let draw = |deform: bool| Draw {
+        mesh: 1,
+        model: [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+        palette: None,
+        morphs: vec![],
+        material: Material {
+            surface: Surface::Standard,
+            deform,
+            double_sided: true,
+            roughness: 0.6,
+            specular: 0.0,
+            color: [0.8, 0.8, 0.8, 1.0],
+            ..Material::default()
+        },
+    };
+    // a ball of radius 0.2 whose surface reaches 5 cm past the slab
+    let ball = Contact::Sphere {
+        centre: [0.0, 0.0, 0.35],
+        radius: 0.2,
+    };
+    let meshes = |handle: u32| (handle == 1).then(|| slab.clone());
+    let shoot = |deform: bool, contacts: Vec<Contact>| {
+        let mut scene = scene.clone();
+        scene.draws = vec![draw(deform)];
+        scene.contacts = contacts;
+        scene
+    };
+    let pressed = shoot(true, vec![ball]);
+    let plain = shoot(true, vec![]);
+    let not_deformed = shoot(false, vec![ball]);
+    let (_, _, cpu_pressed) = rasterize(&pressed, &meshes, &|_| None);
+    let (_, _, cpu_plain) = rasterize(&plain, &meshes, &|_| None);
+    let (_, _, cpu_not) = rasterize(&not_deformed, &meshes, &|_| None);
+    let difference = |a: &[u8], b: &[u8], stride: usize| -> u64 {
+        a.chunks(stride)
+            .zip(b.chunks(stride))
+            .map(|(x, y)| u64::from(x[0].abs_diff(y[0])))
+            .sum()
+    };
+    assert_eq!(
+        cpu_plain, cpu_not,
+        "the CPU painter: no contacts and no :deform draw the same"
+    );
+    assert!(
+        difference(&cpu_pressed, &cpu_plain, 4) > 500,
+        "the CPU painter dents the slab"
+    );
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let mut frames = Vec::new();
+        for scene in [&pressed, &plain, &not_deformed] {
+            let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+                continue;
+            };
+            gpu.upload_mesh(1, &slab);
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            renderer.set_bg(Some([0, 0, 0]));
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            frames.push(gpu.read_pixels());
+        }
+        if frames.len() < 3 {
+            continue;
+        }
+        let dent = difference(&frames[0], &frames[1], 3);
+        let unchanged = difference(&frames[1], &frames[2], 3);
+        // the GPU's dent against the CPU's, pixel by pixel in red, over the whole picture
+        let cpu_red: Vec<u8> = cpu_pressed.chunks(4).map(|pixel| pixel[0]).collect();
+        let gpu_red: Vec<u8> = frames[0].chunks(3).map(|pixel| pixel[0]).collect();
+        let apart = cpu_red
+            .iter()
+            .zip(&gpu_red)
+            .filter(|(a, b)| a.abs_diff(**b) > 24)
+            .count();
+        eprintln!(
+            "{name}: dent {dent}, unpressed apart {unchanged}, pixels apart from the CPU {apart} of {}",
+            gpu_red.len()
+        );
+        if dent < 500 || unchanged > 0 || apart > gpu_red.len() / 50 {
+            failures.push(format!("{name}: dent {dent}, unpressed apart {unchanged}, {apart} pixels apart from the CPU"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

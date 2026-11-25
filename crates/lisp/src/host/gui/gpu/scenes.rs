@@ -51,6 +51,8 @@ pub(super) struct GpuMesh {
     skinned: bool,
     /// Where its vertices can be, to fit shadow maps as the CPU painter fits them.
     bounds: MeshBounds,
+    /// Its softness a vertex (ADR-805), when it has one.
+    softness: Option<wgpu::Buffer>,
 }
 
 /// What one scene renders into, at one size.
@@ -63,6 +65,49 @@ pub(super) struct SceneTarget {
     pub(super) composite: wgpu::BindGroup,
     /// Its shadow maps, kept while their number and size stay (ADR-788).
     shadow: Option<ShadowTarget>,
+    /// Its contact buffers (ADR-805), while it presses any skin.
+    contacts: Option<ContactTarget>,
+}
+
+/// A scene's contact buffers (ADR-805): its pressed vertices posed (three vec4 each: world
+/// position, normal, tangent), its contacts as the shader reads them, each one's deepest press.
+struct ContactTarget {
+    posed: wgpu::Buffer,
+    /// How many vertices `posed` holds room for.
+    capacity: u32,
+    contacts: wgpu::Buffer,
+    depths: wgpu::Buffer,
+}
+
+/// A scene's `:contacts` as the shader's `ContactList` holds them (ADR-805): how many, then two
+/// vec4 each, `[x y z kind]` and `[x y z w]`: a plane's normal and offset (kind 0), a sphere's
+/// centre and radius (1), a capsule's start, end and radius (2).
+fn contact_words(scene: &Scene) -> Vec<u8> {
+    use crate::host::gui::mesh::{Contact, MAX_CONTACTS};
+    let contacts = &scene.contacts[..scene.contacts.len().min(MAX_CONTACTS)];
+    let mut bytes = words_bytes(&[contacts.len() as u32, 0, 0, 0]);
+    let mut floats = vec![0.0f32; MAX_CONTACTS * 8];
+    for (slot, contact) in contacts.iter().enumerate() {
+        let at = slot * 8;
+        let [first, second] = match *contact {
+            Contact::Plane { normal, offset } => [
+                [normal[0], normal[1], normal[2], 0.0],
+                [offset, 0.0, 0.0, 0.0],
+            ],
+            Contact::Sphere { centre, radius } => [
+                [centre[0], centre[1], centre[2], 1.0],
+                [0.0, 0.0, 0.0, radius],
+            ],
+            Contact::Capsule { start, end, radius } => [
+                [start[0], start[1], start[2], 2.0],
+                [end[0], end[1], end[2], radius],
+            ],
+        };
+        floats[at..at + 4].copy_from_slice(&first);
+        floats[at + 4..at + 8].copy_from_slice(&second);
+    }
+    bytes.extend(floats_bytes(&floats));
+    bytes
 }
 
 /// A scene's shadow maps (ADR-788, ADR-800): two `Depth32Float` arrays, a layer a shadow
@@ -89,6 +134,13 @@ pub(super) struct MeshGpu {
     scene_layout: wgpu::BindGroupLayout,
     /// Depth only, both faces, alpha-tested: what renders a shadow map (ADR-788).
     shadow_pipeline: wgpu::RenderPipeline,
+    /// The contact passes' layouts and pipelines (ADR-805), and the posed buffer bound where a
+    /// scene presses nothing.
+    contact_morph_layout: wgpu::BindGroupLayout,
+    contact_layout: wgpu::BindGroupLayout,
+    contact_depth_pipeline: wgpu::ComputePipeline,
+    contact_deform_pipeline: wgpu::ComputePipeline,
+    no_posed: wgpu::Buffer,
     /// The scene group without the shadow maps, for the passes that render them.
     shadow_scene_layout: wgpu::BindGroupLayout,
     /// Compares a receiver's depth with a shadow map's (less or equal: lit).
@@ -281,7 +333,8 @@ impl MeshGpu {
         });
         let uniform = |binding: u32, dynamic: bool| wgpu::BindGroupLayoutEntry {
             binding,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            // (the contact passes pose vertices in compute, ADR-805)
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT | wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: dynamic,
@@ -291,7 +344,7 @@ impl MeshGpu {
         };
         let storage = |binding: u32| wgpu::BindGroupLayoutEntry {
             binding,
-            visibility: wgpu::ShaderStages::VERTEX,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: true },
                 has_dynamic_offset: false,
@@ -356,9 +409,46 @@ impl MeshGpu {
             label: Some("mesh draw"),
             entries: &[uniform(0, true)],
         });
+        // the morph offsets, and the scene's posed vertices that a pressed draw reads (ADR-805)
         let morph_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh morphs"),
-            entries: &[storage(0)],
+            entries: &[storage(0), storage(1)],
+        });
+        // the contact passes' own (ADR-805): the morph offsets alone (they write the posed vertices),
+        // and the mesh's vertices, the contacts, their depths, the posed vertices, the softness
+        let contact_morph_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("contact morphs"),
+                entries: &[storage(0)],
+            });
+        let compute_storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let contact_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("contacts"),
+            entries: &[
+                compute_storage(8, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                compute_storage(10, false),
+                compute_storage(11, false),
+                compute_storage(12, true),
+            ],
         });
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh material"),
@@ -562,8 +652,40 @@ impl MeshGpu {
             });
         let uniforms = wgpu::BufferUsages::UNIFORM;
         let storage_usage = wgpu::BufferUsages::STORAGE;
+        // the contact passes (ADR-805): each pressed vertex posed once, each contact's deepest press
+        // found, then the vertices pressed; the vertex stages read them
+        let contact_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("contacts"),
+                bind_group_layouts: &[
+                    Some(&shadow_scene_layout),
+                    Some(&draw_layout),
+                    Some(&contact_morph_layout),
+                    Some(&contact_layout),
+                ],
+                immediate_size: 0,
+            });
+        let contact_pipeline = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&contact_pipeline_layout),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let contact_depth_pipeline = contact_pipeline("cs_contact_depth");
+        let contact_deform_pipeline = contact_pipeline("cs_contact_deform");
+        // bound where a scene presses nothing: a posed vertex's worth of zeros
+        let no_posed = buffer(device, "no posed vertices", 48, storage_usage);
         MeshGpu {
             samples,
+            contact_morph_layout,
+            contact_layout,
+            contact_depth_pipeline,
+            contact_deform_pipeline,
+            no_posed,
             pipelines,
             hair_depth_pipelines,
             hair_front_pipelines,
@@ -665,7 +787,8 @@ impl MeshGpu {
             device,
             "mesh vertices",
             vertices.len() as u64,
-            wgpu::BufferUsages::VERTEX,
+            // (read as storage too by the contact passes, ADR-805)
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
         );
         queue.write_buffer(&vertex_buffer, 0, &vertices);
         let indices = words_bytes(&mesh.indices);
@@ -676,6 +799,18 @@ impl MeshGpu {
             wgpu::BufferUsages::INDEX,
         );
         queue.write_buffer(&index_buffer, 0, &indices);
+        // its softness a vertex, for the ring round a contact (ADR-805)
+        let softness = (!mesh.softness.is_empty()).then(|| {
+            let bytes = floats_bytes(&mesh.softness);
+            let softness = buffer(
+                device,
+                "mesh softness",
+                bytes.len() as u64,
+                wgpu::BufferUsages::STORAGE,
+            );
+            queue.write_buffer(&softness, 0, &bytes);
+            softness
+        });
         self.meshes.insert(
             handle,
             GpuMesh {
@@ -687,6 +822,7 @@ impl MeshGpu {
                 has_tangents: mesh.tangents.is_some(),
                 skinned: !mesh.joints.is_empty(),
                 bounds: mesh.bounds.clone(),
+                softness,
             },
         );
     }
@@ -754,6 +890,7 @@ impl MeshGpu {
             resolve,
             composite,
             shadow: None,
+            contacts: None,
         };
         if index < self.targets.len() {
             self.targets[index] = target;
@@ -846,6 +983,8 @@ impl MeshGpu {
         let mut morph_offsets: Vec<u8> = Vec::new();
         let morph_offset_limit = device.limits().max_storage_buffer_binding_size as usize;
         let mut plans: Vec<Vec<DrawPlan>> = Vec::new();
+        // each scene's pressed vertices, all its `:deform` draws' (ADR-805): its posed buffer's size
+        let mut pressed_totals: Vec<u32> = Vec::new();
         let mut shadow_plans: Vec<ShadowPlan> = Vec::new();
         for scene in scenes {
             let world = scene.draws.iter().fold(None, |bounds, draw| {
@@ -858,6 +997,7 @@ impl MeshGpu {
             let shadows = shadow_plan(scene, world);
             scene_bytes.extend(scene_uniform(scene, &shadows, &emitter_plan(scene)));
             shadow_plans.push(shadows);
+            let mut pressed_vertices = 0u32;
             // the scene's palettes, placed after the ones before
             let mut palette_starts = Vec::with_capacity(scene.palettes.len());
             for palette in &scene.palettes {
@@ -916,6 +1056,21 @@ impl MeshGpu {
                 }
                 let (palette_start, palette_joints) = palette.unwrap_or((0, 0));
                 let skinned = u32::from(mesh.skinned && palette_joints > 0);
+                // `DrawU::deform` (ADR-805): pressed by the scene's contacts, where its posed vertices
+                // start in the scene's posed buffer, whether it has a softness, how many vertices
+                let pressed = !scene.contacts.is_empty() && crate::host::gui::mesh::pressed(draw);
+                let deform = if pressed {
+                    let start = pressed_vertices;
+                    pressed_vertices += mesh.vertex_count;
+                    [
+                        1,
+                        start,
+                        u32::from(mesh.softness.is_some()),
+                        mesh.vertex_count,
+                    ]
+                } else {
+                    [0; 4]
+                };
                 let mut bytes = draw_uniform(
                     draw,
                     [surface, bits, palette_start, skinned],
@@ -925,6 +1080,7 @@ impl MeshGpu {
                         palette_joints,
                         morph_start,
                     ],
+                    deform,
                 );
                 bytes.resize(DRAW_BYTES as usize, 0);
                 let at = draw_bytes.len() / DRAW_BYTES as usize;
@@ -936,9 +1092,11 @@ impl MeshGpu {
                     blended: material.surface == Surface::Blend,
                     casts: material.cast_shadow,
                     surface: material.surface,
+                    pressed,
                 });
             }
             plans.push(plan);
+            pressed_totals.push(pressed_vertices);
         }
         // grow the buffers as the frame needs
         let grow = |device: &wgpu::Device,
@@ -999,6 +1157,40 @@ impl MeshGpu {
             self.target(device, index, scene.pixel_size(), tex_layout, smooth);
             let shadows = &shadow_plans[index];
             self.shadow_target(device, index, shadows.arrays);
+            // its contact buffers (ADR-805): only while it presses any skin, so a scene without
+            // contacts costs nothing for them
+            let pressed = pressed_totals[index];
+            let target = &mut self.targets[index];
+            if pressed == 0 {
+                target.contacts = None;
+            } else {
+                if target
+                    .contacts
+                    .as_ref()
+                    .is_none_or(|contacts| contacts.capacity < pressed)
+                {
+                    let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+                    target.contacts = Some(ContactTarget {
+                        posed: buffer(device, "posed vertices", u64::from(pressed) * 48, storage),
+                        capacity: pressed,
+                        contacts: buffer(
+                            device,
+                            "contacts",
+                            16 + crate::host::gui::mesh::MAX_CONTACTS as u64 * 32,
+                            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        ),
+                        depths: buffer(
+                            device,
+                            "contact depths",
+                            crate::host::gui::mesh::MAX_CONTACTS as u64 * 4,
+                            storage,
+                        ),
+                    });
+                }
+                if let Some(contacts) = &target.contacts {
+                    queue.write_buffer(&contacts.contacts, 0, &contact_words(scene));
+                }
+            }
         }
         // a scene the frame no longer draws gives its target back
         self.targets.truncate(scenes.len());
@@ -1031,9 +1223,27 @@ impl MeshGpu {
                 }),
             }],
         });
-        let morph_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mesh morph offsets"),
-            layout: &self.morph_layout,
+        // the morph offsets, and a scene's posed vertices (ADR-805): made for each scene below
+        let morph_group_for = |posed: &wgpu::Buffer| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mesh morph offsets"),
+                layout: &self.morph_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.morph_offset_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: posed.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+        // the contact passes' (ADR-805): the morph offsets alone
+        let contact_morph_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("contact morph offsets"),
+            layout: &self.contact_morph_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: self.morph_offset_buffer.as_entire_binding(),
@@ -1094,6 +1304,69 @@ impl MeshGpu {
                 .collect();
             let target = &self.targets[index];
             let scene_offset = (index as u64 * SCENE_BYTES) as u32;
+            let morph_group = morph_group_for(
+                target
+                    .contacts
+                    .as_ref()
+                    .map_or(&self.no_posed, |contacts| &contacts.posed),
+            );
+            // its skin pressed by its contacts (ADR-805), before anything draws it: each pressed
+            // vertex posed once, each contact's deepest press found over them all; then pressed
+            if let Some(contacts) = &target.contacts {
+                encoder.clear_buffer(&contacts.depths, 0, None);
+                let pressed: Vec<_> = plans[index]
+                    .iter()
+                    .filter(|draw| draw.pressed)
+                    .filter_map(|draw| {
+                        let mesh = self.meshes.get(&draw.mesh)?;
+                        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("contacts"),
+                            layout: &self.contact_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 8,
+                                    resource: mesh.vertices.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 9,
+                                    resource: contacts.contacts.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 10,
+                                    resource: contacts.depths.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 11,
+                                    resource: contacts.posed.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 12,
+                                    resource: mesh
+                                        .softness
+                                        .as_ref()
+                                        .unwrap_or(&self.no_posed)
+                                        .as_entire_binding(),
+                                },
+                            ],
+                        });
+                        Some((draw.at, mesh.vertex_count, group))
+                    })
+                    .collect();
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("scene contacts"),
+                    timestamp_writes: None,
+                });
+                for pipeline in [&self.contact_depth_pipeline, &self.contact_deform_pipeline] {
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, &shadow_scene_group, &[scene_offset]);
+                    pass.set_bind_group(2, &contact_morph_group, &[]);
+                    for (at, vertex_count, group) in &pressed {
+                        pass.set_bind_group(1, &draw_group, &[(*at as u64 * DRAW_BYTES) as u32]);
+                        pass.set_bind_group(3, group, &[]);
+                        pass.dispatch_workgroups(vertex_count.div_ceil(64), 1, 1);
+                    }
+                }
+            }
             // the shadow maps: every casting draw, once a view, the view by instance index, into
             // the layer of the array its `map` names (ADR-800)
             if let Some(shadow) = &target.shadow {
@@ -1315,6 +1588,7 @@ pub(super) fn draw_uniform(
     draw: &crate::host::gui::mesh::Draw,
     flags: [u32; 4],
     morph_info: [u32; 4],
+    deform: [u32; 4],
 ) -> Vec<u8> {
     let material = &draw.material;
     let mut floats = Vec::with_capacity(32);
@@ -1349,6 +1623,9 @@ pub(super) fn draw_uniform(
     // `DrawU::sheen`: a hair surface's second highlight's colour, the fourth float 1 when given
     let sheen = material.sheen.map_or([0.0; 4], |[r, g, b]| [r, g, b, 1.0]);
     bytes.extend(floats_bytes(&sheen));
+    // `DrawU::deform`: pressed by the scene's contacts, its first posed vertex, whether it has a
+    // softness, its vertex count (ADR-805)
+    bytes.extend(words_bytes(&deform));
     bytes
 }
 
@@ -1392,6 +1669,9 @@ struct DrawPlan {
     casts: bool,
     /// How it is shaded: what a draw's GPU time is told by (ADR-801).
     surface: Surface,
+    /// Pressed by the scene's contacts (ADR-805): its vertices posed and deformed by the compute
+    /// passes, read from the scene's posed buffer.
+    pressed: bool,
 }
 
 /// `scene`'s `SceneU` uniform (the WGSL struct in `MESH_SRC`), padded to [`SCENE_BYTES`].
@@ -1421,6 +1701,7 @@ pub(super) fn scene_uniform_len() -> usize {
         emitters: Vec::new(),
         background: [0.0; 4],
         palettes: Vec::new(),
+        contacts: Vec::new(),
         draws: Vec::new(),
     };
     scene_words(&scene, &shadow_plan(&scene, None), &emitter_plan(&scene)).len() * 4
