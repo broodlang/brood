@@ -2299,6 +2299,66 @@ pub struct ShadowView {
     /// into a distance ([`ShadowView::distance`]) for a soft shadow's penumbra (ADR-793).
     pub depth_range: [f32; 2],
     pub perspective: bool,
+    /// Where its map is kept (ADR-800), set by [`shadow_plan`].
+    pub map: ShadowMapSlot,
+}
+
+/// Where a shadow view's map is kept (ADR-800): which of the scene's two map arrays (0, the
+/// largest views'; 1, every smaller view's), its layer in that array, and that array's side.
+/// The view renders into the top-left `resolution`² of its layer; reads past that up to the
+/// array's side find the layer cleared to the far plane.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ShadowMapSlot {
+    pub array: u32,
+    pub layer: u32,
+    pub side: u32,
+}
+
+/// The two map arrays a plan's views are kept in (ADR-800): array 0 at the largest view's
+/// resolution, holding every view of that resolution; array 1 at the largest of the others',
+/// holding the rest (side 0 and no layers when there are none). Two size classes, not an
+/// atlas: one big map and smaller others is the case that needed it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ShadowArrays {
+    pub sides: [u32; 2],
+    pub layers: [u32; 2],
+}
+
+impl ShadowArrays {
+    /// The arrays views of these resolutions need.
+    pub fn of(resolutions: &[u32]) -> ShadowArrays {
+        let large = resolutions.iter().copied().max().unwrap_or(0);
+        let small = resolutions
+            .iter()
+            .copied()
+            .filter(|resolution| *resolution < large)
+            .max()
+            .unwrap_or(0);
+        let in_large = resolutions
+            .iter()
+            .filter(|resolution| **resolution == large)
+            .count() as u32;
+        ShadowArrays {
+            sides: [large, small],
+            layers: [in_large, resolutions.len() as u32 - in_large],
+        }
+    }
+
+    /// Which array a view of `resolution` is kept in.
+    pub fn array_of(&self, resolution: u32) -> usize {
+        usize::from(resolution < self.sides[0])
+    }
+
+    /// The texels both arrays hold together: what [`MAX_SHADOW_TEXELS`] limits.
+    pub fn texels(&self) -> u64 {
+        (0..2)
+            .map(|array| {
+                u64::from(self.layers[array])
+                    * u64::from(self.sides[array])
+                    * u64::from(self.sides[array])
+            })
+            .sum()
+    }
 }
 
 impl ShadowView {
@@ -2321,8 +2381,8 @@ pub struct ShadowPlan {
     /// Per light, by index: its first view and how many it has — none for a light without a
     /// shadow (or one there is nothing to fit to).
     pub lights: [(u32, u32); MAX_LIGHTS],
-    /// The side of the layers the GPU target keeps the views in: the largest view's.
-    pub layer_side: u32,
+    /// The two map arrays the views are kept in (ADR-800); each view's `map` says where.
+    pub arrays: ShadowArrays,
     /// Which view is the camera's depth for the ambient occlusion — none without it (or no
     /// room left for it).
     pub occlusion: Option<u32>,
@@ -2556,6 +2616,7 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
                 texel,
                 depth_range: [near, far],
                 perspective: false,
+                map: ShadowMapSlot::default(),
             }]
         }
         LightKind::Spot => {
@@ -2575,6 +2636,7 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
                 texel: 2.0 * tan_half / side as f32,
                 depth_range: [near, far],
                 perspective: true,
+                map: ShadowMapSlot::default(),
             }]
         }
         LightKind::Point => {
@@ -2592,6 +2654,7 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
                     texel: 2.0 * tan_half / side as f32,
                     depth_range: [near, far],
                     perspective: true,
+                    map: ShadowMapSlot::default(),
                 })
                 .collect()
         }
@@ -2600,13 +2663,24 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
 
 /// The shadow maps `scene` renders this frame, its things lying in `world` (the union of its
 /// draws' [`draw_bounds`]): the first [`MAX_SHADOWS`] shadowed lights' views, within
-/// [`MAX_SHADOW_TEXELS`] (the spec parser refuses a scene asking for more).
+/// [`MAX_SHADOW_TEXELS`] counted as the two map arrays hold them ([`ShadowArrays::texels`],
+/// ADR-800; the spec parser refuses a scene asking for more). A light whose views would pass
+/// the limit is skipped.
 pub fn shadow_plan(scene: &Scene, world: Option<Bounds>) -> ShadowPlan {
     let mut plan = ShadowPlan {
         views: Vec::new(),
         lights: [(0, 0); MAX_LIGHTS],
-        layer_side: 0,
+        arrays: ShadowArrays::default(),
         occlusion: None,
+    };
+    // the texels the plan's views and `more` would need together
+    let texels_with = |views: &[ShadowView], more: &[u32]| {
+        let resolutions: Vec<u32> = views
+            .iter()
+            .map(|view| view.resolution)
+            .chain(more.iter().copied())
+            .collect();
+        ShadowArrays::of(&resolutions).texels()
     };
     let mut shadowed = 0;
     for (index, light) in scene.lights.iter().enumerate().take(MAX_LIGHTS) {
@@ -2620,14 +2694,12 @@ pub fn shadow_plan(scene: &Scene, world: Option<Bounds>) -> ShadowPlan {
         if views.is_empty() {
             continue;
         }
-        let layer_side = plan.layer_side.max(views[0].resolution);
-        let layers = (plan.views.len() + views.len()) as u64;
-        if layers * u64::from(layer_side) * u64::from(layer_side) > MAX_SHADOW_TEXELS {
+        let resolutions: Vec<u32> = views.iter().map(|view| view.resolution).collect();
+        if texels_with(&plan.views, &resolutions) > MAX_SHADOW_TEXELS {
             continue;
         }
         shadowed += 1;
         plan.lights[index] = (plan.views.len() as u32, views.len() as u32);
-        plan.layer_side = layer_side;
         plan.views.extend(views);
     }
     // the ambient occlusion's view: the camera's own, square (its depth is read by where a
@@ -2635,11 +2707,8 @@ pub fn shadow_plan(scene: &Scene, world: Option<Bounds>) -> ShadowPlan {
     if scene.ambient_occlusion.is_some() && plan.views.len() < MAX_SHADOW_VIEWS {
         let (width, height) = scene.pixel_size();
         let side = width.max(height).clamp(MIN_SHADOW_SIDE, MAX_OCCLUSION_SIDE);
-        let layer_side = plan.layer_side.max(side);
-        let layers = (plan.views.len() + 1) as u64;
-        if layers * u64::from(layer_side) * u64::from(layer_side) <= MAX_SHADOW_TEXELS {
+        if texels_with(&plan.views, &[side]) <= MAX_SHADOW_TEXELS {
             plan.occlusion = Some(plan.views.len() as u32);
-            plan.layer_side = layer_side;
             plan.views.push(ShadowView {
                 view_proj: scene.view_proj,
                 resolution: side,
@@ -2648,8 +2717,23 @@ pub fn shadow_plan(scene: &Scene, world: Option<Bounds>) -> ShadowPlan {
                 // from the camera's own matrix (`view_distance`)
                 depth_range: [0.0, 1.0],
                 perspective: false,
+                map: ShadowMapSlot::default(),
             });
         }
+    }
+    // each view to its array, in order: a view at the largest resolution in array 0, any
+    // smaller one in array 1
+    let resolutions: Vec<u32> = plan.views.iter().map(|view| view.resolution).collect();
+    plan.arrays = ShadowArrays::of(&resolutions);
+    let mut next = [0u32; 2];
+    for view in &mut plan.views {
+        let array = plan.arrays.array_of(view.resolution);
+        view.map = ShadowMapSlot {
+            array: array as u32,
+            layer: next[array],
+            side: plan.arrays.sides[array],
+        };
+        next[array] += 1;
     }
     plan
 }
@@ -2681,18 +2765,13 @@ fn project_into(view: &ShadowView, point: [f32; 3]) -> Option<([f32; 2], f32)> {
 }
 
 /// The depth stored at texel `(column, row)` of `view`'s map: a read off the map's left or top
-/// edge reads the edge; off its right or bottom edge it reads the GPU target's layer of
-/// `layer_side` texels, cleared to the far plane (1) where the view did not reach — as the
-/// GPU's clamped reads of that layer do.
-fn stored_depth(
-    view: &ShadowView,
-    layer_side: u32,
-    depth_map: &[f32],
-    column: i64,
-    row: i64,
-) -> f32 {
+/// edge reads the edge; off its right or bottom edge it reads the GPU target's layer, its
+/// map array's `map.side` texels (ADR-800), cleared to the far plane (1) where the view did
+/// not reach — as the GPU's clamped reads of that layer do.
+fn stored_depth(view: &ShadowView, depth_map: &[f32], column: i64, row: i64) -> f32 {
     let side = view.resolution as i64;
-    let last = i64::from(layer_side.max(1)) - 1;
+    // a view no plan placed is its own map
+    let last = i64::from(view.map.side.max(view.resolution).max(1)) - 1;
     let (column, row) = (column.clamp(0, last), row.clamp(0, last));
     if column >= side || row >= side {
         1.0
@@ -2704,18 +2783,12 @@ fn stored_depth(
 /// A bilinear percentage-closer tap: how lit a receiver at `depth` is at the continuous texel
 /// position `(across, down)` (texel centres at whole numbers here), its four neighbours'
 /// comparisons weighted by nearness. The shader's `bilinear_tap` is one comparison gather.
-fn bilinear_tap(
-    view: &ShadowView,
-    layer_side: u32,
-    depth_map: &[f32],
-    [across, down]: [f32; 2],
-    depth: f32,
-) -> f32 {
+fn bilinear_tap(view: &ShadowView, depth_map: &[f32], [across, down]: [f32; 2], depth: f32) -> f32 {
     let (column, row) = (across.floor(), down.floor());
     let (fraction_x, fraction_y) = (across - column, down - row);
     let (column, row) = (column as i64, row as i64);
     let lit = |step_x: i64, step_y: i64| {
-        let stored = stored_depth(view, layer_side, depth_map, column + step_x, row + step_y);
+        let stored = stored_depth(view, depth_map, column + step_x, row + step_y);
         if depth <= stored { 1.0 } else { 0.0 }
     };
     (lit(0, 0) * (1.0 - fraction_x) + lit(1, 0) * fraction_x) * (1.0 - fraction_y)
@@ -2727,12 +2800,7 @@ fn bilinear_tap(
 /// read as the weights of a 4×4 block of plain comparisons — 1 lit … 0 in shadow. A point
 /// outside the map, or past its depth, is lit. Texel reads go through [`stored_depth`]. The
 /// shader's `shadow_sample` is the same, a comparison gather per 2×2 of the block.
-pub fn sample_shadow(
-    view: &ShadowView,
-    layer_side: u32,
-    depth_map: &[f32],
-    point: [f32; 3],
-) -> f32 {
+pub fn sample_shadow(view: &ShadowView, depth_map: &[f32], point: [f32; 3]) -> f32 {
     let Some(([across, down], depth)) = project_into(view, point) else {
         return 1.0;
     };
@@ -2745,13 +2813,7 @@ pub fn sample_shadow(
     let mut lit = 0.0;
     for (step_y, weight_y) in weights_y.iter().enumerate() {
         for (step_x, weight_x) in weights_x.iter().enumerate() {
-            let stored = stored_depth(
-                view,
-                layer_side,
-                depth_map,
-                column + step_x as i64,
-                row + step_y as i64,
-            );
+            let stored = stored_depth(view, depth_map, column + step_x as i64, row + step_y as i64);
             if depth <= stored {
                 lit += weight_x * weight_y;
             }
@@ -2848,7 +2910,6 @@ pub fn receiver_slope(
 /// lit. The shader's `soft_shadow` is the same.
 pub fn soft_shadow(
     view: &ShadowView,
-    layer_side: u32,
     depth_map: &[f32],
     point: [f32; 3],
     filter: &SoftFilter,
@@ -2867,7 +2928,6 @@ pub fn soft_shadow(
             let offset = disc_tap(index, filter.turn).map(|axis| axis * softness);
             let stored = stored_depth(
                 view,
-                layer_side,
                 depth_map,
                 (at[0] + offset[0]).floor() as i64,
                 (at[1] + offset[1]).floor() as i64,
@@ -2894,7 +2954,7 @@ pub fn soft_shadow(
     for index in 0..SOFT_TAPS {
         let offset = disc_tap(index, filter.turn).map(|axis| axis * radius);
         let tap = [at[0] - 0.5 + offset[0], at[1] - 0.5 + offset[1]];
-        lit += bilinear_tap(view, layer_side, depth_map, tap, plane(offset));
+        lit += bilinear_tap(view, depth_map, tap, plane(offset));
     }
     lit / SOFT_TAPS as f32
 }
@@ -2942,7 +3002,6 @@ pub fn shadow_visibility(
     match shadow_softness(light, texel) {
         Some(softness) => soft_shadow(
             view,
-            plan.layer_side,
             depth_map,
             biased,
             &SoftFilter {
@@ -2952,7 +3011,7 @@ pub fn shadow_visibility(
                 slope: receiver_slope(view, biased, normal, to_light),
             },
         ),
-        None => sample_shadow(view, plan.layer_side, depth_map, biased),
+        None => sample_shadow(view, depth_map, biased),
     }
 }
 
@@ -2997,7 +3056,6 @@ pub fn hair_shadow(
             .map(|axis| axis * HAIR_SHADOW_TEXELS);
         let stored = stored_depth(
             view,
-            plan.layer_side,
             depth_map,
             (texel[0] + offset[0]).floor() as i64,
             (texel[1] + offset[1]).floor() as i64,
@@ -5465,6 +5523,87 @@ mod tests {
         // the edge filtered over 0.3 m as the light sees it lies across 0.3 × √2 of floor at 45°,
         // and the slope bias (0.3 m toward the light) carries it ~0.2 m further
         no_acne(&soft, &without, -1.5..-0.5, 0.75);
+    }
+
+    /// A shadowed light whose map is `resolution` texels a side.
+    fn shadowed_at(mut light: Light, resolution: u32) -> Light {
+        light.shadow = Some(Shadow {
+            resolution,
+            ..Shadow::default()
+        });
+        light
+    }
+
+    fn key_spot() -> Light {
+        Light::spot([0.0, 3.0, 0.0], [0.0, -1.0, 0.0], [1.0; 3], 8.0, [0.3, 0.6])
+    }
+
+    #[test]
+    fn a_big_key_map_and_a_point_lights_small_cube_plan_in_two_arrays() {
+        // ADR-800: 4096² + 6 × 1024² is within the limit counted as the two arrays hold them
+        // (7 × 4096² was not)
+        let (mut scene, _) = floor_and_card(slanted());
+        scene.lights = vec![
+            shadowed_at(key_spot(), 4096),
+            shadowed_at(Light::point([1.0, 2.0, 1.0], [1.0; 3], 8.0), 1024),
+        ];
+        let world = Some([[-4.0, 0.0, -4.0], [4.0, 1.0, 4.0]]);
+        let plan = shadow_plan(&scene, world);
+        assert_eq!(plan.views.len(), 7);
+        assert_eq!((plan.lights[0], plan.lights[1]), ((0, 1), (1, 6)));
+        assert_eq!(
+            plan.arrays,
+            ShadowArrays {
+                sides: [4096, 1024],
+                layers: [1, 6]
+            }
+        );
+        assert!(plan.arrays.texels() <= MAX_SHADOW_TEXELS);
+        assert_eq!(
+            plan.views[0].map,
+            ShadowMapSlot {
+                array: 0,
+                layer: 0,
+                side: 4096
+            }
+        );
+        for (face, view) in plan.views[1..].iter().enumerate() {
+            assert_eq!(
+                view.map,
+                ShadowMapSlot {
+                    array: 1,
+                    layer: face as u32,
+                    side: 1024
+                }
+            );
+        }
+        // every view of one size: all in array 0, array 1 empty
+        scene.lights = vec![shadowed_at(key_spot(), 1024)];
+        let alone = shadow_plan(&scene, world);
+        assert_eq!(
+            alone.arrays,
+            ShadowArrays {
+                sides: [1024, 0],
+                layers: [1, 0]
+            }
+        );
+    }
+
+    #[test]
+    fn a_light_past_the_summed_limit_is_cut_and_a_smaller_one_after_it_kept() {
+        // 4096² + 6 × 2048² ≈ 41.9 M texels: over; 4096² + 6 × 1024² ≈ 23 M: within
+        let (mut scene, _) = floor_and_card(slanted());
+        scene.lights = vec![
+            shadowed_at(key_spot(), 4096),
+            shadowed_at(Light::point([1.0, 2.0, 1.0], [1.0; 3], 8.0), 2048),
+            shadowed_at(Light::point([-1.0, 2.0, 1.0], [1.0; 3], 8.0), 1024),
+        ];
+        let plan = shadow_plan(&scene, Some([[-4.0, 0.0, -4.0], [4.0, 1.0, 4.0]]));
+        assert_eq!(plan.lights[1], (0, 0), "the 2048 cube is cut");
+        assert_eq!(plan.lights[2], (1, 6), "the 1024 cube after it is kept");
+        assert_eq!(plan.views.len(), 7);
+        assert_eq!(plan.arrays.sides, [4096, 1024]);
+        assert!(plan.arrays.texels() <= MAX_SHADOW_TEXELS);
     }
 
     #[test]

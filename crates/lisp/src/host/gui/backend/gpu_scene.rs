@@ -255,6 +255,23 @@ fn square(height: f32, half: f32) -> Mesh {
 
 #[test]
 fn a_soft_shadow_draws_on_the_gpu_as_on_the_cpu() {
+    soft_shadow_on_both_painters(Vec::new());
+}
+
+#[test]
+fn a_soft_shadow_from_the_smaller_map_array_draws_on_the_gpu_as_on_the_cpu() {
+    // ADR-800: a dark light with a bigger map takes array 0, so the card's light's 1024 map is
+    // kept and read in array 1
+    let mut bigger = Light::directional([1.0, -1.0, 0.0], [0.0, 0.0, 0.0]);
+    bigger.shadow = Some(Shadow {
+        resolution: 2048,
+        ..Shadow::default()
+    });
+    soft_shadow_on_both_painters(vec![bigger]);
+}
+
+/// The soft shadow parity scene, with `more` lights after the one that casts it.
+fn soft_shadow_on_both_painters(more: Vec<Light>) {
     // seen from above: a 1 m card a metre over an 8 m floor, lit at 45° toward −x, so its
     // shadow lies on x −1.5 … −0.5, its edges filtered over 0.3 m
     let side = 128u32;
@@ -280,6 +297,7 @@ fn a_soft_shadow_draws_on_the_gpu_as_on_the_cpu() {
     scene.view_proj = view_proj;
     scene.eye = [0.0, 10.0, 0.0];
     scene.lights = vec![light];
+    scene.lights.extend(more);
     let draw = |mesh: u32| Draw {
         mesh,
         model: [

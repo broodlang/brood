@@ -7,15 +7,16 @@
 use super::*;
 use crate::host::gui::mesh::{
     EmitterPlan, LightKind, MAX_EMITTERS, MAX_EYES, MAX_LIGHTS, MAX_SHADOW_VIEWS, Mesh, MeshBounds,
-    Morph, SKIN_TABLE_HEIGHT, SKIN_TABLE_WIDTH, Scene, ShadowPlan, Surface, add_morphs_packed,
-    draw_bounds, emitter_plan, shadow_plan, skin_table, union,
+    Morph, SKIN_TABLE_HEIGHT, SKIN_TABLE_WIDTH, Scene, ShadowArrays, ShadowPlan, Surface,
+    add_morphs_packed, draw_bounds, emitter_plan, shadow_plan, skin_table, union,
 };
 
 /// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4,
 /// curvature 1.
 pub(super) const VERTEX_FLOATS: usize = 21;
-/// The `SceneU` uniform (3360 bytes), padded to the dynamic-offset alignment.
-pub(super) const SCENE_BYTES: u64 = 3584;
+/// The `SceneU` uniform (3744 bytes: each shadow view says where its map is kept, ADR-800),
+/// padded to the dynamic-offset alignment.
+pub(super) const SCENE_BYTES: u64 = 3840;
 /// The `DrawU` uniform (336 bytes with an `:eye` surface's optics, ADR-796, and a hair's `:sheen`, ADR-799), padded to the
 /// dynamic-offset alignment.
 pub(super) const DRAW_BYTES: u64 = 512;
@@ -64,15 +65,16 @@ pub(super) struct SceneTarget {
     shadow: Option<ShadowTarget>,
 }
 
-/// A scene's shadow maps (ADR-788): one `Depth32Float` array, a layer a shadow view, each
-/// layer as big as the largest view (a smaller view renders into its top-left corner).
+/// A scene's shadow maps (ADR-788, ADR-800): two `Depth32Float` arrays, a layer a shadow
+/// view — array 0 at the largest view's size, array 1 at the largest of the smaller views'
+/// ([`ShadowArrays`]); a view smaller than its array's layers renders into its top-left
+/// corner. Array 1 is absent when every view is of the largest size.
 struct ShadowTarget {
-    side: u32,
-    layer_count: u32,
-    /// Every layer, for the passes that render them.
-    layers: Vec<wgpu::TextureView>,
-    /// The whole array, for the colour pass to sample.
-    array: wgpu::TextureView,
+    arrays: ShadowArrays,
+    /// Each array's layers, for the passes that render them.
+    layers: [Vec<wgpu::TextureView>; 2],
+    /// Each whole array, for the colour pass to sample (none: array 1 has no layers).
+    whole: [Option<wgpu::TextureView>; 2],
 }
 
 /// The mesh pipelines and buffers, made the first time a mesh is uploaded.
@@ -88,7 +90,8 @@ pub(super) struct MeshGpu {
     shadow_scene_layout: wgpu::BindGroupLayout,
     /// Compares a receiver's depth with a shadow map's (less or equal: lit).
     shadow_sampler: wgpu::Sampler,
-    /// One cleared layer, bound for a scene without shadows.
+    /// One cleared layer, bound for a scene without shadows, and for array 1 when a scene's
+    /// maps are all in array 0 (ADR-800).
     no_shadows: wgpu::TextureView,
     /// `mesh::skin_table` as the colour passes read it (ADR-794): `Rgba32Float`, the CPU
     /// painter's own numbers.
@@ -281,22 +284,24 @@ impl MeshGpu {
             },
             count: None,
         };
+        // a shadow map array (ADR-788): the largest maps at binding 2, the smaller at 5 (ADR-800)
+        let shadow_maps = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        };
         // the colour passes read the scene's shadow maps; the passes that render them cannot
         let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh scene"),
             entries: &[
                 uniform(0, true),
                 storage(1),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                shadow_maps(2),
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -314,6 +319,7 @@ impl MeshGpu {
                     },
                     count: None,
                 },
+                shadow_maps(5),
             ],
         });
         let shadow_scene_layout =
@@ -686,56 +692,65 @@ impl MeshGpu {
         }
     }
 
-    /// Keep scene `index`'s shadow maps as `layer_count` layers of `side`² texels, making them
-    /// anew when either changed; none when the scene has no shadow this frame.
-    fn shadow_target(&mut self, device: &wgpu::Device, index: usize, side: u32, layer_count: u32) {
+    /// Keep scene `index`'s shadow maps as the two arrays `arrays` says (ADR-800), making
+    /// them anew when either's size or layer count changed; none when the scene has no shadow
+    /// this frame.
+    fn shadow_target(&mut self, device: &wgpu::Device, index: usize, arrays: ShadowArrays) {
         let target = &mut self.targets[index];
-        if layer_count == 0 {
+        if arrays.layers[0] == 0 {
             target.shadow = None;
             return;
         }
         if target
             .shadow
             .as_ref()
-            .is_some_and(|shadow| shadow.side == side && shadow.layer_count == layer_count)
+            .is_some_and(|shadow| shadow.arrays == arrays)
         {
             return;
         }
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("scene shadow maps"),
-            size: wgpu::Extent3d {
-                width: side,
-                height: side,
-                depth_or_array_layers: layer_count,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let layers = (0..layer_count)
-            .map(|layer| {
-                texture.create_view(&wgpu::TextureViewDescriptor {
-                    label: Some("scene shadow map"),
-                    dimension: Some(wgpu::TextureViewDimension::D2),
-                    base_array_layer: layer,
-                    array_layer_count: Some(1),
-                    ..Default::default()
+        let mut layers: [Vec<wgpu::TextureView>; 2] = [Vec::new(), Vec::new()];
+        let mut whole: [Option<wgpu::TextureView>; 2] = [None, None];
+        for array in 0..2 {
+            let (side, layer_count) = (arrays.sides[array], arrays.layers[array]);
+            if layer_count == 0 || side == 0 {
+                continue;
+            }
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("scene shadow maps"),
+                size: wgpu::Extent3d {
+                    width: side,
+                    height: side,
+                    depth_or_array_layers: layer_count,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            layers[array] = (0..layer_count)
+                .map(|layer| {
+                    texture.create_view(&wgpu::TextureViewDescriptor {
+                        label: Some("scene shadow map"),
+                        dimension: Some(wgpu::TextureViewDimension::D2),
+                        base_array_layer: layer,
+                        array_layer_count: Some(1),
+                        ..Default::default()
+                    })
                 })
-            })
-            .collect();
-        let array = texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("scene shadow maps"),
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
+                .collect();
+            whole[array] = Some(texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("scene shadow maps"),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            }));
+        }
         target.shadow = Some(ShadowTarget {
-            side,
-            layer_count,
+            arrays,
             layers,
-            array,
+            whole,
         });
     }
 
@@ -912,12 +927,7 @@ impl MeshGpu {
         for (index, scene) in scenes.iter().enumerate() {
             self.target(device, index, scene.pixel_size(), tex_layout, smooth);
             let shadows = &shadow_plans[index];
-            self.shadow_target(
-                device,
-                index,
-                shadows.layer_side,
-                shadows.views.len() as u32,
-            );
+            self.shadow_target(device, index, shadows.arrays);
         }
         // a scene the frame no longer draws gives its target back
         self.targets.truncate(scenes.len());
@@ -1010,14 +1020,17 @@ impl MeshGpu {
                 .collect();
             let target = &self.targets[index];
             let scene_offset = (index as u64 * SCENE_BYTES) as u32;
-            // the shadow maps: every casting draw, once a view, the view by instance index
+            // the shadow maps: every casting draw, once a view, the view by instance index, into
+            // the layer of the array its `map` names (ADR-800)
             if let Some(shadow) = &target.shadow {
-                for (view_index, (view, layer)) in shadow_plans[index]
-                    .views
-                    .iter()
-                    .zip(&shadow.layers)
-                    .enumerate()
-                {
+                for (view_index, view) in shadow_plans[index].views.iter().enumerate() {
+                    let Some(layer) = shadow
+                        .layers
+                        .get(view.map.array as usize)
+                        .and_then(|layers| layers.get(view.map.layer as usize))
+                    else {
+                        continue;
+                    };
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("scene shadow"),
                         color_attachments: &[],
@@ -1056,10 +1069,15 @@ impl MeshGpu {
                     }
                 }
             }
-            let shadow_maps = target
-                .shadow
-                .as_ref()
-                .map_or(&self.no_shadows, |shadow| &shadow.array);
+            // array 0 at binding 2, array 1 at binding 5; the cleared layer for one not kept
+            let shadow_array = |array: usize| {
+                target
+                    .shadow
+                    .as_ref()
+                    .and_then(|shadow| shadow.whole[array].as_ref())
+                    .unwrap_or(&self.no_shadows)
+            };
+            let (shadow_maps, smaller_shadow_maps) = (shadow_array(0), shadow_array(1));
             let scene_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("mesh scene"),
                 layout: &self.scene_layout,
@@ -1077,6 +1095,10 @@ impl MeshGpu {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: wgpu::BindingResource::TextureView(&self.skin_table),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(smaller_shadow_maps),
                     },
                 ],
             });
@@ -1321,7 +1343,8 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan, emitters: &EmitterPlan) -> V
         &[
             scene.exposure,
             scene.lights.len().min(MAX_LIGHTS) as f32,
-            shadows.layer_side.max(1) as f32,
+            // spare since ADR-800 (it was the one layer side): each view's `map` has its own
+            0.0,
             f32::from(u8::from(scene.ambient_sh.is_some())),
         ],
     );
@@ -1347,8 +1370,18 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan, emitters: &EmitterPlan) -> V
                         view.depth_range[1],
                     ],
                 );
+                // where its map is kept (ADR-800): its array's side, the array, its layer
+                floats(
+                    &mut words,
+                    &[
+                        view.map.side.max(1) as f32,
+                        view.map.array as f32,
+                        view.map.layer as f32,
+                        0.0,
+                    ],
+                );
             }
-            None => words.extend_from_slice(&[0; 20]),
+            None => words.extend_from_slice(&[0; 24]),
         }
     }
     // the ambient occlusion: its radius (0: none), strength, and view (one past its index, 0:

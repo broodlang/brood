@@ -2319,13 +2319,14 @@ fn eye_spec(
 
 /// A scene spec's `:lights` (absent or nil: none) read into `mesh::Light`s, or why they are
 /// not lights: not a vector, more than `MAX_LIGHTS`, a light that is not one ([`light_spec`]),
-/// more than `MAX_SHADOWS` shadowed, or shadow maps past `MAX_SHADOW_TEXELS` together.
+/// more than `MAX_SHADOWS` shadowed, or shadow maps past `MAX_SHADOW_TEXELS` together as the
+/// two map arrays hold them (`ShadowArrays::texels`, ADR-800).
 fn lights_spec(
     heap: &Heap,
     given: Option<Value>,
     num: &dyn Fn(Value) -> f32,
 ) -> Result<Vec<crate::host::gui::mesh::Light>, String> {
-    use crate::host::gui::mesh::{MAX_LIGHTS, MAX_SHADOW_TEXELS, MAX_SHADOWS};
+    use crate::host::gui::mesh::{MAX_LIGHTS, MAX_SHADOW_TEXELS, MAX_SHADOWS, ShadowArrays};
     let id = match given {
         None | Some(Value::Nil) => return Ok(Vec::new()),
         Some(Value::Vector(id)) => id,
@@ -2360,19 +2361,37 @@ fn lights_spec(
             shadowed.len()
         ));
     }
-    // the GPU target keeps every map as a layer as big as the largest
-    let views: usize = shadowed.iter().map(|light| light.shadow_views()).sum();
-    let side = shadowed
+    // the GPU target keeps the maps in two arrays (ADR-800): the largest maps' at their size,
+    // every smaller map as a layer as big as the largest of those
+    let resolutions: Vec<u32> = shadowed
         .iter()
-        .filter_map(|light| light.shadow.as_ref())
-        .map(|shadow| u64::from(shadow.resolution))
-        .max()
-        .unwrap_or(0);
-    let texels = views as u64 * side * side;
+        .filter_map(|light| {
+            let shadow = light.shadow.as_ref()?;
+            Some(std::iter::repeat_n(shadow.resolution, light.shadow_views()))
+        })
+        .flatten()
+        .collect();
+    let arrays = ShadowArrays::of(&resolutions);
+    let texels = arrays.texels();
     if texels > MAX_SHADOW_TEXELS {
+        let [large, small] = arrays.sides;
+        let [in_large, in_small] = arrays.layers;
+        let maps_of = |count: u32, side: u32| {
+            let plural = if count == 1 { "" } else { "s" };
+            format!("{count} map{plural} of {side}²")
+        };
+        let maps = if in_small == 0 {
+            maps_of(in_large, large)
+        } else {
+            format!(
+                "{} and {}",
+                maps_of(in_large, large),
+                maps_of(in_small, small)
+            )
+        };
         return Err(format!(
-            "the shadow maps need {views} maps of {side}² texels, more than {MAX_SHADOW_TEXELS} \
-             texels together (a point light's shadow is 6 maps): lower a :resolution"
+            "the shadow maps need {texels} texels together ({maps}), more than \
+             {MAX_SHADOW_TEXELS} (a point light's shadow is 6 maps): lower a :resolution"
         ));
     }
     Ok(lights)
@@ -3808,6 +3827,23 @@ mod gui_scene_light_tests {
         refused(&format!("[{five}]"), "more than the 4");
         let big = "{:position [0 1 0] :shadow {:resolution 4096}} ".repeat(2);
         refused(&format!("[{big}]"), "lower a :resolution");
+        refused(
+            &format!("[{big}]"),
+            "need 201326592 texels together (12 maps of 4096²), more than 33554432",
+        );
+        // ADR-800: counted as the two arrays hold them, a 4096 spot with a 2048 point light's
+        // cube is over the limit and with a 1024 one within it
+        refused(
+            "[{:position [0 2 0] :direction [0 -1 0] :cone [0.3 0.6] :shadow {:resolution 4096}}
+              {:position [1 2 0] :shadow {:resolution 2048}}]",
+            "need 41943040 texels together (1 map of 4096² and 6 maps of 2048²)",
+        );
+        let within = lights(
+            "[{:position [0 2 0] :direction [0 -1 0] :cone [0.3 0.6] :shadow {:resolution 4096}}
+              {:position [1 2 0] :shadow {:resolution 1024}}]",
+        )
+        .expect("a 4096 key and a 1024 point light's cube are within the limit");
+        assert_eq!(within.lights.len(), 2);
         let error = scene_with("[]", "{:cast-shadow :no}").expect_err("cast-shadow");
         assert!(error.contains(":cast-shadow is true or false"), "{error}");
     }

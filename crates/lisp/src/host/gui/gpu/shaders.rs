@@ -662,6 +662,7 @@ struct Emitter {
 struct ShadowView {
     view_proj: mat4x4<f32>,
     info: vec4<f32>,            // texel size (at 1 m for a perspective view), resolution, near, far
+    map: vec4<f32>,             // where its map is kept (ADR-800): its array's side, the array (0 or 1), its layer, spare
 };
 struct SceneU {
     view_proj: mat4x4<f32>,
@@ -669,7 +670,7 @@ struct SceneU {
     lights: array<Light, 8>,
     sky: vec4<f32>,
     ground: vec4<f32>,
-    params: vec4<f32>,          // exposure, light count, shadow layer side, ambient is SH (0 or 1)
+    params: vec4<f32>,          // exposure, light count, spare (ADR-800: each view's `map` has its side), ambient is SH (0 or 1)
     ambient_sh: array<vec4<f32>, 9>,    // L00, L1-1, L10, L11, L2-2, L2-1, L20, L21, L22 (rgb)
     shadows: array<ShadowView, 24>,
     occlusion: vec4<f32>,       // ambient occlusion radius (metres; 0: none), strength, view + 1 (0: none)
@@ -702,6 +703,10 @@ struct DrawU {
 // `mesh::skin_table` (ADR-794): the diffuse light under skin, linear rgb, the cosine to the light
 // across and the curvature down; read with `textureLoad` only (`skin_diffuse`)
 @group(0) @binding(4) var skin_table: texture_2d<f32>;
+// ADR-800: the shadow maps smaller than the largest, in a second array at their own largest size
+// (`shadow_maps` holds the largest); a view's `map.y` says which, read through `map_gather` and
+// `map_load`
+@group(0) @binding(5) var smaller_shadow_maps: texture_depth_2d_array;
 @group(1) @binding(0) var<uniform> draw: DrawU;
 // this frame's morph offsets, blended on the CPU from the sparse targets (`mesh::add_morphs`):
 // two vec4s a vertex (position, normal), a morphed draw's from `morph_info.w`, so a vertex
@@ -984,6 +989,25 @@ fn project_into(view: ShadowView, point: vec3<f32>) -> Projected {
     return projected;
 }
 
+// a comparison gather of the shadow map `map` (a view's `map`, ADR-800) names, at `coords` in
+// that array's own unit square; `map_load` one of its texels. Gathers and loads have no implicit
+// derivatives, so choosing the array in non-uniform control flow is sound.
+fn map_gather(map: vec4<f32>, coords: vec2<f32>, depth: f32) -> vec4<f32> {
+    let layer = i32(map.z);
+    if (map.y > 0.5) {
+        return textureGatherCompare(smaller_shadow_maps, shadow_sampler, coords, layer, depth);
+    }
+    return textureGatherCompare(shadow_maps, shadow_sampler, coords, layer, depth);
+}
+
+fn map_load(map: vec4<f32>, texel: vec2<i32>) -> f32 {
+    let layer = i32(map.z);
+    if (map.y > 0.5) {
+        return textureLoad(smaller_shadow_maps, texel, layer, 0);
+    }
+    return textureLoad(shadow_maps, texel, layer, 0);
+}
+
 // the CPU's `sample_shadow`: a 3×3 filter of bilinear taps is a 4×4 block of comparisons
 // weighted (1 − f, 1, 1, f) each way, gathered here 2×2 at a time
 fn shadow_sample(view_index: u32, point: vec3<f32>) -> f32 {
@@ -998,14 +1022,14 @@ fn shadow_sample(view_index: u32, point: vec3<f32>) -> f32 {
     let fraction = texels - corner;
     let weights_x = vec4<f32>(1.0 - fraction.x, 1.0, 1.0, fraction.x);
     let weights_y = vec4<f32>(1.0 - fraction.y, 1.0, 1.0, fraction.y);
-    let layer_side = scene.params.z;
+    let map_side = view.map.x;
     var lit = 0.0;
     for (var block_y = 0u; block_y < 2u; block_y = block_y + 1u) {
         for (var block_x = 0u; block_x < 2u; block_x = block_x + 1u) {
             // the block whose top-left texel is (corner − 1 + 2 block): gathered where its four
             // texels meet, so no rounding picks a neighbour
             let meet = corner + vec2<f32>(f32(2u * block_x), f32(2u * block_y));
-            let gathered = textureGatherCompare(shadow_maps, shadow_sampler, meet / layer_side, i32(view_index), depth);
+            let gathered = map_gather(view.map, meet / map_side, depth);
             let left = weights_x[2u * block_x];
             let right = weights_x[2u * block_x + 1u];
             let top = weights_y[2u * block_y];
@@ -1019,11 +1043,12 @@ fn shadow_sample(view_index: u32, point: vec3<f32>) -> f32 {
 }
 
 // the CPU's `stored_depth`: a texel of view `view_index`'s map, reads off its left or top edge
-// clamped to it, off its right or bottom edge reading the layer (cleared to the far plane)
+// clamped to it, off its right or bottom edge reading the layer (cleared to the far plane) up
+// to its array's side
 fn stored_depth(view_index: u32, texel: vec2<f32>) -> f32 {
-    let last = scene.params.z - 1.0;
-    let clamped = clamp(texel, vec2<f32>(0.0), vec2<f32>(last));
-    return textureLoad(shadow_maps, vec2<i32>(clamped), i32(view_index), 0);
+    let map = scene.shadows[view_index].map;
+    let clamped = clamp(texel, vec2<f32>(0.0), vec2<f32>(map.x - 1.0));
+    return map_load(map, vec2<i32>(clamped));
 }
 
 // the CPU's `bilinear_tap`: a receiver at `depth` compared with the four texels about `at`
@@ -1031,7 +1056,8 @@ fn stored_depth(view_index: u32, texel: vec2<f32>) -> f32 {
 fn bilinear_tap(view_index: u32, at: vec2<f32>, depth: f32) -> f32 {
     let corner = floor(at);
     let fraction = at - corner;
-    let gathered = textureGatherCompare(shadow_maps, shadow_sampler, (corner + vec2<f32>(1.0)) / scene.params.z, i32(view_index), depth);
+    let map = scene.shadows[view_index].map;
+    let gathered = map_gather(map, (corner + vec2<f32>(1.0)) / map.x, depth);
     // a gather's order: (left, bottom), (right, bottom), (right, top), (left, top)
     return mix(mix(gathered.w, gathered.z, fraction.x), mix(gathered.x, gathered.y, fraction.x), fraction.y);
 }
@@ -1426,7 +1452,7 @@ fn ambient_occlusion(world: vec3<f32>, normal: vec3<f32>) -> f32 {
         }
         let column = min(u32(across_unit * f32(side)), side - 1u);
         let row = min(u32(down_unit * f32(side)), side - 1u);
-        let stored = camera_distance(view.view_proj, textureLoad(shadow_maps, vec2<i32>(i32(column), i32(row)), i32(at - 1u), 0));
+        let stored = camera_distance(view.view_proj, map_load(view.map, vec2<i32>(i32(column), i32(row))));
         let reached = camera_distance(view.view_proj, clip.z / clip.w);
         if (stored < reached - radius * 0.05) {
             occluded = occluded + min(radius / max(abs(own_distance - stored), 1e-6), 1.0);
