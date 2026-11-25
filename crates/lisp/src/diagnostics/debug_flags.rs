@@ -647,6 +647,21 @@ pub const FLAGS: &[DebugFlag] = &[
         "`=8`: the GPU painter draws 3D scenes with 8× multisampling where the adapter can (4× by default; ADR-799) — a hair surface's coverage in nine steps rather than five, every edge a little smoother, the scene targets twice the memory.",
     ),
     f(
+        "BROOD_GUI_GPU_TIMES",
+        HOST,
+        "`=0`: no timestamp queries on a scene's passes (on where the adapter has them; ADR-801: `gui/scene-gpu-times`, `[gui-scene-gpu]` under BROOD_GUI_TRACE). `=draws`: also each draw of a colour pass, printed as a `[gui-scene-gpu-draws]` line a frame (`scene:mesh:surface:triangles:us`), where the adapter can stamp inside a pass",
+    ),
+    f(
+        "BROOD_GUI_HAIR_PREPASS",
+        HOST,
+        "`=0`: a scene's `:hair`/`:strands` drawn in one pass, every layer lit, as before ADR-802 (by default its coverage goes to depth first and only the hair in front is lit) — to compare",
+    ),
+    f(
+        "BROOD_GUI_HAIR_TRIAL",
+        HOST,
+        "for measuring what hair costs on the card (ADR-802): `=1` hair drawn by its coverage alone, lit by nothing; `=2` without its hair-on-hair shadow",
+    ),
+    f(
         "BROOD_GUI_DUMP",
         HOST,
         "`=<path.ppm>`: write the painted frame as a PPM after every paint (the CPU canvas, or a readback of the GPU frame under BROOD_GUI_GPU) — look at the raster (text AA, hairlines, sprites) from a script",

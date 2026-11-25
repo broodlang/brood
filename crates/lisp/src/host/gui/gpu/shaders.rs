@@ -731,7 +731,9 @@ struct VertexIn {
     @location(6) curvature: f32,
 };
 struct VertexOut {
-    @builtin(position) clip: vec4<f32>,
+    // invariant: the hair's depth pass and its front pass must put a sample at the same depth
+    // to the bit, for the front pass's equal test (ADR-802)
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) world: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
@@ -825,6 +827,9 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
 // the samples a pixel the scene is drawn with: 8 where the adapter can, else 4 (ADR-799;
 // `scenes::scene_samples` sets it when the pipeline is made)
 override SAMPLES: u32 = 4u;
+// a trial of what hair costs (`BROOD_GUI_HAIR_TRIAL`): 0 drawn as ever, 1 its coverage
+// alone (lit by nothing: its base colour), 2 with no hair-on-hair shadow
+override HAIR_TRIAL: u32 = 0u;
 
 // a `:hair` surface's coverage step at `sample`, as `mesh::HAIR_COVERAGE_STEPS` holds them:
 // eight, (k + 0.5) / 8 in an order that spreads them; with four samples the four of them that
@@ -1197,6 +1202,9 @@ fn shadow_visibility(light: Light, world: vec3<f32>, surface_normal: vec3<f32>, 
 // before it: how far it lies behind the map's first surface, a mean of HAIR_SHADOW_TAPS (16)
 // taps of a disc HAIR_SHADOW_TEXELS (6) texels round it, absorbed at HAIR_ABSORPTION (40) a metre
 fn hair_shadow(light: Light, world: vec3<f32>, turn: f32) -> f32 {
+    if (HAIR_TRIAL == 2u) {
+        return 1.0;
+    }
     var at = light.shadow.y;
     if (light.shadow.z == 6u) {
         at = at + cube_face(world - light.position.xyz);
@@ -1746,6 +1754,32 @@ fn tone(color: vec3<f32>, exposure: f32) -> vec3<f32> {
     return linear_to_srgb(mapped);
 }
 
+// the samples a `:hair` or `:strands` fragment covers (each a step of
+// `mesh::HAIR_COVERAGE_STEPS`: `hair_step`), from its texel's alpha: what `fs_mesh` writes
+// as its sample mask and the hair's depth pass writes to depth (ADR-802)
+fn hair_mask(texel: vec4<f32>, fragment: VertexOut) -> u32 {
+    var coverage = clamp((texel.a * draw.color.a - 0.5 * draw.material.w) / max(draw.material.w, 1e-6), 0.0, 1.0);
+    var mask = 0u;
+    for (var sample = 0u; sample < SAMPLES; sample = sample + 1u) {
+        if (coverage > hair_step(sample)) {
+            mask = mask | (1u << sample);
+        }
+    }
+    // a strand thinner than a pixel covers only its share of one, at samples its own
+    // position picks, so overlapping strands add up (`mesh::strand_sample_step`)
+    // (a strand as wide as a pixel, a wisp, keeps the fixed steps above: `mesh::STRAND_WHOLE`)
+    if (draw.flags.x == 5u && fragment.tangent.w < 0.999) {
+        coverage = coverage * fragment.tangent.w;
+        mask = 0u;
+        for (var sample = 0u; sample < SAMPLES; sample = sample + 1u) {
+            if (coverage > strand_sample_step(fragment.world, sample)) {
+                mask = mask | (1u << sample);
+            }
+        }
+    }
+    return mask;
+}
+
 struct MeshFragment {
     @location(0) color: vec4<f32>,
     // the samples it covers: all of them, but a `:hair` surface's coverage of its `SAMPLES`
@@ -1781,29 +1815,23 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     }
     var mask = 0xFFFFFFFFu;
     if (draw.flags.x == 4u || draw.flags.x == 5u) {
-        var coverage = clamp((texel.a * draw.color.a - 0.5 * draw.material.w) / max(draw.material.w, 1e-6), 0.0, 1.0);
-        mask = 0u;
-        for (var sample = 0u; sample < SAMPLES; sample = sample + 1u) {
-            if (coverage > hair_step(sample)) {
-                mask = mask | (1u << sample);
-            }
-        }
-        // a strand thinner than a pixel covers only its share of one, at samples its own
-        // position picks, so overlapping strands add up (`mesh::strand_sample_step`)
-        // (a strand as wide as a pixel, a wisp, keeps the fixed steps above: `mesh::STRAND_WHOLE`)
-        if (draw.flags.x == 5u && fragment.tangent.w < 0.999) {
-            coverage = coverage * fragment.tangent.w;
-            mask = 0u;
-            for (var sample = 0u; sample < SAMPLES; sample = sample + 1u) {
-                if (coverage > strand_sample_step(fragment.world, sample)) {
-                    mask = mask | (1u << sample);
-                }
-            }
-        }
+        mask = hair_mask(texel, fragment);
         if (mask == 0u) {
             discard;
         }
+        if (HAIR_TRIAL == 1u) {
+            var flat: MeshFragment;
+            flat.color = vec4<f32>(linear_to_srgb(srgb_to_linear(texel.rgb) * draw.color.rgb), 1.0);
+            flat.mask = mask;
+            return flat;
+        }
     }
+    return MeshFragment(mesh_lit(fragment, front, texel, normal_texel, occlusion_texel, detail_texel, uv_dx, uv_dy, alpha), mask);
+}
+
+// `fs_mesh`'s colour from its textures, its coverage decided: no `discard` anywhere in it, so
+// the hair's front pass (`fs_hair_front`) keeps the early depth test (ADR-802)
+fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: vec4<f32>, occlusion_texel: vec4<f32>, detail_texel: vec4<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>, alpha: f32) -> vec4<f32> {
     var base = srgb_to_linear(texel.rgb) * draw.color.rgb;
     var normal = safe_normalize(fragment.normal);
     if (!front) {
@@ -1869,7 +1897,41 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
         strand = safe_normalize(fragment.tangent.xyz);
     }
     let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand, curvature, specular_kept, diffuse_normal, mirror_surface, under_cornea), scene.params.x);
-    return MeshFragment(vec4<f32>(lit * alpha, alpha), mask);
+    return vec4<f32>(lit * alpha, alpha);
+}
+
+struct HairDepth {
+    @builtin(sample_mask) mask: u32,
+};
+
+// the hair's depth pass (ADR-802): the samples a `:hair` or `:strands` fragment covers, as
+// `fs_mesh` decides them, written to depth alone, before the colour pass
+@fragment
+fn fs_hair_depth(fragment: VertexOut) -> HairDepth {
+    let texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
+    let mask = hair_mask(select(vec4<f32>(1.0), texel, (draw.flags.y & 1u) != 0u), fragment);
+    if (mask == 0u) {
+        discard;
+    }
+    return HairDepth(mask);
+}
+
+// the hair's colour after its depth pass (ADR-802): the depth test (equal) keeps exactly the
+// samples the depth pass wrote for the hair in front, so no mask and no `discard` here, and
+// the samples behind are never shaded
+@fragment
+fn fs_hair_front(fragment: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let base_texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
+    let normal_texel = straight(textureSample(normal_texture, texture_sampler, fragment.uv), (draw.flags.y & 8u) != 0u);
+    let occlusion_texel = straight(textureSample(occlusion_texture, texture_sampler, fragment.uv), (draw.flags.y & 32u) != 0u);
+    let detail_texel = straight(textureSample(detail_texture, texture_sampler, fragment.uv * draw.detail.xy), (draw.flags.y & 128u) != 0u);
+    let texel = select(vec4<f32>(1.0), base_texel, (draw.flags.y & 1u) != 0u);
+    let uv_dx = dpdx(fragment.uv);
+    let uv_dy = dpdy(fragment.uv);
+    if (HAIR_TRIAL == 1u) {
+        return vec4<f32>(linear_to_srgb(srgb_to_linear(texel.rgb) * draw.color.rgb), 1.0);
+    }
+    return mesh_lit(fragment, front, texel, normal_texel, occlusion_texel, detail_texel, uv_dx, uv_dy, 1.0);
 }
 
 struct ShadowOut {

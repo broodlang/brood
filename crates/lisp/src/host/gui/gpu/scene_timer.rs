@@ -14,7 +14,10 @@ use crate::host::gui::scene_gpu_times::{SceneGpuSample, record};
 /// How many scenes a frame are timed; any more are drawn untimed.
 pub(super) const TIMED_SCENES: usize = 4;
 /// Two stamps round the shadow passes and two round the colour pass, a scene.
-const QUERIES: u32 = 4 * TIMED_SCENES as u32;
+const PASS_QUERIES: u32 = 4 * TIMED_SCENES as u32;
+/// Under `BROOD_GUI_GPU_TIMES=draws`, a stamp before each draw of a colour pass and one after
+/// its last, at most this many a frame: past it the rest of the frame's draws go untimed.
+const DRAW_QUERIES: u32 = 1024;
 /// Read-back buffers in flight: a frame is stamped only when one is free.
 const SLOTS: usize = 3;
 
@@ -24,10 +27,24 @@ const MAPPED: u8 = 2;
 const FAILED: u8 = 3;
 
 /// Where one scene's stamps went in the query set, by kind.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct SceneStamps {
     shadow: Option<(u32, u32)>,
     colour: Option<(u32, u32)>,
+    /// Each timed draw of the colour pass, in order, with the stamp written before it; the
+    /// stamp after the last is `draws_end`.
+    draws: Vec<DrawStamp>,
+    draws_end: Option<u32>,
+}
+
+/// One draw of a colour pass as `BROOD_GUI_GPU_TIMES=draws` tells it: its mesh handle, its
+/// surface, its triangles, and the stamp written before it.
+#[derive(Clone, Copy)]
+pub(super) struct DrawStamp {
+    pub(super) mesh: u32,
+    pub(super) surface: crate::host::gui::mesh::Surface,
+    pub(super) triangles: u32,
+    pub(super) query: u32,
 }
 
 struct Slot {
@@ -48,6 +65,10 @@ pub(super) struct SceneTimer {
     armed: Option<usize>,
     stamps: Vec<SceneStamps>,
     next: u32,
+    /// The query set's size: the passes' stamps, and the draws' when they are timed.
+    queries: u32,
+    /// Whether each draw of a colour pass is timed (`BROOD_GUI_GPU_TIMES=draws`).
+    draws: bool,
 }
 
 impl SceneTimer {
@@ -63,7 +84,13 @@ impl SceneTimer {
         if period <= 0.0 {
             return None;
         }
-        let bytes = u64::from(QUERIES) * 8;
+        // each draw too, where asked and the device can stamp inside a pass
+        let draws = std::env::var("BROOD_GUI_GPU_TIMES").as_deref() == Ok("draws")
+            && device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES);
+        let queries = PASS_QUERIES + if draws { DRAW_QUERIES } else { 0 };
+        let bytes = u64::from(queries) * 8;
         let slots = (0..SLOTS)
             .map(|_| Slot {
                 buffer: device.create_buffer(&wgpu::BufferDescriptor {
@@ -81,7 +108,7 @@ impl SceneTimer {
             query_set: device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("scene timestamps"),
                 ty: wgpu::QueryType::Timestamp,
-                count: QUERIES,
+                count: queries,
             }),
             resolve: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("scene timestamps resolved"),
@@ -94,6 +121,8 @@ impl SceneTimer {
             armed: None,
             stamps: Vec::new(),
             next: 0,
+            queries,
+            draws,
         })
     }
 
@@ -120,6 +149,9 @@ impl SceneTimer {
                             .iter()
                             .map(|bytes| u64::from_le_bytes(*bytes))
                             .collect();
+                        if let Some(line) = draws_line(&slot.stamps, &ticks, self.period) {
+                            eprintln!("{line}");
+                        }
                         measure(&slot.stamps, &ticks, self.period)
                     };
                     slot.buffer.unmap();
@@ -141,12 +173,57 @@ impl SceneTimer {
     }
 
     fn take(&mut self) -> Option<(u32, u32)> {
-        if self.armed.is_none() || self.next + 2 > QUERIES {
+        if self.armed.is_none() || self.next + 2 > self.queries {
             return None;
         }
         let pair = (self.next, self.next + 1);
         self.next += 2;
         Some(pair)
+    }
+
+    /// The query set, for a stamp written inside a pass.
+    pub(super) fn query_set(&self) -> &wgpu::QuerySet {
+        &self.query_set
+    }
+
+    /// The stamp to write before a draw of scene `scene`'s colour pass, under
+    /// `BROOD_GUI_GPU_TIMES=draws`: `None` when draws are not timed or the frame's stamps are
+    /// used up (room is always kept for the stamp after the last draw).
+    pub(super) fn draw_stamp(
+        &mut self,
+        scene: usize,
+        mesh: u32,
+        surface: crate::host::gui::mesh::Surface,
+        triangles: u32,
+    ) -> Option<u32> {
+        if !self.draws
+            || self.armed.is_none()
+            || scene >= TIMED_SCENES
+            || self.next + 2 > self.queries
+        {
+            return None;
+        }
+        let query = self.next;
+        self.next += 1;
+        self.scene_entry(scene).draws.push(DrawStamp {
+            mesh,
+            surface,
+            triangles,
+            query,
+        });
+        Some(query)
+    }
+
+    /// The stamp to write after the last draw of scene `scene`'s colour pass: `None` when none
+    /// of its draws was stamped.
+    pub(super) fn draws_end_stamp(&mut self, scene: usize) -> Option<u32> {
+        if !self.draws || self.armed.is_none() || self.stamps.get(scene)?.draws.is_empty() {
+            return None;
+        }
+        let query = self.next;
+        self.next += 1;
+        self.scene_entry(scene).draws_end = Some(query);
+        Some(query)
     }
 
     /// Scene `scene`'s shadow stamps, taken before its first shadow pass: the first pass
@@ -233,6 +310,38 @@ impl SceneTimer {
 }
 
 /// One frame's sample from its stamps' layout and the ticks read back.
+/// One frame's timed draws as a trace line, `[gui-scene-gpu-draws] scene:mesh:surface:triangles:us …`
+/// in draw order: each draw from its stamp to the next one's. `None` when no draw was timed.
+fn draws_line(stamps: &[SceneStamps], ticks: &[u64], period: f64) -> Option<String> {
+    let mut line = String::from("[gui-scene-gpu-draws]");
+    let mut any = false;
+    for (scene, stamp) in stamps.iter().enumerate() {
+        let Some(end) = stamp.draws_end else {
+            continue;
+        };
+        let boundaries: Vec<u32> = stamp
+            .draws
+            .iter()
+            .map(|draw| draw.query)
+            .chain(std::iter::once(end))
+            .collect();
+        for (draw, pair) in stamp.draws.iter().zip(boundaries.windows(2)) {
+            let (Some(start), Some(finish)) =
+                (ticks.get(pair[0] as usize), ticks.get(pair[1] as usize))
+            else {
+                continue;
+            };
+            let micros = finish.saturating_sub(*start) as f64 * period / 1000.0;
+            line.push_str(&format!(
+                " {scene}:{}:{:?}:{}:{micros:.1}",
+                draw.mesh, draw.surface, draw.triangles
+            ));
+            any = true;
+        }
+    }
+    any.then_some(line)
+}
+
 fn measure(stamps: &[SceneStamps], ticks: &[u64], period: f64) -> Option<SceneGpuSample> {
     let span = |pair: Option<(u32, u32)>| -> f64 {
         pair.and_then(|(start, end)| {
@@ -262,10 +371,12 @@ mod tests {
             SceneStamps {
                 shadow: Some((0, 1)),
                 colour: Some((2, 3)),
+                ..SceneStamps::default()
             },
             SceneStamps {
                 shadow: None,
                 colour: Some((4, 5)),
+                ..SceneStamps::default()
             },
         ];
         // a tick of 2 ns: 500 ticks a microsecond
@@ -274,6 +385,30 @@ mod tests {
         assert_eq!(sample.shadow_us, 2.0);
         assert_eq!(sample.scene_us, 6.0 + 1.0);
         assert_eq!(sample.scenes, 2);
+    }
+
+    #[test]
+    fn each_draw_is_timed_from_its_stamp_to_the_next() {
+        use crate::host::gui::mesh::Surface;
+        let draw = |mesh, surface, query| DrawStamp {
+            mesh,
+            surface,
+            triangles: 10,
+            query,
+        };
+        let stamps = [SceneStamps {
+            colour: Some((0, 1)),
+            draws: vec![draw(4, Surface::Skin, 2), draw(7, Surface::Strands, 3)],
+            draws_end: Some(4),
+            ..SceneStamps::default()
+        }];
+        // a tick of 1 ns: draws of 3 us and 5 us
+        let ticks = [0, 10_000, 1_000, 4_000, 9_000];
+        assert_eq!(
+            draws_line(&stamps, &ticks, 1.0).as_deref(),
+            Some("[gui-scene-gpu-draws] 0:4:Skin:10:3.0 0:7:Strands:10:5.0")
+        );
+        assert_eq!(draws_line(&[SceneStamps::default()], &ticks, 1.0), None);
     }
 
     #[test]

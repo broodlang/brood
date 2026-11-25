@@ -565,7 +565,13 @@ pub(super) fn request_device(
             & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
             // and timestamp queries where it has them: what times a scene's passes on the card
             // (ADR-801, `scene_timer`)
-            | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY),
+            | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY)
+            // and inside passes, only when each draw is to be timed: BROOD_GUI_GPU_TIMES=draws
+            | (if std::env::var("BROOD_GUI_GPU_TIMES").as_deref() == Ok("draws") {
+                adapter.features() & wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES
+            } else {
+                wgpu::Features::empty()
+            }),
         required_limits: wgpu::Limits::default(),
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: wgpu::MemoryHints::default(),
