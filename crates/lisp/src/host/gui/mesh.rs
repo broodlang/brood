@@ -279,6 +279,9 @@ pub struct Mesh {
     /// units, found once from its positions and normals ([`vertex_curvature`]): what a `:skin`
     /// surface's scattering reads (ADR-794).
     pub curvature: Vec<f32>,
+    /// How soft its flesh is at each vertex, 0 (bone) … 1 (soft), for the ring a contact raises
+    /// (ADR-805); empty: none (a contact still lays its skin flat, with no ring).
+    pub softness: Vec<f32>,
     /// Where its vertices can be, for fitting a shadow map to a scene without posing them.
     pub bounds: MeshBounds,
 }
@@ -495,6 +498,9 @@ pub struct MeshParts {
     pub indices: Vec<u8>,
     pub indices_wide: bool,
     pub morphs: Vec<(Vec<u8>, Vec<u8>)>,
+    /// How soft its flesh is a vertex, f32 0 (bone) … 1 (soft), for the ring round a contact
+    /// (ADR-805); empty: none.
+    pub softness: Vec<u8>,
 }
 
 fn floats<const N: usize>(name: &str, bytes: &[u8], count: usize) -> Result<Vec<[f32; N]>, String> {
@@ -660,6 +666,14 @@ impl Mesh {
             morphs.push(morph);
         }
         let bounds = MeshBounds::of(&positions, &joints, &weights, &morphs);
+        let softness = if parts.softness.is_empty() {
+            Vec::new()
+        } else {
+            floats::<1>("softness", &parts.softness, count)?
+                .into_iter()
+                .map(|[value]| value.clamp(0.0, 1.0))
+                .collect()
+        };
         let curvature = vertex_curvature(&positions, &normals, &indices);
         Ok(Mesh {
             positions,
@@ -671,6 +685,7 @@ impl Mesh {
             indices,
             morphs,
             curvature,
+            softness,
             bounds,
         })
     }
@@ -855,6 +870,8 @@ pub struct Material {
     pub hair_shift: [f32; 2],
     /// The second highlight's colour, linear RGB (`:sheen`); nil: the hair's own base colour.
     pub sheen: Option<[f32; 3]>,
+    /// Its skin pressed by the scene's contacts (`:deform`, ADR-805).
+    pub deform: bool,
 }
 
 impl Default for Material {
@@ -881,6 +898,7 @@ impl Default for Material {
             strand_width: DEFAULT_STRAND_WIDTH,
             hair_shift: [HAIR_SHIFT_PRIMARY, HAIR_SHIFT_SECONDARY],
             sheen: None,
+            deform: false,
         }
     }
 }
@@ -1146,6 +1164,129 @@ pub struct Scene {
     /// Joint matrices (column-major, 16 floats each), one list per skeleton.
     pub palettes: Vec<Arc<[f32]>>,
     pub draws: Vec<Draw>,
+    /// What presses on the skin of its `:deform` draws this frame (ADR-805), in world space, at
+    /// most [`MAX_CONTACTS`]: skin passed into one is laid onto its surface, and soft flesh round
+    /// it pushed out in a ring ([`deform_by_contacts`]).
+    pub contacts: Vec<Contact>,
+}
+
+/// The most contacts a scene presses its skin with (ADR-805).
+pub const MAX_CONTACTS: usize = 16;
+/// How far round a contact soft flesh rises, at the least (metres); the deeper the press, the
+/// wider: [`RING_WIDTH`] + [`RING_SPREAD`] × its depth (ADR-805).
+pub const RING_WIDTH: f32 = 0.012;
+pub const RING_SPREAD: f32 = 2.0;
+/// How high the ring rises at its crest, for flesh of softness 1, as a share of the press's
+/// deepest depth: about the dent's volume spread round it (ADR-805).
+pub const RING_LIFT: f32 = 0.35;
+/// How deep skin must be pressed to take the contact's surface's normal wholly (metres): the
+/// flattened patch shades flat, its edge blends (ADR-805).
+pub const FLAT_DEPTH: f32 = 0.002;
+
+/// A shape pressing on skin (ADR-805), in world space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Contact {
+    /// The half-space `normal · p < offset` is inside (a floor, a pane, a wall); `normal` unit.
+    Plane { normal: [f32; 3], offset: f32 },
+    /// A ball.
+    Sphere { centre: [f32; 3], radius: f32 },
+    /// A segment `start`–`end` grown by `radius` (a finger's bone, a forearm, a seat's edge).
+    Capsule {
+        start: [f32; 3],
+        end: [f32; 3],
+        radius: f32,
+    },
+}
+
+impl Contact {
+    /// How far `point` lies outside the shape (negative inside), and the unit direction out of
+    /// it there: its surface's normal at the nearest point.
+    pub fn signed_distance(&self, point: [f32; 3]) -> (f32, [f32; 3]) {
+        let away = |from: [f32; 3], radius: f32| {
+            let offset = [0, 1, 2].map(|axis| point[axis] - from[axis]);
+            let length = dot(offset, offset).sqrt();
+            let direction = if length > 1e-9 {
+                offset.map(|value| value / length)
+            } else {
+                [0.0, 1.0, 0.0]
+            };
+            (length - radius, direction)
+        };
+        match *self {
+            Contact::Plane { normal, offset } => (dot(normal, point) - offset, normal),
+            Contact::Sphere { centre, radius } => away(centre, radius),
+            Contact::Capsule { start, end, radius } => {
+                let along = [0, 1, 2].map(|axis| end[axis] - start[axis]);
+                let length_squared = dot(along, along);
+                let share = if length_squared > 1e-12 {
+                    (dot([0, 1, 2].map(|axis| point[axis] - start[axis]), along) / length_squared)
+                        .clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                away(
+                    [0, 1, 2].map(|axis| start[axis] + along[axis] * share),
+                    radius,
+                )
+            }
+        }
+    }
+}
+
+/// How deep each contact presses into any of `points` (metres, 0 where it touches none): what
+/// sizes the ring round it ([`deform_by_contacts`]). The scene's every `:deform` draw's posed
+/// points together, so meshes that meet (a body and its face) rise alike at their seam.
+pub fn contact_depths<'p>(
+    contacts: &[Contact],
+    points: impl IntoIterator<Item = &'p [f32; 3]>,
+) -> Vec<f32> {
+    let mut depths = vec![0.0f32; contacts.len().min(MAX_CONTACTS)];
+    for point in points {
+        for (depth, contact) in depths.iter_mut().zip(contacts) {
+            let (distance, _) = contact.signed_distance(*point);
+            *depth = depth.max(-distance);
+        }
+    }
+    depths
+}
+
+/// A posed skin point and its unit normal, pressed by `contacts` whose deepest presses are
+/// `depths` (ADR-805): inside one, laid onto its surface, its normal turning to face into it (out
+/// of the body: the surface's normal reversed);
+/// just outside, flesh of `softness` (0 bone … 1 soft) lifted along its normal in a ring as wide
+/// as the press is deep, its normal tilted with the ring's slope. The shader's
+/// `deform_by_contacts` is the same.
+pub fn deform_by_contacts(
+    contacts: &[Contact],
+    depths: &[f32],
+    point: [f32; 3],
+    normal: [f32; 3],
+    softness: f32,
+) -> ([f32; 3], [f32; 3]) {
+    let mut point = point;
+    let mut normal = normal;
+    for (contact, &depth) in contacts.iter().zip(depths) {
+        let (distance, out) = contact.signed_distance(point);
+        if distance < 0.0 {
+            point = [0, 1, 2].map(|axis| point[axis] - out[axis] * distance);
+            let flat = (-distance / FLAT_DEPTH).clamp(0.0, 1.0);
+            normal =
+                normalize([0, 1, 2].map(|axis| normal[axis] + (out[axis] - normal[axis]) * flat));
+        } else if softness > 0.0 && depth > 0.0 {
+            let width = RING_WIDTH + RING_SPREAD * depth;
+            let reach = distance / width;
+            if reach < 3.0 {
+                let lift = RING_LIFT * softness * depth * (-reach * reach).exp();
+                // the ring's slope, falling away from the contact: its normal leans away too
+                let slope = 2.0 * reach / width * lift;
+                let across = dot(out, normal);
+                let away = normalize([0, 1, 2].map(|axis| out[axis] - normal[axis] * across));
+                point = [0, 1, 2].map(|axis| point[axis] + normal[axis] * lift);
+                normal = normalize([0, 1, 2].map(|axis| normal[axis] + away[axis] * slope));
+            }
+        }
+    }
+    (point, normal)
 }
 
 impl Scene {
@@ -4184,6 +4325,49 @@ struct Posed<'a> {
     vertices: Vec<ClipVertex>,
 }
 
+/// Whether `draw`'s skin is pressed by the scene's contacts (ADR-805): a `:deform` material
+/// that is skin, not strands or an eye (whose optics need its mesh as it is).
+pub fn pressed(draw: &Draw) -> bool {
+    draw.material.deform
+        && !matches!(
+            draw.material.surface,
+            Surface::Strands | Surface::Hair | Surface::Eye
+        )
+}
+
+/// The scene's `:deform` draws' posed vertices pressed by its contacts (ADR-805): each
+/// contact's deepest press found over them all, then each vertex laid onto what it passed into
+/// and lifted in a ring round it ([`deform_by_contacts`]), its tangent kept square to its new
+/// normal and its clip position moved with it. Nothing without contacts.
+fn press_posed(scene: &Scene, posed: &mut [Posed]) {
+    if scene.contacts.is_empty() {
+        return;
+    }
+    let contacts = &scene.contacts[..scene.contacts.len().min(MAX_CONTACTS)];
+    let depths = contact_depths(
+        contacts,
+        posed
+            .iter()
+            .filter(|item| pressed(item.draw))
+            .flat_map(|item| item.vertices.iter().map(|vertex| &vertex.world)),
+    );
+    for item in posed.iter_mut().filter(|item| pressed(item.draw)) {
+        for (index, vertex) in item.vertices.iter_mut().enumerate() {
+            let softness = item.mesh.softness.get(index).copied().unwrap_or(0.0);
+            let (world, normal) =
+                deform_by_contacts(contacts, &depths, vertex.world, vertex.normal, softness);
+            let tangent = [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]];
+            let square = normalize(
+                [0, 1, 2].map(|axis| tangent[axis] - normal[axis] * dot(normal, tangent)),
+            );
+            vertex.world = world;
+            vertex.normal = normal;
+            vertex.tangent = [square[0], square[1], square[2], vertex.tangent[3]];
+            vertex.clip = transform(&scene.view_proj, world, 1.0);
+        }
+    }
+}
+
 /// The convex polygons `mesh`'s triangles leave in front of the view their `vertices` are seen
 /// through, each as a fan of triangles handed to `triangle`.
 fn each_clipped_triangle(
@@ -4301,7 +4485,7 @@ pub fn rasterize<'t>(
         color: vec![clear; width * height],
         depth: vec![1.0f32; width * height],
     };
-    let posed: Vec<Posed> = scene
+    let mut posed: Vec<Posed> = scene
         .draw_order()
         .filter_map(|draw| {
             let mesh = meshes(draw.mesh)?;
@@ -4313,6 +4497,7 @@ pub fn rasterize<'t>(
             })
         })
         .collect();
+    press_posed(scene, &mut posed);
     let world = posed.iter().fold(None, |bounds, item| {
         union(bounds, draw_bounds(scene, item.draw, &item.mesh.bounds))
     });
@@ -4443,6 +4628,7 @@ mod tests {
             emitters: Vec::new(),
             background: [0.0, 0.0, 0.0, 0.0],
             palettes: vec![],
+            contacts: Vec::new(),
             draws: vec![draw],
         }
     }
@@ -8088,6 +8274,73 @@ mod tests {
             ..Material::default()
         });
         assert_eq!(bare, cutout);
+    }
+
+    #[test]
+    fn a_contact_lays_skin_onto_its_surface_and_soft_flesh_rises_round_it() {
+        // a floor at y = 0 pressed 5 mm into a soft slab facing it (its normal down)
+        let floor = [Contact::Plane {
+            normal: [0.0, 1.0, 0.0],
+            offset: 0.0,
+        }];
+        let down = [0.0, -1.0, 0.0];
+        let depths = contact_depths(&floor, [[0.0, -0.005, 0.0], [0.03, 0.002, 0.0]].iter());
+        assert_eq!(depths, vec![0.005]);
+        // inside: laid onto the floor, its normal the floor's
+        let (laid, laid_normal) =
+            deform_by_contacts(&floor, &depths, [0.0, -0.005, 0.0], down, 1.0);
+        assert!(laid[1].abs() < 1e-6, "{laid:?}");
+        assert!((laid_normal[1] - 1.0).abs() < 1e-5, "{laid_normal:?}");
+        // just outside, soft: lifted along its own normal (away from the floor), by about
+        // RING_LIFT × the depth at the crest
+        let (ring, _) = deform_by_contacts(&floor, &depths, [0.02, 0.0005, 0.0], down, 1.0);
+        let lift = 0.0005 - ring[1];
+        assert!(lift > 0.0 && lift <= RING_LIFT * 0.005 + 1e-6, "{lift}");
+        // the same point as bone: no ring
+        let (bone, _) = deform_by_contacts(&floor, &depths, [0.02, 0.0005, 0.0], down, 0.0);
+        assert_eq!(bone, [0.02, 0.0005, 0.0]);
+        // far off: untouched
+        let (far, far_normal) = deform_by_contacts(&floor, &depths, [0.0, 0.2, 0.0], down, 1.0);
+        assert_eq!((far, far_normal), ([0.0, 0.2, 0.0], down));
+    }
+
+    #[test]
+    fn a_sphere_and_a_capsule_measure_from_their_surfaces() {
+        let ball = Contact::Sphere {
+            centre: [0.0, 0.0, 0.0],
+            radius: 0.01,
+        };
+        let (distance, out) = ball.signed_distance([0.0, 0.0, 0.004]);
+        assert!((distance + 0.006).abs() < 1e-6);
+        assert_eq!(out, [0.0, 0.0, 1.0]);
+        let finger = Contact::Capsule {
+            start: [0.0, 0.0, 0.0],
+            end: [0.05, 0.0, 0.0],
+            radius: 0.008,
+        };
+        let (beside, out) = finger.signed_distance([0.025, 0.01, 0.0]);
+        assert!((beside - 0.002).abs() < 1e-6);
+        assert_eq!(out, [0.0, 1.0, 0.0]);
+        // past its end, from the end's cap
+        let (past, _) = finger.signed_distance([0.06, 0.0, 0.0]);
+        assert!((past - 0.002).abs() < 1e-6);
+    }
+
+    #[test]
+    fn without_contacts_or_deform_nothing_is_pressed() {
+        let mut draw = Draw {
+            mesh: 1,
+            model: identity(),
+            palette: None,
+            morphs: vec![],
+            material: Material::default(),
+        };
+        assert!(!pressed(&draw));
+        draw.material.deform = true;
+        assert!(pressed(&draw));
+        draw.material.surface = Surface::Eye;
+        assert!(!pressed(&draw));
+        assert!(contact_depths(&[], [[0.0f32; 3]].iter()).is_empty());
     }
 
     #[test]

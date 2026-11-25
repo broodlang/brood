@@ -695,6 +695,7 @@ struct DrawU {
     eye_uv: vec4<f32>,          // the middle of the first eye's iris in the texture, then the second's
     eye_iris: vec4<f32>,        // the iris's radius in the texture, the pupil's share of the iris, the slope of the bowl the iris is lit as
     sheen: vec4<f32>,           // a hair surface's second highlight's colour (`:sheen`), w 1 when given (ADR-799)
+    deform: vec4<u32>,          // pressed by the scene's contacts (ADR-805), its first posed vertex, whether it has a softness, its vertex count
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
@@ -712,6 +713,139 @@ struct DrawU {
 // two vec4s a vertex (position, normal), a morphed draw's from `morph_info.w`, so a vertex
 // reads one pair whatever the number of targets
 @group(2) @binding(0) var<storage, read> morphs: array<vec4<f32>>;
+
+// --- contacts (ADR-805): a pressed draw's skin laid onto what presses it, soft flesh rising in
+// a ring round it; `mesh::deform_by_contacts`'s arithmetic, posed once a frame by the compute
+// passes below and read back by the vertex stages
+@group(2) @binding(1) var<storage, read> posed_vertices: array<vec4<f32>>;
+
+struct ContactList {
+    count: vec4<u32>,
+    // two vec4 a contact: `[x y z kind]`, `[x y z w]` (`scenes::contact_words`)
+    shapes: array<vec4<f32>, 32>,
+};
+@group(3) @binding(8) var<storage, read> mesh_vertices: array<f32>;
+@group(3) @binding(9) var<uniform> contact_list: ContactList;
+@group(3) @binding(10) var<storage, read_write> contact_depths: array<atomic<u32>, 16>;
+@group(3) @binding(11) var<storage, read_write> posed_out: array<vec4<f32>>;
+@group(3) @binding(12) var<storage, read> mesh_softness: array<f32>;
+
+// (`mesh::RING_WIDTH`, `RING_SPREAD`, `RING_LIFT`, `FLAT_DEPTH`)
+const RING_WIDTH: f32 = 0.012;
+const RING_SPREAD: f32 = 2.0;
+const RING_LIFT: f32 = 0.35;
+const FLAT_DEPTH: f32 = 0.002;
+
+// `mesh::Contact::signed_distance`: how far `point` lies outside contact `slot` (negative inside),
+// in w, and the unit direction out of it there, in xyz
+fn contact_distance(slot: u32, point: vec3<f32>) -> vec4<f32> {
+    let first = contact_list.shapes[slot * 2u];
+    let second = contact_list.shapes[slot * 2u + 1u];
+    let kind = u32(first.w + 0.5);
+    if (kind == 0u) {
+        return vec4<f32>(first.xyz, dot(first.xyz, point) - second.x);
+    }
+    var nearest = first.xyz;
+    if (kind == 2u) {
+        let along = second.xyz - first.xyz;
+        let length_squared = dot(along, along);
+        var share = 0.0;
+        if (length_squared > 1e-12) {
+            share = clamp(dot(point - first.xyz, along) / length_squared, 0.0, 1.0);
+        }
+        nearest = first.xyz + along * share;
+    }
+    let offset = point - nearest;
+    let length = sqrt(dot(offset, offset));
+    var direction = vec3<f32>(0.0, 1.0, 0.0);
+    if (length > 1e-9) {
+        direction = offset / length;
+    }
+    return vec4<f32>(direction, length - second.w);
+}
+
+// a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 21 a vertex)
+fn vertex_at(index: u32) -> VertexIn {
+    let at = index * 21u;
+    var input: VertexIn;
+    input.index = index;
+    input.position = vec3<f32>(mesh_vertices[at], mesh_vertices[at + 1u], mesh_vertices[at + 2u]);
+    input.normal = vec3<f32>(mesh_vertices[at + 3u], mesh_vertices[at + 4u], mesh_vertices[at + 5u]);
+    input.uv = vec2<f32>(mesh_vertices[at + 6u], mesh_vertices[at + 7u]);
+    input.tangent = vec4<f32>(mesh_vertices[at + 8u], mesh_vertices[at + 9u], mesh_vertices[at + 10u], mesh_vertices[at + 11u]);
+    input.joints = vec4<u32>(bitcast<u32>(mesh_vertices[at + 12u]), bitcast<u32>(mesh_vertices[at + 13u]), bitcast<u32>(mesh_vertices[at + 14u]), bitcast<u32>(mesh_vertices[at + 15u]));
+    input.weights = vec4<f32>(mesh_vertices[at + 16u], mesh_vertices[at + 17u], mesh_vertices[at + 18u], mesh_vertices[at + 19u]);
+    input.curvature = mesh_vertices[at + 20u];
+    return input;
+}
+
+// pass A: each pressed vertex posed (into the scene's posed buffer) and each contact's deepest
+// press into it kept (a positive float's bits order as the float does)
+@compute @workgroup_size(64)
+fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= draw.deform.w) {
+        return;
+    }
+    let input = vertex_at(id.x);
+    let posed = pose(input);
+    let world = (posed.matrix * vec4<f32>(posed.position, 1.0)).xyz;
+    let normal = safe_normalize((posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz);
+    let tangent = safe_normalize((posed.matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz);
+    let at = (draw.deform.y + id.x) * 3u;
+    posed_out[at] = vec4<f32>(world, 1.0);
+    posed_out[at + 1u] = vec4<f32>(normal, 0.0);
+    posed_out[at + 2u] = vec4<f32>(tangent, input.tangent.w);
+    let count = min(contact_list.count.x, 16u);
+    for (var slot = 0u; slot < count; slot = slot + 1u) {
+        let distance = contact_distance(slot, world).w;
+        if (distance < 0.0) {
+            atomicMax(&contact_depths[slot], bitcast<u32>(-distance));
+        }
+    }
+}
+
+// pass B: each posed vertex pressed (`mesh::deform_by_contacts`), its tangent kept square to its
+// new normal
+@compute @workgroup_size(64)
+fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= draw.deform.w) {
+        return;
+    }
+    let at = (draw.deform.y + id.x) * 3u;
+    var point = posed_out[at].xyz;
+    var normal = posed_out[at + 1u].xyz;
+    let tangent = posed_out[at + 2u];
+    var softness = 0.0;
+    if (draw.deform.z == 1u) {
+        softness = clamp(mesh_softness[id.x], 0.0, 1.0);
+    }
+    let count = min(contact_list.count.x, 16u);
+    for (var slot = 0u; slot < count; slot = slot + 1u) {
+        let depth = bitcast<f32>(atomicLoad(&contact_depths[slot]));
+        let measured = contact_distance(slot, point);
+        let out = measured.xyz;
+        let distance = measured.w;
+        if (distance < 0.0) {
+            point = point - out * distance;
+            // the skin faces out of the body, into what presses it
+            let flat = clamp(-distance / FLAT_DEPTH, 0.0, 1.0);
+            normal = safe_normalize(normal + (-out - normal) * flat);
+        } else if (softness > 0.0 && depth > 0.0) {
+            let width = RING_WIDTH + RING_SPREAD * depth;
+            let reach = distance / width;
+            if (reach < 3.0) {
+                let lift = RING_LIFT * softness * depth * exp(-reach * reach);
+                let slope = 2.0 * reach / width * lift;
+                let away = safe_normalize(out - normal * dot(out, normal));
+                point = point + normal * lift;
+                normal = safe_normalize(normal + away * slope);
+            }
+        }
+    }
+    posed_out[at] = vec4<f32>(point, 1.0);
+    posed_out[at + 1u] = vec4<f32>(normal, 0.0);
+    posed_out[at + 2u] = vec4<f32>(safe_normalize(tangent.xyz - normal * dot(normal, tangent.xyz)), tangent.w);
+}
 @group(3) @binding(0) var base_texture: texture_2d<f32>;
 @group(3) @binding(1) var normal_texture: texture_2d<f32>;
 @group(3) @binding(2) var texture_sampler: sampler;
@@ -786,6 +920,21 @@ fn pose(input: VertexIn) -> Posed {
 
 @vertex
 fn vs_mesh(input: VertexIn) -> VertexOut {
+    // a pressed draw (ADR-805): its vertex as the contact passes posed and pressed it
+    if (draw.deform.x == 1u) {
+        let at = (draw.deform.y + input.index) * 3u;
+        var pressed: VertexOut;
+        pressed.world = posed_vertices[at].xyz;
+        pressed.clip = scene.view_proj * vec4<f32>(pressed.world, 1.0);
+        pressed.normal = posed_vertices[at + 1u].xyz;
+        pressed.uv = input.uv;
+        pressed.tangent = posed_vertices[at + 2u];
+        pressed.curvature = input.curvature;
+        pressed.eye_centre = vec4<f32>(0.0);
+        pressed.eye_axis = vec3<f32>(0.0);
+        pressed.eye_up = vec3<f32>(0.0);
+        return pressed;
+    }
     let posed = pose(input);
     let world = posed.matrix * vec4<f32>(posed.position, 1.0);
     var out: VertexOut;
@@ -1951,6 +2100,13 @@ struct ShadowOut {
 
 @vertex
 fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> ShadowOut {
+    // a pressed draw (ADR-805): its vertex as the contact passes posed and pressed it
+    if (draw.deform.x == 1u) {
+        var pressed: ShadowOut;
+        pressed.clip = scene.shadows[view_index].view_proj * vec4<f32>(posed_vertices[(draw.deform.y + input.index) * 3u].xyz, 1.0);
+        pressed.uv = input.uv;
+        return pressed;
+    }
     let posed = pose(input);
     var out: ShadowOut;
     var world = (posed.matrix * vec4<f32>(posed.position, 1.0)).xyz;
