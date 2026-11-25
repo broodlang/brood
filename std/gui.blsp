@@ -781,14 +781,15 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; shading model's parameters: `:surface` (:skin, :standard, :cutout, :blend, :eye — an eyeball
 ;; drawn by optics, with its `:eye`, below — :hair — strands
 ;; lit along the bitangent, their alpha coverage — or :strands, ribbons turned to the camera, a
-;; pixel wide at least, `:width [root tip]` metres), `:base`, `:normal` and `:occlusion` (texture
+;; pixel wide at least, `:width [root tip]` metres; on either, `:shift [first second]` the two
+;; highlights' shifts and `:sheen [r g b]` the second's colour, the hair's own by default), `:base`, `:normal` and `:occlusion` (texture
 ;; handles), `:color`, `:roughness`, `:specular`, `:lobes`, `:scatter` (light under the skin,
 ;; below), `:detail` with `:detail-scale`, `:detail-strength` and `:detail-cavity` (a tiled
 ;; micro-relief, below), `:coat` (a clear wet layer, below), `:cutoff`, `:double-sided`,
 ;; `:cast-shadow` (true by default).
 ;; A glTF loader, a skeleton's maths, a camera — policy above this, in the engine. Both window
-;; painters draw a scene: the GPU target with a depth buffer and 4× multisampling, the CPU
-;; painter in software.
+;; painters draw a scene: the GPU target with a depth buffer and 8× multisampling where the adapter
+;; has it (4× otherwise; a hair surface's coverage takes as many steps), the CPU painter in software.
 ;;
 ;; SHADING (ADR-793). A light's `:color` is the irradiance it brings (π times its radiance),
 ;; so diffuse is the albedo times it and the Blinn-Phong specular is normalised to (n + 8)/8 —

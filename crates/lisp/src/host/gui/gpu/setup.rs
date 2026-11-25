@@ -117,12 +117,14 @@ impl GpuWindow {
             view_formats: linear_format.into_iter().collect(),
         };
         surface.configure(&device, &config);
+        let samples = scenes::scene_samples(&adapter, &device);
         Ok(GpuWindow::assemble(
             Target::Window { surface, window },
             device,
             queue,
             config,
             linear_format,
+            samples,
         ))
     }
 
@@ -178,12 +180,14 @@ impl GpuWindow {
             view_formats: linear_format.into_iter().collect(),
         };
         let texture = offscreen_texture(&device, &config);
+        let samples = scenes::scene_samples(adapter, &device);
         Ok(GpuWindow::assemble(
             Target::Offscreen { texture },
             device,
             queue,
             config,
             linear_format,
+            samples,
         ))
     }
 
@@ -215,6 +219,7 @@ impl GpuWindow {
         queue: wgpu::Queue,
         config: wgpu::SurfaceConfiguration,
         linear_format: Option<wgpu::TextureFormat>,
+        scene_samples: u32,
     ) -> GpuWindow {
         let format = config.format;
         let (w, h) = (config.width, config.height);
@@ -502,6 +507,7 @@ impl GpuWindow {
             effects: None,
             particles: None,
             scenes: None,
+            scene_samples,
             runs: RunCache::default(),
             fragments: FragmentCache::default(),
             texture_generation: 0,
@@ -549,11 +555,14 @@ pub(super) fn request_device(
         // Dual-source blending where the adapter has it: subpixel text in one pass
         // (`LCD_SRC`) rather than three (`LcdText`). `BROOD_GUI_NO_DUAL_SOURCE=1` declines
         // it, to see the three-pass path on an adapter that has the feature.
-        required_features: if std::env::var("BROOD_GUI_NO_DUAL_SOURCE").as_deref() == Ok("1") {
+        // And the adapter's own format features where it has them: what lets a scene be
+        // multisampled 8× beyond the 4× every adapter offers (ADR-799, `scenes::scene_samples`).
+        required_features: (if std::env::var("BROOD_GUI_NO_DUAL_SOURCE").as_deref() == Ok("1") {
             wgpu::Features::empty()
         } else {
             adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING
-        },
+        }) | (adapter.features()
+            & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES),
         required_limits: wgpu::Limits::default(),
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: wgpu::MemoryHints::default(),

@@ -1730,6 +1730,14 @@ fn scene_spec(
         } else if let Some(widths) = numbers(get(material_map, "width"), 2) {
             material.strand_width = [widths[0].max(0.0), widths[1].max(0.0)];
         }
+        // a hair surface's two highlights' shifts along its normal, [first second], and its
+        // second highlight's colour, linear [r g b] (ADR-799; as before when not given)
+        if let Some(shift) = numbers(get(material_map, "shift"), 2) {
+            material.hair_shift = [shift[0].clamp(-1.0, 1.0), shift[1].clamp(-1.0, 1.0)];
+        }
+        if let Some(sheen) = numbers(get(material_map, "sheen"), 3) {
+            material.sheen = Some([sheen[0].max(0.0), sheen[1].max(0.0), sheen[2].max(0.0)]);
+        }
         material.lobes = match get(material_map, "lobes") {
             None | Some(Value::Nil) => None,
             Some(given) => match numbers(Some(given), 3) {

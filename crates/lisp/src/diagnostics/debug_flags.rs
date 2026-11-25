@@ -642,6 +642,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "`=1`: the GPU painter declines dual-source blending and draws subpixel text in three passes, one per colour channel — the path an adapter without the feature takes (`lcd=` in BROOD_GUI_TRACE says which)",
     ),
     f(
+        "BROOD_GUI_SAMPLES",
+        HOST,
+        "`=4`: the GPU painter draws 3D scenes with 4× multisampling even where the adapter can do 8× (ADR-799) — the earlier picture, to compare a hair surface's coverage in five steps against nine.",
+    ),
+    f(
         "BROOD_GUI_DUMP",
         HOST,
         "`=<path.ppm>`: write the painted frame as a PPM after every paint (the CPU canvas, or a readback of the GPU frame under BROOD_GUI_GPU) — look at the raster (text AA, hairlines, sprites) from a script",

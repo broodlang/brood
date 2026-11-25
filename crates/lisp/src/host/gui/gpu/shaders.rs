@@ -684,7 +684,7 @@ struct DrawU {
     lobes: vec4<f32>,           // roughness times a, times b, mix of a, F0
     flags: vec4<u32>,           // surface, texture bits (`scenes::texture_bits`), palette offset, skinned
     morph_info: vec4<u32>,      // morphed (0 or 1), vertex count, palette joint count, first offset
-    strand: vec4<f32>,          // a `:strands` surface's width at the root and the tip (metres)
+    strand: vec4<f32>,          // a `:strands` surface's width at the root and the tip (metres); a hair surface's two highlights' shifts (`:shift`)
     detail: vec4<f32>,          // the detail tile's repeats along u and v, its strength, its cavity
     // an `:eye` surface's optics (`mesh::Eye`, ADR-796; zeros on any other surface)
     eye_centres: array<vec4<f32>, 2>,   // each eye's centre in the mesh at rest; [0].w: how many eyes
@@ -693,6 +693,7 @@ struct DrawU {
     eye_shape: vec4<f32>,       // the eyeball's radius, the iris's, the cornea's, the iris's depth under the cornea's top
     eye_uv: vec4<f32>,          // the middle of the first eye's iris in the texture, then the second's
     eye_iris: vec4<f32>,        // the iris's radius in the texture, the pupil's share of the iris, the slope of the bowl the iris is lit as
+    sheen: vec4<f32>,           // a hair surface's second highlight's colour (`:sheen`), w 1 when given (ADR-799)
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
@@ -816,6 +817,22 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
 }
 
 // `mesh::strand_sample_step`: the coverage a strand's fragment at `world` needs at `sample`
+// the samples a pixel the scene is drawn with: 8 where the adapter can, else 4 (ADR-799;
+// `scenes::scene_samples` sets it when the pipeline is made)
+override SAMPLES: u32 = 4u;
+
+// a `:hair` surface's coverage step at `sample`, as `mesh::HAIR_COVERAGE_STEPS` holds them:
+// eight, (k + 0.5) / 8 in an order that spreads them; with four samples the four of them that
+// cover a pixel's steps evenly, as the CPU's alternate halves average to
+fn hair_step(sample: u32) -> f32 {
+    var eight = array<f32, 8>(0.0625, 0.5625, 0.8125, 0.3125, 0.1875, 0.6875, 0.9375, 0.4375);
+    var four = array<f32, 4>(0.125, 0.625, 0.875, 0.375);
+    if (SAMPLES >= 8u) {
+        return eight[sample & 7u];
+    }
+    return four[sample & 3u];
+}
+
 fn strand_sample_step(world: vec3<f32>, sample: u32) -> f32 {
     let seed = dot(world, vec3<f32>(12.9898, 78.233, 37.719)) * 1000.0 + f32(sample) * 7.31;
     return fract(sin(seed) * 43758.547);
@@ -1617,11 +1634,14 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         let mirror_lambert = max(dot(normal, to_light), 0.0);
         let half_vector = safe_normalize(to_light + view);
         if (draw.flags.x == 4u || draw.flags.x == 5u) {
-            let primary = hair_highlight(strand, normal, half_vector, -0.08, exponent);
-            let secondary = hair_highlight(strand, normal, half_vector, 0.12, exponent * 0.25);
+            // the two highlights' shifts (`:shift`, ADR-799) and the second one's colour
+            // (`:sheen`, else the hair's own)
+            let primary = hair_highlight(strand, normal, half_vector, draw.strand.z, exponent);
+            let secondary = hair_highlight(strand, normal, half_vector, draw.strand.w, exponent * 0.25);
+            let sheen = select(base, draw.sheen.rgb, draw.sheen.w > 0.5);
             let lit_side = clamp(facing + 0.25, 0.0, 1.0);
             let hair_diffuse = clamp(0.25 + 0.75 * facing, 0.0, 1.0);
-            let shine = draw.material.y * lit_side * (vec3<f32>(primary) + secondary * base);
+            let shine = draw.material.y * lit_side * (vec3<f32>(primary) + secondary * sheen);
             out = out + light.color.rgb * arriving * hair_light(seen, base) * (base * hair_diffuse + shine);
             continue;
         }
@@ -1702,8 +1722,8 @@ fn tone(color: vec3<f32>, exposure: f32) -> vec3<f32> {
 
 struct MeshFragment {
     @location(0) color: vec4<f32>,
-    // the samples it covers: all of them, but a `:hair` surface's coverage of its 4 (each
-    // sample a step of `mesh::HAIR_COVERAGE_STEPS`, as the CPU painter's 2×2 sub-samples)
+    // the samples it covers: all of them, but a `:hair` surface's coverage of its `SAMPLES`
+    // (each a step of `mesh::HAIR_COVERAGE_STEPS`: `hair_step`)
     @builtin(sample_mask) mask: u32,
 };
 
@@ -1736,15 +1756,19 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     var mask = 0xFFFFFFFFu;
     if (draw.flags.x == 4u || draw.flags.x == 5u) {
         var coverage = clamp((texel.a * draw.color.a - 0.5 * draw.material.w) / max(draw.material.w, 1e-6), 0.0, 1.0);
-        mask = select(0u, 1u, coverage > 0.125) | select(0u, 2u, coverage > 0.625)
-            | select(0u, 4u, coverage > 0.875) | select(0u, 8u, coverage > 0.375);
+        mask = 0u;
+        for (var sample = 0u; sample < SAMPLES; sample = sample + 1u) {
+            if (coverage > hair_step(sample)) {
+                mask = mask | (1u << sample);
+            }
+        }
         // a strand thinner than a pixel covers only its share of one, at samples its own
         // position picks, so overlapping strands add up (`mesh::strand_sample_step`)
         // (a strand as wide as a pixel, a wisp, keeps the fixed steps above: `mesh::STRAND_WHOLE`)
         if (draw.flags.x == 5u && fragment.tangent.w < 0.999) {
             coverage = coverage * fragment.tangent.w;
             mask = 0u;
-            for (var sample = 0u; sample < 4u; sample = sample + 1u) {
+            for (var sample = 0u; sample < SAMPLES; sample = sample + 1u) {
                 if (coverage > strand_sample_step(fragment.world, sample)) {
                     mask = mask | (1u << sample);
                 }

@@ -251,6 +251,9 @@ pub struct GpuWindow {
     /// The 3D meshes and the targets `[:scene …]` ops render into, made the first time a
     /// mesh is uploaded or a frame carries a scene (ADR-786).
     scenes: Option<MeshGpu>,
+    /// The samples a pixel those scenes are drawn with: 8 where the adapter can, else 4
+    /// (`scenes::scene_samples`, ADR-799).
+    scene_samples: u32,
     /// Every text run the last frame drew, as quads — what a frame that repeats a run
     /// reuses instead of re-shaping it (`RunCache`, ADR-440).
     runs: RunCache,
@@ -613,9 +616,9 @@ impl GpuWindow {
 
     /// `gui-mesh`: keep `mesh` on the device under `handle` (ADR-786).
     pub fn upload_mesh(&mut self, handle: u32, mesh: &crate::host::gui::mesh::Mesh) {
-        let (device, queue) = (&self.device, &self.queue);
+        let (device, queue, samples) = (&self.device, &self.queue, self.scene_samples);
         self.scenes
-            .get_or_insert_with(|| MeshGpu::new(device, queue))
+            .get_or_insert_with(|| MeshGpu::new(device, queue, samples))
             .upload(device, queue, handle, mesh);
     }
 
@@ -742,9 +745,9 @@ impl GpuWindow {
         // the frame's 3D scenes, each into its own target, before the passes that draw their
         // pictures (ADR-786)
         if !fb.scenes.is_empty() {
-            let (device, queue) = (&self.device, &self.queue);
+            let (device, queue, samples) = (&self.device, &self.queue, self.scene_samples);
             self.scenes
-                .get_or_insert_with(|| MeshGpu::new(device, queue))
+                .get_or_insert_with(|| MeshGpu::new(device, queue, samples))
                 .render(
                     device,
                     queue,

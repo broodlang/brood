@@ -160,7 +160,16 @@ pub const STRAND_END_ON: f32 = 0.3;
 /// The share of a pixel a `:strands` ribbon covers at or above which it counts as whole: its
 /// texture's alpha is then dithered in [`HAIR_COVERAGE_STEPS`], not at samples its position picks.
 pub const STRAND_WHOLE: f32 = 0.999;
-pub const HAIR_COVERAGE_STEPS: [[f32; 2]; 2] = [[0.125, 0.625], [0.875, 0.375]];
+///
+/// Eight steps, as the GPU painter's eight samples a pixel take them (ADR-799; four on an
+/// adapter that cannot multisample 8×, the sets' every other step): the CPU painter has four
+/// sub-samples a pixel, so neighbouring pixels take alternate halves of the eight
+/// (`[parity][row][column]`), the same coverage on average and nine levels over two pixels
+/// where one pixel's four held five.
+pub const HAIR_COVERAGE_STEPS: [[[f32; 2]; 2]; 2] = [
+    [[0.0625, 0.5625], [0.8125, 0.3125]],
+    [[0.1875, 0.6875], [0.9375, 0.4375]],
+];
 
 /// The reach of the ambient occlusion, in metres, when `:ambient-occlusion` names none: the
 /// size of the folds it darkens (a mouth's corner, a crease beside the nose).
@@ -686,8 +695,9 @@ pub enum Surface {
     /// shifted toward the root and a softer one tinted by the hair toward the tip
     /// (Kajiya-Kay, as Scheuermann shifts it), over a diffuse that light partly passes
     /// through. Its alpha is coverage: past half its `cutoff` a texel covers part of the
-    /// pixel, all of it at one and a half `cutoff`s — that many of the GPU target's 4 samples
-    /// (its sample mask) or the CPU painter's 2×2 sub-samples, each a step of
+    /// pixel, all of it at one and a half `cutoff`s — that many of the GPU target's 8 samples
+    /// (4 where the adapter has no 8×; its sample mask, ADR-799) or the CPU painter's 2×2
+    /// sub-samples (alternate halves of the eight steps in neighbouring pixels), each a step of
     /// `HAIR_COVERAGE_STEPS` — so fine strands thin out instead of stair-stepping; it is opaque
     /// where it covers, writing depth, drawn with the solid surfaces.
     Hair,
@@ -840,6 +850,11 @@ pub struct Material {
     pub cast_shadow: bool,
     /// A `:strands` surface's width at the root and at the tip, metres ([`DEFAULT_STRAND_WIDTH`]).
     pub strand_width: [f32; 2],
+    /// A `:hair` or `:strands` surface's two highlights' shifts along its normal, the first
+    /// and the second (`:shift`; [`HAIR_SHIFT_PRIMARY`], [`HAIR_SHIFT_SECONDARY`]: ADR-799).
+    pub hair_shift: [f32; 2],
+    /// The second highlight's colour, linear RGB (`:sheen`); nil: the hair's own base colour.
+    pub sheen: Option<[f32; 3]>,
 }
 
 impl Default for Material {
@@ -864,6 +879,8 @@ impl Default for Material {
             double_sided: false,
             cast_shadow: true,
             strand_width: DEFAULT_STRAND_WIDTH,
+            hair_shift: [HAIR_SHIFT_PRIMARY, HAIR_SHIFT_SECONDARY],
+            sheen: None,
         }
     }
 }
@@ -2143,14 +2160,16 @@ pub fn shade(
                 let along = dot(shifted, half);
                 (1.0 - along * along).max(0.0).sqrt().powf(sharpness)
             };
-            let primary = highlight(HAIR_SHIFT_PRIMARY, exponent);
-            let secondary = highlight(HAIR_SHIFT_SECONDARY, exponent * HAIR_SECONDARY_SHARPNESS);
+            let primary = highlight(material.hair_shift[0], exponent);
+            let secondary = highlight(material.hair_shift[1], exponent * HAIR_SECONDARY_SHARPNESS);
+            // the second highlight's colour: the hair's own, or the material's `:sheen`
+            let sheen = material.sheen.unwrap_or(base);
             let lit_side = (facing + 0.25).clamp(0.0, 1.0);
             let diffuse = (0.25 + 0.75 * facing).clamp(0.0, 1.0);
             // what the hair before it let through, in the hair's colour
             let passed = hair_light(seen, base);
             for channel in 0..3 {
-                let shine = material.specular * lit_side * (primary + secondary * base[channel]);
+                let shine = material.specular * lit_side * (primary + secondary * sheen[channel]);
                 out[channel] += light.color[channel]
                     * arriving
                     * passed[channel]
@@ -3756,7 +3775,7 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                             (row % 2) * 2 + column % 2,
                         )
                     } else {
-                        HAIR_COVERAGE_STEPS[row % 2][column % 2]
+                        HAIR_COVERAGE_STEPS[(row / 2 + column / 2) % 2][row % 2][column % 2]
                     };
                     if coverage <= step {
                         return;
@@ -5104,6 +5123,90 @@ mod tests {
         half.draws[0].material.color[3] = 0.8;
         let (_, _, rgba) = rasterize(&half, &|_| Some(mesh.clone()), &|_| None);
         assert_eq!(alpha_at(&rgba, 8, 9), 255, "fully covered");
+    }
+
+    #[test]
+    fn hair_coverage_takes_eight_steps_over_two_neighbouring_pixels() {
+        // (ADR-799) every step k/8 + 1/16 once, half of them a pixel's 2×2 sub-samples and the
+        // other half its neighbour's: a coverage between two of the old four steps now covers
+        // a share of samples between their two shares, on average over the pair
+        let mut steps: Vec<f32> = HAIR_COVERAGE_STEPS
+            .iter()
+            .flatten()
+            .flatten()
+            .copied()
+            .collect();
+        steps.sort_by(f32::total_cmp);
+        for (k, step) in steps.iter().enumerate() {
+            assert!(
+                (step - (k as f32 + 0.5) / 8.0).abs() < 1e-6,
+                "step {k}: {step}"
+            );
+        }
+        let covered = |coverage: f32, parity: usize| {
+            HAIR_COVERAGE_STEPS[parity]
+                .iter()
+                .flatten()
+                .filter(|step| coverage > **step)
+                .count()
+        };
+        // a coverage of 0.3: 2 of 8 over the pair (the four steps covered 1 of 4 or 2 of 4)
+        assert_eq!(covered(0.3, 0) + covered(0.3, 1), 2);
+        // a half: half of each pixel, as the GPU's samples (the parity test's case)
+        assert_eq!(covered(0.5, 0), 2);
+        assert_eq!(covered(0.5, 1), 2);
+    }
+
+    #[test]
+    fn a_hair_surface_says_its_highlights_shifts_and_its_second_highlights_colour() {
+        // (ADR-799) `:shift` moves where the highlights fall, `:sheen` colours the second one;
+        // unsaid, both are what they were
+        let lit = scene(draw());
+        let hair = Material {
+            surface: Surface::Hair,
+            roughness: 0.3,
+            specular: 1.0,
+            ..Material::default()
+        };
+        assert_eq!(hair.hair_shift, [HAIR_SHIFT_PRIMARY, HAIR_SHIFT_SECONDARY]);
+        assert_eq!(hair.sheen, None);
+        let normal = [0.0, 0.0, 1.0];
+        let shine = |material: &Material| {
+            shade(
+                &lit,
+                material,
+                [0.2, 0.1, 0.05],
+                normal,
+                normal,
+                [0.0; 3],
+                1.0,
+                &[],
+                [1.0, 0.0, 0.0],
+                0.0,
+                1.0,
+                normal,
+                &emitter_plan(&lit),
+                normal,
+                None,
+            )
+        };
+        let plain = shine(&hair);
+        let shifted = shine(&Material {
+            hair_shift: [0.4, 0.6],
+            ..hair.clone()
+        });
+        assert!(
+            (plain[0] - shifted[0]).abs() > 1e-3,
+            "a shift moves the highlight: {plain:?} {shifted:?}"
+        );
+        let blue = shine(&Material {
+            sheen: Some([0.0, 0.0, 1.0]),
+            ..hair.clone()
+        });
+        assert!(
+            blue[2] - blue[0] > plain[2] - plain[0],
+            "a blue sheen is bluer: {plain:?} {blue:?}"
+        );
     }
 
     #[test]

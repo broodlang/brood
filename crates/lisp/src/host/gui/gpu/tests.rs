@@ -274,7 +274,7 @@ fn the_mesh_shader_validates() {
         };
         let packed = scenes::draw_uniform(&eyed, [0; 4], [0; 4]);
         assert_eq!(packed.len() as u64, draw_declared);
-        packed[192..]
+        packed[192..192 + 32 * 4]
             .as_chunks::<4>()
             .0
             .iter()
@@ -293,7 +293,36 @@ fn the_mesh_shader_validates() {
         ]
     );
     assert_eq!(eye_floats(Surface::Cutout), [0.0; 32], "no other surface");
-    assert_eq!(draw_declared, 320);
+    assert_eq!(
+        draw_declared, 336,
+        "the eye's fields, then a hair's `:sheen` (ADR-799)"
+    );
+    // a hair surface's `:sheen` last, its fourth float 1 when given; its `:shift` in the
+    // strand vector's spare two (ADR-799)
+    let hair = Draw {
+        mesh: 1,
+        model: [0.0; 16],
+        palette: None,
+        morphs: Vec::new(),
+        material: Material {
+            surface: Surface::Strands,
+            hair_shift: [-0.1, 0.2],
+            sheen: Some([0.5, 0.25, 0.125]),
+            ..Material::default()
+        },
+    };
+    let floats: Vec<f32> = scenes::draw_uniform(&hair, [0; 4], [0; 4])
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| f32::from_le_bytes(*word))
+        .collect();
+    assert_eq!(floats[floats.len() - 4..], [0.5, 0.25, 0.125, 1.0]);
+    assert_eq!(
+        floats[42..44],
+        [-0.1, 0.2],
+        "strand.zw: after 32 floats, 8 words and the widths"
+    );
     assert_eq!(scenes::DRAW_BYTES % 256, 0, "a dynamic offset's alignment");
     assert_eq!((PUPIL_EDGE, CORNEA_EDGE), (0.08, 0.85));
     assert!(

@@ -16,10 +16,11 @@ use crate::host::gui::mesh::{
 pub(super) const VERTEX_FLOATS: usize = 21;
 /// The `SceneU` uniform (3360 bytes), padded to the dynamic-offset alignment.
 pub(super) const SCENE_BYTES: u64 = 3584;
-/// The `DrawU` uniform (320 bytes with an `:eye` surface's optics, ADR-796), padded to the
+/// The `DrawU` uniform (336 bytes with an `:eye` surface's optics, ADR-796, and a hair's `:sheen`, ADR-799), padded to the
 /// dynamic-offset alignment.
 pub(super) const DRAW_BYTES: u64 = 512;
-const SAMPLES: u32 = 4;
+/// The samples a pixel the scene is drawn with where the adapter cannot do eight (ADR-799).
+const FALLBACK_SAMPLES: u32 = 4;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -76,6 +77,8 @@ struct ShadowTarget {
 
 /// The mesh pipelines and buffers, made the first time a mesh is uploaded.
 pub(super) struct MeshGpu {
+    /// The samples a pixel its scenes are drawn with (`scene_samples`, ADR-799).
+    samples: u32,
     /// Indexed by `double_sided as usize * 2 + blended as usize`.
     pipelines: [wgpu::RenderPipeline; 4],
     scene_layout: wgpu::BindGroupLayout,
@@ -215,8 +218,34 @@ fn one_pixel(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> wgpu:
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+/// The samples a pixel scenes are drawn with on `adapter`'s `device`: eight where both the
+/// scene's colour and depth formats can be multisampled 8× (the device asked for the
+/// adapter's own format features), so a `:hair` or `:strands` surface's coverage has nine
+/// levels, not five; four, as before, otherwise (ADR-799). `BROOD_GUI_SAMPLES=4` keeps four, to
+/// compare.
+pub(super) fn scene_samples(adapter: &wgpu::Adapter, device: &wgpu::Device) -> u32 {
+    if std::env::var("BROOD_GUI_SAMPLES").as_deref() == Ok("4")
+        || !device
+            .features()
+            .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+    {
+        return FALLBACK_SAMPLES;
+    }
+    let eight = |format| {
+        adapter
+            .get_texture_format_features(format)
+            .flags
+            .sample_count_supported(8)
+    };
+    if eight(COLOR_FORMAT) && eight(DEPTH_FORMAT) {
+        8
+    } else {
+        FALLBACK_SAMPLES
+    }
+}
+
 impl MeshGpu {
-    pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> MeshGpu {
+    pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue, samples: u32) -> MeshGpu {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("brood gui meshes"),
             source: wgpu::ShaderSource::Wgsl(MESH_SRC.into()),
@@ -367,13 +396,17 @@ impl MeshGpu {
                     bias: Default::default(),
                 }),
                 multisample: wgpu::MultisampleState {
-                    count: SAMPLES,
+                    count: samples,
                     ..Default::default()
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
                     entry_point: Some("fs_mesh"),
-                    compilation_options: Default::default(),
+                    // the shader's `SAMPLES`: how many bits of a hair's coverage mask it fills
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[("SAMPLES", f64::from(samples))],
+                        ..Default::default()
+                    },
                     targets: &[Some(wgpu::ColorTargetState {
                         format: COLOR_FORMAT,
                         blend: blended.then_some(PREMULTIPLIED_OVER),
@@ -456,6 +489,7 @@ impl MeshGpu {
         let uniforms = wgpu::BufferUsages::UNIFORM;
         let storage_usage = wgpu::BufferUsages::STORAGE;
         MeshGpu {
+            samples,
             pipelines,
             shadow_pipeline,
             shadow_scene_layout,
@@ -614,8 +648,8 @@ impl MeshGpu {
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
         let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT;
-        let color = texture("scene colour", COLOR_FORMAT, SAMPLES, attachment);
-        let depth = texture("scene depth", DEPTH_FORMAT, SAMPLES, attachment);
+        let color = texture("scene colour", COLOR_FORMAT, self.samples, attachment);
+        let depth = texture("scene depth", DEPTH_FORMAT, self.samples, attachment);
         let resolve = texture(
             "scene picture",
             COLOR_FORMAT,
@@ -1134,12 +1168,13 @@ pub(super) fn draw_uniform(
     let mut bytes = floats_bytes(&floats);
     bytes.extend(words_bytes(&flags));
     bytes.extend(words_bytes(&morph_info));
-    // a `:strands` surface's width at the root and the tip (`DrawU::strand`)
+    // a `:strands` surface's width at the root and the tip, and a hair surface's two
+    // highlights' shifts (`DrawU::strand`, ADR-799)
     bytes.extend(floats_bytes(&[
         material.strand_width[0],
         material.strand_width[1],
-        0.0,
-        0.0,
+        material.hair_shift[0],
+        material.hair_shift[1],
     ]));
     // `DrawU::detail`: the detail tile's repeats, its normal's strength, its cavity's amount
     bytes.extend(floats_bytes(&[
@@ -1149,6 +1184,9 @@ pub(super) fn draw_uniform(
         material.detail_cavity,
     ]));
     bytes.extend(floats_bytes(&eye_floats(material)));
+    // `DrawU::sheen`: a hair surface's second highlight's colour, the fourth float 1 when given
+    let sheen = material.sheen.map_or([0.0; 4], |[r, g, b]| [r, g, b, 1.0]);
+    bytes.extend(floats_bytes(&sheen));
     bytes
 }
 
