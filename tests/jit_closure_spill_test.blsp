@@ -1,0 +1,35 @@
+;;; A `(fn …)` literal is a safepoint for spilling, as a non-tail call is (ADR-810). Its
+;;; callback allocates, so `emit_make_closure` spills every handle beneath the literal's
+;;; captures to a reserved frame slot. `jit_spill_reserve` gave an arm slots only for its
+;;; non-tail calls, so an arm whose only safepoint is a literal — a tail call whose first
+;;; argument is a `get` and whose last is the literal — had none, and bailed
+;;; `mkclo-spill-exhausted`: 24 of womanblend's arms once closures went native by default.
+;;;
+;;; Each arm settles NATIVE (red with the literal left out of the reserve), and its answers
+;;; are checked on whatever engine is live.
+
+(defmodule jit-closure-spill-test (:use test) (:use suite-helpers))
+
+(defn csp-pick (k f) (f k))
+(defn csp-pick2 (a b f) (f a b))
+
+;; one handle beneath the literal, no non-tail call
+(defn csp-one (m n) (if (< n 0) nil (csp-pick (get m :k) (fn (x) [x n]))))
+;; two handles beneath it, read through an `or`
+(defn csp-two (m n)
+  (if (< n 0) nil (csp-pick2 (get m :a) (or (get m :b) :none) (fn (a b) [a b n]))))
+
+(defn- csp-drive (f i)
+  (when (> i 0) (f {:k i :a i :b nil} i) (csp-drive f (- i 1))))
+
+(describe "a closure literal reserves the spill slots it needs"
+  (test "one handle beneath the literal"
+    (assert-settles-native csp-one 2 (fn () (csp-drive csp-one 300)))
+    (assert= [7 3] (csp-one {:k 7} 3))
+    (assert= [:x 0] (csp-one {:k :x} 0))
+    (assert= nil (csp-one {:k 1} -1)))
+
+  (test "two handles beneath the literal, one through an or"
+    (assert-settles-native csp-two 2 (fn () (csp-drive csp-two 300)))
+    (assert= [1 2 5] (csp-two {:a 1 :b 2} 5))
+    (assert= [1 :none 5] (csp-two {:a 1} 5))))

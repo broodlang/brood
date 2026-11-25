@@ -118,7 +118,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `host/native.rs` — Native numeric kernels through one narrow C ABI (ADR-807, feature `native-kernels`).
   - `host/net.rs` — TCP sockets (ADR-062) — and UDP sockets (ADR-449) — on one **reactor thread** (ADR-143), delivering to process mailboxes (ADR-059).
   - `host/net_wasm.rs` — WASM stub for the TCP/TLS socket mechanism (`crate::host::net`).
-  - `host/numbers.rs` — The one shape a numeric array argument takes at a native boundary — a WASM component's `list<float64|float32|s32|u32>` parameter (ADR-806) and a native kernel's input (ADR-807): a vector or proper list whose items are numbers, or are themselves vectors or lists of numbers, flattened one level in order.
+  - `host/numbers.rs` — The shapes numbers take at a native boundary — a WASM component's `list<float64|float32|s32|u32>` parameter (ADR-806) and a native kernel's input (ADR-807) — and the shape a result comes back in.
   - `host/owned.rs` — A handle table whose entries belong to a green process, indexed by owner.
   - `host/owner_only.rs` — Windows's owner-only (KI-365): a protected DACL with one entry, full control for the user this process runs as.
   - `host/picture.rs` — Pictures for the display's `[:image …]` op (ADR-686): encoded bytes decoded ONCE per content, and the geometry every painter shares — where a picture lands in its rect (`place`), the picture resampled to the pixels it is drawn at (`ScaledPictures`), and the half-block cells a terminal shows it in (`half_blocks`).

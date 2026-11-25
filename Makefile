@@ -122,7 +122,7 @@ SYMBOLS_DIR := target/$(TARGET_SUBDIR)release-symbols
 	ci-wait enable-perf-check ensure-nextest fmt fuzz gcstress gcstress-all green green-all help hooks install \
 	install-features \
 	latency-gate loom miri mutants perf-brood perf-symbols prepush quickbench release release-brood repl \
-	rr-hunt runtime-soak shuttle smoke-bedit stress suite test test-both test-contracts test-light tier-audit tsan \
+	rr-hunt runtime-soak shuttle smoke-bedit stress suite test test-both test-contracts test-eager test-file test-light tier-audit tsan \
 	uninstall wasm-test
 
 help: ## Show this help

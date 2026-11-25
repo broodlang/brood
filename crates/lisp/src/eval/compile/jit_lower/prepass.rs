@@ -176,17 +176,17 @@ pub(crate) fn tail_call_work_is_enough(code: &[Inst]) -> bool {
     work >= TAIL_CALL_MIN_WORK
 }
 
-/// How many operand-stack entries lie BELOW the operands of the non-tail calls in `code`,
-/// summed over those calls — a bound on the call-result spills a lowering can make: a spill
-/// stores an entry below a call's operands, and an entry spilled once is a slot after, never
-/// spilled again. `None` when the depth model cannot place a call (an instruction it does not
+/// How many operand-stack entries lie BELOW the operands of the safepoints in `code` — its
+/// non-tail calls and closure literals — summed over them: a bound on the spills a lowering
+/// can make: a spill stores an entry below a safepoint's operands, and an entry spilled once
+/// is a slot after, never spilled again. `None` when the depth model cannot place a call (an instruction it does not
 /// model; such an arm bails before it lowers), and the caller then keeps its other bound.
 ///
 /// This is what keeps counting the map and vector reads as handle producers from widening
 /// every frame that reads a field: a read consumed before the next call never sits below one.
 /// The straight-line stack effects are [`block_analysis_checked`]'s, which a depth mismatch
 /// between the two would make a bail at lowering, never a corruption.
-pub(crate) fn operands_below_calls(code: &[Inst]) -> Option<usize> {
+pub(crate) fn operands_below_safepoints(code: &[Inst]) -> Option<usize> {
     let len = code.len();
     let (is_leader, depth) = block_analysis(code, len);
     let mut total = 0usize;
@@ -220,7 +220,13 @@ pub(crate) fn operands_below_calls(code: &[Inst]) -> Option<usize> {
             Inst::Prim2 { .. } => Some(height - 1),
             Inst::Prim1 { .. } => Some(height),
             Inst::Pop | Inst::SetLocal(_) => Some(height - 1),
-            Inst::MakeClosure { names, .. } => Some(height + 1 - names.len() as i32),
+            // A closure literal is a safepoint like a call (its callback allocates, ADR-803):
+            // what sits beneath its captures is spilled across it.
+            Inst::MakeClosure { names, .. } => {
+                let captures = names.len() as i32;
+                total += usize::try_from(height - captures).ok()?;
+                Some(height + 1 - captures)
+            }
             Inst::MakeVector(count) => Some(height + 1 - *count as i32),
             Inst::MakeMap(count) => Some(height + 1 - 2 * *count as i32),
             Inst::Prim3 { .. } => Some(height - 2),

@@ -3011,7 +3011,8 @@ asks: `{:records rs :keys ks}` for kernel inputs (native and WASM), `[count size
 `wasm/call-shaped` for rows back — its pose 334 → 25 µs a call. `conj` got a fixed 2-arity arm
 over a new `%vector-push`, a builtin in tail position is now called directly from a native
 caller, and a small append builds its inline store without a `Vec`: a `conj` loop 300 → ~100 ns
-an element. `MAX_CONTACTS` 16 → 64 (womanblend's room + both arms want 46); cost is per contact
+an element. The spill reserve counts a closure literal as the safepoint it is (24 womanblend arms
+bailed `mkclo-spill-exhausted`). `MAX_CONTACTS` 16 → 64 (womanblend's room + both arms want 46); cost is per contact
 used, and a test now holds the shader's literal sizes to the constant. Run: the touched suites
 both ways (471/471, 36/36), the GPU/CPU contact tests (41/41), clippy on CI's flags.
 

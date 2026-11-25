@@ -171,22 +171,33 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
     // f))` from 570M to 406M instructions (−29%), with every `make ab --floor` row noise
     // (`spawn` −4.7%), `make ab-vm` noise, and no change to the per-process RSS slope. So
     // the rule is now "no non-tail call, no reserve": a call-free arm cannot spill.
-    if non_tail_call_count(code) < 1 {
+    // A closure literal is a safepoint as a non-tail call is (`emit_make_closure` spills what
+    // sits beneath its captures), so an arm whose only safepoint is a literal — `(pick (get m
+    // :k) (fn …))` in tail position — needs slots too. Counting calls alone gave it 0, and 24
+    // of womanblend's arms bailed `mkclo-spill-exhausted` (ADR-810).
+    let closure_literals = code
+        .iter()
+        .filter(|inst| matches!(inst, Inst::MakeClosure { .. }))
+        .count();
+    if non_tail_call_count(code) + closure_literals < 1 {
         return 0;
     }
     // Two bounds on the call-result spills, both sound, so the smaller: one per handle
     // producer but the last, and the entries that ever sit below a call's operands.
-    producers.saturating_sub(1).min(operands_below_calls(code)) + max_leader_depth(code)
+    producers
+        .saturating_sub(1)
+        .min(operands_below_safepoints(code))
+        + max_leader_depth(code)
 }
 
 #[cfg(not(feature = "jit"))]
-fn operands_below_calls(_code: &[Inst]) -> usize {
+fn operands_below_safepoints(_code: &[Inst]) -> usize {
     0
 }
 
 #[cfg(feature = "jit")]
-fn operands_below_calls(code: &[Inst]) -> usize {
-    crate::eval::compile::jit_lower::prepass::operands_below_calls(code).unwrap_or(usize::MAX)
+fn operands_below_safepoints(code: &[Inst]) -> usize {
+    crate::eval::compile::jit_lower::prepass::operands_below_safepoints(code).unwrap_or(usize::MAX)
 }
 
 /// Where a lowering's **block-argument spill** slots live: `(base, len)`, as frame slot

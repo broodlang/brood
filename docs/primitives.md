@@ -36,6 +36,7 @@ arg silently becoming `nil`.
 | | `%vector-length` | 1 | length |
 | | `%vector-assoc` | 3 | a fresh vector with index `i` (in `[0, len)`) replaced — the vector counterpart of `%map-assoc`; the polymorphic `assoc`/`update` are Brood over it |
 | | `%vector-concat` | 2 | a fresh vector of `v`'s elements followed by those of `xs` (a vector, list, range, set or nil), one allocation — the kernel op behind `conj` on a vector and `into` onto one, which built the result as a list twice and re-vectorised it (7.7 µs for four items, 2026-09-21) |
+| | `%vector-push` | 2 | `v` with `x` appended — `%vector-concat` of one item, without a collection to carry it: the kernel op behind `(conj v x)`, appending in place over an append buffer (ADR-511, ADR-810) |
 | | `%subvec` | 2–3 | a fresh vector slice `[start, end)`; `end` defaults to the length — the vector-preserving counterpart of the list-returning `take`/`drop`; `seq/remove-nth` is Brood over it |
 | **Ordering** | `compare` | 2 | `(compare a b)` → `-1`/`0`/`1` by the structural total order (numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by stable tag rank). The binary form of `sort`'s order — `seq/sort-by` and custom comparators build on it |
 | **Map** (immutable; data type) | `%hash-map` | any | construct a map from `k v k v …` args (the `{ }` literal's programmatic form); last-wins on dup keys |
@@ -850,11 +851,20 @@ docstring. `crates/lisp/src/` is the root of every path.
 
 | Primitive | Arity | Purpose |
 |---|---|---|
-| `%wasm-call` | 3 | — |
+| `%wasm-call` | 3–4 | `(inst name args [size])`: a fourth argument answers a list result as vectors of `size` items (`wasm/call-shaped`, ADR-810) |
 | `%wasm-close` | 1 | — |
 | `%wasm-exports` | 1 | — |
 | `%wasm-load` | 1–2 | — |
 | `%wasm-release` | 2 | — |
+
+### `builtins/native.rs`
+
+| Primitive | Arity | Purpose |
+|---|---|---|
+| `%native-call` | 4 | `(lib name input out)`: call `int32_t name(const double *in, size_t, double *out, size_t)`; `input` in `host::numbers`' shapes, `out` an int or `[count size]` (ADR-807, ADR-810) |
+| `%native-close` | 1 | close a kernel library |
+| `%native-forget` | 1 | clear the quarantine a crash left on a library's bytes |
+| `%native-open` | 1 | open a kernel library from the project's own tree, never `_deps`; refused while quarantined (ADR-807) |
 
 ---
 
