@@ -3134,6 +3134,10 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
     and a horizon term; a material's `:coat`; `:rim` retired; roughness under 0.149 means
     something. ⬜ Emitters shadowed or occluded by geometry; ⬜ the footprint widened by a
     normal map's variance; ⬜ energy taken from the diffuse under a coat.
+  - ✅ **A headless window the GPU draws** (ADR-798, 2026-11-25) — `BROOD_GUI_HEADLESS=gpu`:
+    no window, the frames drawn by the GPU painter into a texture on the machine's GPU (no
+    display, compositor or unlocked screen), read back by `gui/capture` and `BROOD_GUI_DUMP`.
+    ⬜ A test in CI (it has no GPU: lavapipe under `BROOD_GUI_GPU=1` would do).
 - ✅ **Telemetry** (ADR-106) — core landed; the kernel event *sources* shipped
   2026-07-19 (ADR-137: `system-monitor` → `telemetry/watch-runtime`, GC/spawn/exit/
   deopt as `[:runtime kind]` events). ✅ **Metric aggregators + sampling** shipped

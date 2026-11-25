@@ -1,6 +1,6 @@
 //! Headless mode (`BROOD_GUI_HEADLESS`): whether this runtime opens real OS windows at all,
-//! whether its headless windows are painted offscreen (ADR-609), and the cell grid and
-//! pixel size a headless window reports.
+//! whether its headless windows are painted offscreen (ADR-609) and by which painter
+//! (ADR-798), and the cell grid and pixel size a headless window reports.
 
 use super::*;
 
@@ -28,7 +28,21 @@ pub fn headless() -> bool {
 pub(super) fn headless_paint() -> bool {
     static P: OnceLock<bool> = OnceLock::new();
     *P.get_or_init(|| {
-        headless() && std::env::var("BROOD_GUI_HEADLESS").is_ok_and(|v| v.trim() == "paint")
+        headless()
+            && std::env::var("BROOD_GUI_HEADLESS")
+                .is_ok_and(|v| matches!(v.trim(), "paint" | "gpu"))
+    })
+}
+
+/// HEADLESS PAINTING BY THE GPU (`BROOD_GUI_HEADLESS=gpu`, ADR-798): headless painting as
+/// above, but the frames are drawn by the GPU painter — the pipelines and passes a window's
+/// frames go through — into a texture of the window's size on the machine's own GPU, with
+/// no window, display server or compositor, and `gui/capture` reads that texture back. What
+/// lets a game be judged as the GPU draws it without a window on anyone's screen. Read once.
+pub(super) fn headless_gpu() -> bool {
+    static G: OnceLock<bool> = OnceLock::new();
+    *G.get_or_init(|| {
+        headless() && std::env::var("BROOD_GUI_HEADLESS").is_ok_and(|v| v.trim() == "gpu")
     })
 }
 

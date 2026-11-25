@@ -84,7 +84,6 @@ use passes::*;
 use pipelines::*;
 use run_cache::*;
 use scenes::*;
-#[cfg(test)]
 use setup::*;
 use shaders::*;
 
@@ -178,18 +177,20 @@ enum LcdText {
     PerChannel([wgpu::RenderPipeline; 3]),
 }
 
-/// Where a `GpuWindow`'s frames are drawn: the window's swapchain, or — for the headless
-/// harness that checks the GPU path on a real device with no window on anyone's screen —
-/// one texture of the size and format a window would have. Field order matters: the
-/// surface was created from the window's raw handles, so it must drop before the window —
-/// Rust drops fields in declaration order.
+/// Where a `GpuWindow`'s frames are drawn: the window's swapchain, or — for a headless
+/// window drawn by the GPU (`BROOD_GUI_HEADLESS=gpu`, ADR-798) and the harness that checks
+/// the GPU path on a real device, both with no window on anyone's screen — one texture of
+/// the size and format a window would have. Field order matters: the surface was created
+/// from the window's raw handles, so it must drop before the window — Rust drops fields in
+/// declaration order.
 enum Target {
     Window {
         surface: wgpu::Surface<'static>,
         window: Rc<Window>,
     },
-    #[cfg(test)]
-    Offscreen { texture: wgpu::Texture },
+    Offscreen {
+        texture: wgpu::Texture,
+    },
 }
 
 /// One open window's GPU state: the wgpu surface + device, the two instanced-quad
@@ -298,7 +299,6 @@ impl GpuWindow {
             self.config.height = h;
             match &mut self.target {
                 Target::Window { surface, .. } => surface.configure(&self.device, &self.config),
-                #[cfg(test)]
                 Target::Offscreen { texture } => {
                     *texture = offscreen_texture(&self.device, &self.config)
                 }
@@ -321,7 +321,6 @@ impl GpuWindow {
                 let size = window.inner_size();
                 (size.width.max(1), size.height.max(1))
             }
-            #[cfg(test)]
             Target::Offscreen { .. } => self.configured,
         }
     }
@@ -332,7 +331,6 @@ impl GpuWindow {
     fn acquire(&mut self) -> Option<(wgpu::Texture, Option<wgpu::SurfaceTexture>)> {
         let surface = match &self.target {
             Target::Window { surface, .. } => surface,
-            #[cfg(test)]
             Target::Offscreen { texture } => return Some((texture.clone(), None)),
         };
         let frame_texture = match surface.get_current_texture() {
@@ -365,12 +363,22 @@ impl GpuWindow {
     /// The offscreen target's last frame as RGB bytes, row by row (`read_frame`).
     #[cfg(test)]
     pub(crate) fn read_pixels(&self) -> Vec<u8> {
+        self.frame_pixels()
+            .expect("the offscreen frame reads back")
+            .2
+    }
+
+    /// An offscreen target's last frame: its width, its height and its pixels as RGB bytes,
+    /// row by row (`read_frame`) — what `gui/capture` hands back for a headless window the
+    /// GPU draws (ADR-798). `None` for a window's swapchain, whose image is gone once
+    /// presented, and when the device could not hand the frame back.
+    pub(crate) fn frame_pixels(&self) -> Option<(u32, u32, Vec<u8>)> {
         let Target::Offscreen { texture } = &self.target else {
-            panic!("read_pixels reads an offscreen target");
+            return None;
         };
         let (w, h) = self.configured;
         read_frame(&self.device, &self.queue, texture, self.config.format, w, h)
-            .expect("the offscreen frame reads back")
+            .map(|pixels| (w, h, pixels))
     }
 
     /// Turn the reuse (`reuse_enabled`) on or off for this target alone — fragment
@@ -860,8 +868,7 @@ impl GpuWindow {
             // Paced by the compositor (ADR-726): asked only now, with a frame really going
             // out — a frame callback asked for a paint that presents nothing would never
             // come, and winit would hold every later redraw for it.
-            // irrefutable outside the tests, whose offscreen target presents nothing
-            #[allow(irrefutable_let_patterns)]
+            // (an offscreen target presents nothing, and has no surface texture to)
             if let Target::Window { window, .. } = &self.target {
                 window.pre_present_notify();
             }

@@ -18,8 +18,9 @@ pub fn render_frame(
 /// `(gui/capture id)` — window `id`'s current frame, painted into memory as the window
 /// paints it (ADR-609). A real window's is rasterised on the GUI thread by its own
 /// renderer (a GPU window's by the CPU painter over the same frame, its sprites
-/// missing); a headless painting window's on the offscreen thread. A plain headless
-/// window has nothing to paint with, so that is an error naming the setting.
+/// missing); a headless painting window's on the offscreen thread — by the CPU painter,
+/// or, under `BROOD_GUI_HEADLESS=gpu`, the frame the GPU drew read back (ADR-798). A plain
+/// headless window has nothing to paint with, so that is an error naming the setting.
 pub fn capture(id: u64) -> Result<super::super::FrameImage, String> {
     if !lock(windows()).contains_key(&id) {
         return Err("gui window not open".into());
@@ -30,7 +31,7 @@ pub fn capture(id: u64) -> Result<super::super::FrameImage, String> {
     if headless() {
         return Err(
             "gui is headless with no painter — run with BROOD_GUI_HEADLESS=paint \
-             to paint headless windows, or use gui/render-frame"
+             (or =gpu) to paint headless windows, or use gui/render-frame"
                 .into(),
         );
     }
@@ -68,7 +69,8 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
         let size = Arc::new(Mutex::new(headless_cells(spec.size)));
         let size_px = headless_px(spec.size);
         // Headless painting (ADR-609): the window is painted offscreen, so its grid is the
-        // one the real cell metrics give, measured before `open` returns.
+        // one the real cell metrics give, measured before `open` returns. An error when the
+        // GPU was asked to draw it (ADR-798) and there is none to draw with.
         if headless_paint() {
             offscreen::ask(|reply| offscreen::Request::Open {
                 id,
@@ -76,7 +78,7 @@ pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
                 px: size_px,
                 size: size.clone(),
                 reply,
-            })?;
+            })??;
         }
         lock(windows()).insert(
             id,

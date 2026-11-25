@@ -539,7 +539,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_GUI_HEADLESS",
         HOST,
-        "run the GUI/display layer with no real window, and no audio — for a headless CI box",
+        "run the GUI/display layer with no real window, and no audio — for a headless CI box; `=paint`: every window is painted in memory by the CPU painter, for `gui/capture` (ADR-609); `=gpu`: by the GPU painter into a texture on the machine's GPU, no display needed, read back by `gui/capture` and BROOD_GUI_DUMP (ADR-798)",
     ),
     f(
         "BROOD_TERM_GRAPHICS",

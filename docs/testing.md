@@ -330,6 +330,13 @@ keeps its settings and frames, and lays out on the grid the real cell metrics gi
 `(gui/capture (first (gui/windows)))` paints what it last drew. A plain `BROOD_GUI_HEADLESS=1`
 window keeps its fixed nominal grid and no font engine, so it cannot be captured.
 
+`BROOD_GUI_HEADLESS=gpu` (ADR-798) is the same with the GPU as the painter: each frame is drawn
+by the GPU painter's own pipelines into a texture on the machine's GPU, and `gui/capture` reads
+it back (`BROOD_GUI_DUMP=out.ppm` writes every painted frame). It is for LOOKING at what the GPU
+draws — a game's 3D scene, its shadows and hair — with no window on anyone's screen, not for a
+test's assertions: it needs a hardware GPU (`gui/open` fails without one), so CI cannot run it,
+and its stderr names the adapter that drew.
+
 ## Execution model — parallel by default
 
 Every test runs concurrently, **each in its own green process** (`spawn`/`receive`).

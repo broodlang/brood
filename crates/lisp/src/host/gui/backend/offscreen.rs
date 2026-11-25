@@ -24,6 +24,13 @@
 //!   lays out for the grid the picture is painted on. `gui/capture` paints its last
 //!   frame. A plain `BROOD_GUI_HEADLESS=1` window stays the fixed nominal grid with no
 //!   font engine, as before.
+//!
+//! Under `BROOD_GUI_HEADLESS=gpu` (ADR-798) a headless painting window's frames are drawn
+//! by the GPU painter instead: each window holds a `GpuWindow` whose target is a texture
+//! (`GpuWindow::headless`), every frame drawn to the window is painted into it when the
+//! thread is idle — a window's redraw, with no compositor to ask for one and nothing to
+//! present — and `gui/capture` reads the texture back. The renderer, the layout and the
+//! bleed stay the ones above.
 
 use super::bleed::{self, Margins};
 use super::fonts::default_families;
@@ -31,10 +38,13 @@ use super::paint::raster_frame;
 use super::render::{CpuTexture, Renderer};
 use super::rows;
 use super::{
-    DEFAULT_FAMILY, Families, RenderDefaults, TextAa, TextHinting, deliver, resize_message,
+    DEFAULT_FAMILY, Families, RenderDefaults, TextAa, TextHinting, deliver, enter_gate,
+    headless_gpu, resize_message,
 };
 use crate::core::sync::lock;
 use crate::core::value;
+#[cfg(feature = "gui-gpu")]
+use crate::host::gui::gpu::GpuWindow;
 use crate::host::gui::{FontChoice, FontInfo, FrameImage, Op, RenderSpec, TextureFilter};
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -49,7 +59,7 @@ pub(super) enum Request {
         subscriber: u64,
         px: (u32, u32),
         size: Arc<Mutex<(u16, u16)>>,
-        reply: Sender<()>,
+        reply: Sender<Result<(), String>>,
     },
     Close {
         id: u64,
@@ -160,9 +170,61 @@ struct Window {
     px: (u32, u32),
     size: Arc<Mutex<(u16, u16)>>,
     frame: Vec<Op>,
+    /// The texture the GPU draws this window's frames into, under `BROOD_GUI_HEADLESS=gpu`
+    /// (ADR-798); `None` for a window the CPU painter paints when a picture is asked for.
+    #[cfg(feature = "gui-gpu")]
+    gpu: Option<Box<GpuWindow>>,
+    /// The GPU target has not drawn the frame in hand yet: a frame arrived, or something
+    /// it draws with changed. Drawn when the thread has nothing else to do (`paint_owed`),
+    /// as a window's redraw is: frames drawn faster than the GPU paints them coalesce.
+    #[cfg(feature = "gui-gpu")]
+    owed: bool,
 }
 
 impl Window {
+    /// The frame in hand is to be drawn again by the GPU target, where there is one.
+    fn owe_paint(&mut self) {
+        #[cfg(feature = "gui-gpu")]
+        {
+            self.owed = true;
+        }
+    }
+
+    /// Draw the frame in hand on the GPU target, when one is owed: bled to the window's
+    /// edges and painted by `GpuWindow::paint`, as `RedrawRequested` paints a window's —
+    /// without the present (ADR-798).
+    #[cfg(feature = "gui-gpu")]
+    fn paint_owed(&mut self) {
+        let Some(gpu) = &mut self.gpu else {
+            return;
+        };
+        if !std::mem::take(&mut self.owed) {
+            return;
+        }
+        let margins = Margins::of(&self.renderer, self.px.0 as usize, self.px.1 as usize);
+        let bled = bleed::edge_bleed(&self.frame, &margins);
+        gpu.paint(bled.as_deref().unwrap_or(&self.frame), &mut self.renderer);
+    }
+
+    /// The window's picture (`gui/capture`): the frame the GPU target drew, read back from
+    /// its texture, or the frame in hand painted by the CPU painter.
+    fn capture(&mut self) -> Result<FrameImage, String> {
+        let (w, h) = (self.px.0 as usize, self.px.1 as usize);
+        #[cfg(feature = "gui-gpu")]
+        if self.gpu.is_some() {
+            self.paint_owed();
+            let Some((_, _, rgb)) = self.gpu.as_ref().and_then(|gpu| gpu.frame_pixels()) else {
+                return Err("gui: the GPU did not hand the window's frame back".to_string());
+            };
+            let mut rgba = Vec::with_capacity(w * h * 4);
+            for [red, green, blue] in rgb.as_chunks::<3>().0 {
+                rgba.extend_from_slice(&[*red, *green, *blue, 255]);
+            }
+            return Ok(frame_image(&self.renderer, rgba, w, h));
+        }
+        Ok(picture(&mut self.renderer, &self.frame, w, h))
+    }
+
     /// Re-measure the grid after a metric change and, when it moved, tell the app — the
     /// `[:resize cols rows]` a real window delivers (`publish_size`), so its loop lays
     /// out again for the grid the picture is painted on.
@@ -191,7 +253,25 @@ fn serve(requests: Receiver<Request>) {
         windows: HashMap::new(),
         installed: HashMap::new(),
     };
-    for request in requests {
+    loop {
+        // Nothing waiting: the GPU targets draw the frames they owe, then the thread sleeps
+        // on the next request. A window's redraw, without a compositor to ask for it.
+        let request = match requests.try_recv() {
+            Ok(request) => request,
+            Err(mpsc::TryRecvError::Disconnected) => return,
+            Err(mpsc::TryRecvError::Empty) => {
+                painter.paint_owed();
+                match requests.recv() {
+                    Ok(request) => request,
+                    Err(_) => return,
+                }
+            }
+        };
+        // Once the process is exiting nothing more is painted: a GPU driver's exit handler
+        // is tearing its state down (`exit_gate`).
+        let Some(_gate) = enter_gate() else {
+            return;
+        };
         painter.handle(request);
     }
 }
@@ -218,7 +298,35 @@ impl Painter {
         for window in self.windows.values_mut() {
             change(&mut window.renderer);
             window.publish_size();
+            window.owe_paint();
         }
+    }
+
+    /// Every GPU target draws the frame it owes (`Window::paint_owed`).
+    fn paint_owed(&mut self) {
+        #[cfg(feature = "gui-gpu")]
+        {
+            let Some(_gate) = enter_gate() else {
+                return;
+            };
+            for window in self.windows.values_mut() {
+                window.paint_owed();
+            }
+        }
+    }
+
+    /// The GPU target a new `width`×`height` window draws into under
+    /// `BROOD_GUI_HEADLESS=gpu` (ADR-798), `None` for a window the CPU painter paints. An
+    /// error when the GPU was asked for and cannot be had: a window that then opened would
+    /// show the CPU painter's frame to someone who asked what the GPU draws.
+    #[cfg(feature = "gui-gpu")]
+    fn gpu_target(width: u32, height: u32) -> Result<Option<Box<GpuWindow>>, String> {
+        if !headless_gpu() {
+            return Ok(None);
+        }
+        GpuWindow::headless(width, height)
+            .map(|gpu| Some(Box::new(gpu)))
+            .map_err(|e| format!("gui: BROOD_GUI_HEADLESS=gpu: no GPU to draw with ({e})"))
     }
 
     fn handle(&mut self, request: Request) {
@@ -230,6 +338,23 @@ impl Painter {
                 size,
                 reply,
             } => {
+                #[cfg(feature = "gui-gpu")]
+                let gpu = match Self::gpu_target(px.0, px.1) {
+                    Ok(gpu) => gpu,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                };
+                #[cfg(not(feature = "gui-gpu"))]
+                if headless_gpu() {
+                    let _ = reply.send(Err(
+                        "gui: BROOD_GUI_HEADLESS=gpu needs a build with the GPU painter \
+                         (--features gui-gpu)"
+                            .to_string(),
+                    ));
+                    return;
+                }
                 let renderer = self.renderer(1.0);
                 *lock(&size) = bleed::grid_cells(&renderer, px.0 as usize, px.1 as usize);
                 self.windows.insert(
@@ -240,9 +365,13 @@ impl Painter {
                         px,
                         size,
                         frame: Vec::new(),
+                        #[cfg(feature = "gui-gpu")]
+                        gpu,
+                        #[cfg(feature = "gui-gpu")]
+                        owed: true,
                     },
                 );
-                let _ = reply.send(());
+                let _ = reply.send(Ok(()));
             }
             Request::Close { id } => {
                 self.windows.remove(&id);
@@ -254,6 +383,7 @@ impl Painter {
                         window.publish_size();
                     }
                     window.frame = ops;
+                    window.owe_paint();
                 }
             }
             Request::Font { id, family, px } => match id {
@@ -261,6 +391,7 @@ impl Painter {
                     if let Some(window) = self.windows.get_mut(&target) {
                         window.renderer.set_font(family, px);
                         window.publish_size();
+                        window.owe_paint();
                     }
                 }
                 None => {
@@ -324,6 +455,15 @@ impl Painter {
                 filter,
             } => {
                 if let Some(window) = self.windows.get_mut(&id) {
+                    // on the device for a GPU target, in memory for the CPU painter: as a
+                    // window keeps it (`UserEvent::Texture`)
+                    #[cfg(feature = "gui-gpu")]
+                    if let Some(gpu) = &mut window.gpu {
+                        gpu.upload_texture(tex, &rgba, w, h, filter);
+                        window.renderer.forget_scene_pictures();
+                        window.owe_paint();
+                        return;
+                    }
                     window
                         .renderer
                         .textures
@@ -333,20 +473,35 @@ impl Painter {
             }
             Request::TextureFree { id, tex } => {
                 if let Some(window) = self.windows.get_mut(&id) {
+                    #[cfg(feature = "gui-gpu")]
+                    if let Some(gpu) = &mut window.gpu {
+                        gpu.free_texture(tex);
+                    }
                     window.renderer.textures.remove(&tex);
                     window.renderer.forget_scene_pictures();
+                    window.owe_paint();
                 }
             }
             Request::Mesh { id, handle, mesh } => {
                 if let Some(window) = self.windows.get_mut(&id) {
+                    #[cfg(feature = "gui-gpu")]
+                    if let Some(gpu) = &mut window.gpu {
+                        gpu.upload_mesh(handle, &mesh);
+                    }
                     window.renderer.meshes.insert(handle, mesh);
                     window.renderer.forget_scene_pictures();
+                    window.owe_paint();
                 }
             }
             Request::MeshFree { id, handle } => {
                 if let Some(window) = self.windows.get_mut(&id) {
+                    #[cfg(feature = "gui-gpu")]
+                    if let Some(gpu) = &mut window.gpu {
+                        gpu.free_mesh(handle);
+                    }
                     window.renderer.meshes.remove(handle);
                     window.renderer.forget_scene_pictures();
+                    window.owe_paint();
                 }
             }
             Request::Metrics { id, px, reply } => {
@@ -374,12 +529,9 @@ impl Painter {
             }
             Request::Capture { id, reply } => {
                 let answer = match self.windows.get_mut(&id) {
-                    Some(window) => {
-                        let (w, h) = (window.px.0 as usize, window.px.1 as usize);
-                        Ok(picture(&mut window.renderer, &window.frame, w, h))
-                    }
+                    Some(window) => window.capture(),
                     None => Err("gui window not open, or not a headless painting window \
-                         (BROOD_GUI_HEADLESS=paint)"
+                         (BROOD_GUI_HEADLESS=paint or =gpu)"
                         .to_string()),
                 };
                 let _ = reply.send(answer);
@@ -473,6 +625,13 @@ pub(super) fn raster(r: &mut Renderer, frame: &[Op], w: usize, h: usize) -> Fram
     for &pixel in &r.retained.canvas[..w * h] {
         rgba.extend_from_slice(&[(pixel >> 16) as u8, (pixel >> 8) as u8, pixel as u8, 255]);
     }
+    frame_image(r, rgba, w, h)
+}
+
+/// The picture map's data for a `w`×`h` frame whose pixels are `rgba`, with the geometry
+/// `r` laid it out by: the cell, the grid, its origin, the inset, the seam and every row's
+/// top — the same whichever painter drew the pixels.
+fn frame_image(r: &Renderer, rgba: Vec<u8>, w: usize, h: usize) -> FrameImage {
     let (origin_x, origin_y) = r.grid_origin(w, h);
     let grid = bleed::grid_cells(r, w, h);
     let map = r.rows(w, h);
@@ -634,6 +793,100 @@ mod tests {
         assert_eq!(pixel(&image, 0, y), BODY);
         assert_eq!(pixel(&image, image.width - 1, y), BODY);
         assert_eq!(pixel(&image, image.width / 2, image.height - 1), BODY);
+    }
+
+    /// A headless window the GPU draws (ADR-798), driven through the requests a program's
+    /// `gui/open`, `gui/draw` and `gui/capture` send: before any frame the capture is the
+    /// window's background, drawn by the GPU; a frame drawn to it is owed until the thread
+    /// is idle, then painted once; and the capture is that frame read back from the GPU's
+    /// texture, on the pixels the CPU painter lays the same frame out on. On a real device
+    /// with no window, so it is skipped where the machine has no GPU (CI).
+    #[cfg(feature = "gui-gpu")]
+    #[test]
+    fn a_gpu_window_captures_the_frame_the_gpu_drew() {
+        const ID: u64 = 7;
+        let (width, height) = (400u32, 203u32);
+        let gpu = match GpuWindow::headless(width, height) {
+            Ok(gpu) => gpu,
+            Err(reason) => {
+                eprintln!("no GPU to draw a headless window with ({reason}): skipped");
+                return;
+            }
+        };
+        let mut painter = Painter {
+            families: default_families(),
+            defaults: RenderDefaults::default(),
+            windows: HashMap::new(),
+            installed: HashMap::new(),
+        };
+        let mut renderer = painter.renderer(1.0);
+        renderer.set_bg(Some(BACKGROUND));
+        let grid = bleed::grid_cells(&renderer, width as usize, height as usize);
+        painter.windows.insert(
+            ID,
+            Window {
+                renderer,
+                subscriber: 0,
+                px: (width, height),
+                size: Arc::new(Mutex::new(grid)),
+                frame: Vec::new(),
+                gpu: Some(Box::new(gpu)),
+                owed: true,
+            },
+        );
+        let capture = |painter: &mut Painter| {
+            let (reply, answer) = mpsc::channel();
+            painter.handle(Request::Capture { id: ID, reply });
+            answer
+                .recv()
+                .expect("the painter answers")
+                .expect("a picture")
+        };
+        let empty = capture(&mut painter);
+        assert_eq!((empty.width, empty.height), (width, height));
+        assert_eq!(pixel(&empty, width / 2, height / 2), BACKGROUND);
+        assert!(
+            !painter.windows[&ID].owed,
+            "the capture painted what was owed"
+        );
+
+        let frame = vec![Op::Clear, band(1, 1, BODY, grid.0)];
+        painter.handle(Request::Draw {
+            id: ID,
+            ops: frame.clone(),
+        });
+        assert!(painter.windows[&ID].owed, "a drawn frame is owed a paint");
+        painter.paint_owed();
+        assert!(
+            !painter.windows[&ID].owed,
+            "painted when the thread is idle"
+        );
+        let image = capture(&mut painter);
+        let cpu = render_as(frame, width, height);
+        assert_eq!(image.grid, cpu.grid);
+        assert_eq!(image.row_tops, cpu.row_tops);
+        let x = width / 2;
+        for y in [
+            0,
+            image.row_tops[1],
+            image.row_tops[2] - 1,
+            image.row_tops[2],
+        ] {
+            assert_eq!(pixel(&image, x, y), pixel(&cpu, x, y), "pixel row {y}");
+        }
+        assert_eq!(pixel(&image, x, image.row_tops[1]), BODY);
+        assert_eq!(pixel(&image, x, 0), BACKGROUND);
+    }
+
+    /// `ops` as a `w`×`h` window with the default font and no inset paints them on the CPU.
+    #[cfg(feature = "gui-gpu")]
+    fn render_as(ops: Vec<Op>, w: u32, h: u32) -> FrameImage {
+        let spec = RenderSpec {
+            size: Some((w, h)),
+            bg: Some(BACKGROUND),
+            ..RenderSpec::default()
+        };
+        ask(|reply| Request::Render { ops, spec, reply }).expect("the offscreen painter answers")
     }
 
     /// A glyph's ink lands inside its cell: an `M` on row 1, column 2 darkens pixels in

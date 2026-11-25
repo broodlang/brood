@@ -118,6 +118,18 @@ clean edges; edges fade by coverage, never fringing dark. `:nearest` stays the d
 pixel art. Both window painters and the browser page honour it. **Breaking:** a display map's
 `:texture` entry is now called `(f tex rgba w h filter)`, the attach protocol's `[:texture …]`
 message carries the filter, and `%gui-texture` takes it as a sixth argument.
+**Added: an eye surface (ADR-796).** `:surface :eye` draws an eyeball's mesh by optics. Its
+material's `:eye {:eyes [{:centre [x y z] :axis [x y z] :iris-uv [u v]} …] :iris-uv-radius r}`
+says where its one or two eyes are in the mesh at rest and where each iris is in the texture;
+the vertices carry the frame through their own skinning, so an eye a bone turns needs nothing
+set each frame. Under the cornea the sight line is bent (`:ior`, 1.376) and followed to the
+iris's plane, where the texture is read: the iris is seen larger and, from the side, deep under
+the cornea instead of flat on a ball. The pupil is drawn there (`:pupil`, its share of the
+iris), and the highlights — the material's and its `:coat`'s — are the cornea's sphere's. The
+white is drawn as a `:cutout` is. `:radius`, `:iris-radius`, `:cornea-radius`, `:iris-depth`
+and `:up` shape it (a grown person's by default). A malformed `:eye`, or an `:eye` surface
+without one, is an error raised by `gui/draw`. Every other surface draws as before.
+
 
 **Added: 3D meshes in a frame (ADR-786).** `(gui/mesh id spec)` uploads a skinned, morphable mesh
 as the little-endian attribute bytes a glTF buffer holds (positions, normals, uvs, tangents,

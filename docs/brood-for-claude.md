@@ -1009,6 +1009,13 @@ code paints to a terminal or a GUI window unchanged.
 
 ```lisp
 (defmodule main "a counter app" (:use editor/ui) (:use editor/frontend) (:use editor/display))
+- **Looking at a window with nobody's screen** = run the program under
+  `BROOD_GUI_HEADLESS=paint` (no window; the CPU painter paints it in memory, ADR-609) or
+  `BROOD_GUI_HEADLESS=gpu` (no window; the GPU painter draws it into a texture on the
+  machine's GPU — what a game's 3D scene really looks like — and fails to open without a
+  hardware GPU, ADR-798), find the window with `(gui/windows)` and take
+  `(gui/write-png (gui/capture id) path)`. The program runs by its own timers; no input
+  arrives. `gui/render-frame` paints one frame with no program at all (CPU painter).
 
 (defn view (m cols rows)
   (frame (clear) (text 0 0 (str "count: " (get m :count)))))

@@ -272,7 +272,7 @@ A `[:rect row col w h face]` op fills a w×h cell block with the face's backgrou
         Arity::exact(1),
         Sig::new(vec![int], map_ty),
         &["id"],
-        "Window id's current frame painted into memory as the window paints it — the picture map %gui-render-frame returns. Works for a real window and, headless, for a window opened under BROOD_GUI_HEADLESS=paint; a plain headless window has no painter, so that errors. Needs --features gui.",
+        "Window id's current frame painted into memory as the window paints it — the picture map %gui-render-frame returns. Works for a real window and, headless, for a window opened under BROOD_GUI_HEADLESS=paint (the CPU painter's picture) or =gpu (the frame the GPU drew, read back; ADR-798); a plain headless window has no painter, so that errors. Needs --features gui.",
         gui_capture);
     primitives.def(
         "%gui-windows",

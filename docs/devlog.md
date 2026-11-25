@@ -2906,3 +2906,24 @@ womanblend's hair is now wisps (ribbons 6 mm wide, textured with fine hairs); en
 into shingles. `strand_vertex` (CPU and shader) scales the width by the sine of the angle to the
 line of sight, floor `STRAND_END_ON` 0.3. Run here: build, fmt, check-desktop's static gates; the
 new test compiles but was NOT run (desktop rule): CI's.
+
+2026-11-25. **A headless window the GPU draws: `BROOD_GUI_HEADLESS=gpu` (ADR-798).** womanblend's
+figure is judged as the GPU draws her, and each look opened a window on its author's screen (and
+drew nothing under a lock screen). The renderer's unit tests already drew into a texture on the
+real device (`Target::Offscreen`, test-only); that target is now what a headless painting
+window's frames go to when the switch says `gpu`: the offscreen thread holds a `GpuWindow` per
+window (`GpuWindow::headless`: adapter asked with no surface, software refused as a window
+refuses it, named once on stderr), paints each drawn frame when its queue is idle, and
+`gui/capture` reads the texture back; `BROOD_GUI_DUMP` works as it is. With no GPU `gui/open`
+fails. Measured on the desktop (RTX 5060 Laptop, Vulkan, driver 595.99.02; the adapter line
+says so): a 320×200 frame of text, a rect, a turned quad and a line captured and dumped are
+byte-equal, and 75 dB PSNR from the CPU painter's; womanblend's viewer stopped at one moment
+of her clock, 1280×720, drawn off screen and in a window inside a headless compositor on the
+same card, differs where two runs by either route differ (her hair's wisps: 2–11% of bytes)
+and nowhere else (the room: at most ±1 in 0.02% of bytes, the same between two off-screen
+runs); a face shot takes 18–20 s (8 of them the tool's settle) against 52 s by the CPU
+painter at the same 900×970. Run here: release build, fmt on the files touched,
+check-desktop's static gates, and the one new unit test
+(`a_gpu_window_captures_the_frame_the_gpu_drew`, sabotaged red by taking the paint out of the
+capture, restored). NOT run: the Rust suite, the `.blsp` suites, A/B, fuzz (desktop rule): CI's,
+which has no GPU and skips the new test.

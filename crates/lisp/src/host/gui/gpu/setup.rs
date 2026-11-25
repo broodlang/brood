@@ -1,6 +1,6 @@
 //! Bringing a `GpuWindow` up: the surface, adapter and device, the swapchain's format and
-//! present mode, the offscreen target the headless harness draws into, and the assembly of
-//! the quad pipelines, buffers and caches over a ready device.
+//! present mode, the offscreen target a headless window and the harness draw into, and the
+//! assembly of the quad pipelines, buffers and caches over a ready device.
 
 use super::*;
 
@@ -76,17 +76,7 @@ impl GpuWindow {
             compatible_surface: Some(&surface),
         }))
         .map_err(|e| format!("gpu adapter: {e}"))?;
-        // A machine with no GPU still offers an adapter when Mesa is installed: llvmpipe or
-        // lavapipe, the GPU emulated on the CPU. Drawing through it costs more than the CPU
-        // painter, which knows what changed, so it counts as no GPU — the caller falls back
-        // with nothing to configure. `BROOD_GUI_GPU=1` still asks for it (the GPU-only
-        // effects, a `BROOD_GUI_DUMP` readback on a machine without a GPU).
-        let info = adapter.get_info();
-        if info.device_type == wgpu::DeviceType::Cpu
-            && std::env::var("BROOD_GUI_GPU").as_deref() != Ok("1")
-        {
-            return Err(format!("only a software adapter ({})", info.name));
-        }
+        refuse_software(&adapter)?;
         let (device, queue) = request_device(&adapter)?;
         // The driver is loaded now: shut the GUI thread's gate before its exit handler runs.
         crate::host::gui::backend::close_at_exit();
@@ -136,12 +126,42 @@ impl GpuWindow {
         ))
     }
 
+    /// A headless window the GPU draws (`BROOD_GUI_HEADLESS=gpu`, ADR-798): an `offscreen`
+    /// target of `w`×`h` on the machine's own GPU, asked for with no surface to be
+    /// compatible with — there is no window, so no display server, compositor or unlocked
+    /// screen is needed. The adapter is the one a window would prefer (high performance), a
+    /// software one refused as a window refuses it (`refuse_software`), and its name is
+    /// printed once, so a run can show which GPU drew its frames.
+    pub(crate) fn headless(w: u32, h: u32) -> Result<GpuWindow, String> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+            compatible_surface: None,
+        }))
+        .map_err(|e| format!("gpu adapter: {e}"))?;
+        refuse_software(&adapter)?;
+        static NAMED: std::sync::Once = std::sync::Once::new();
+        NAMED.call_once(|| {
+            let info = adapter.get_info();
+            eprintln!(
+                "brood gui: headless frames drawn by the GPU: {} ({:?}, {:?}, driver {} {})",
+                info.name, info.device_type, info.backend, info.driver, info.driver_info
+            );
+        });
+        let window = GpuWindow::offscreen(&adapter, w, h)?;
+        // The driver is loaded now: shut the painter's gate before its exit handler runs.
+        crate::host::gui::backend::close_at_exit();
+        Ok(window)
+    }
+
     /// A target with no window: the frames are drawn into one `w`×`h` texture of the
     /// format a window on this platform is drawn in, its sRGB sibling viewable as the
     /// window's swapchain is where the surface allows it — the same pipelines, batches and
-    /// passes, read back with `read_pixels`. What the headless harness checks the GPU path
-    /// with on a real device, on nobody's screen.
-    #[cfg(test)]
+    /// passes, read back with `frame_pixels`. What a headless window the GPU draws is
+    /// (`headless`), and what the headless harness checks the GPU path with on a real
+    /// device, on nobody's screen.
     pub(crate) fn offscreen(adapter: &wgpu::Adapter, w: u32, h: u32) -> Result<GpuWindow, String> {
         let (device, queue) = request_device(adapter)?;
         let format = wgpu::TextureFormat::Bgra8Unorm;
@@ -504,6 +524,22 @@ pub(crate) fn hardware_adapters() -> Vec<wgpu::Adapter> {
         .collect()
 }
 
+/// Refuse a software adapter. A machine with no GPU still offers an adapter when Mesa is
+/// installed: llvmpipe or lavapipe, the GPU emulated on the CPU. Drawing through it costs
+/// more than the CPU painter, which knows what changed, so it counts as no GPU — a window
+/// falls back to the CPU painter with nothing to configure, a headless window the GPU was
+/// asked to draw does not open. `BROOD_GUI_GPU=1` still asks for it (the GPU-only effects, a
+/// `BROOD_GUI_DUMP` readback on a machine without a GPU).
+fn refuse_software(adapter: &wgpu::Adapter) -> Result<(), String> {
+    let info = adapter.get_info();
+    if info.device_type == wgpu::DeviceType::Cpu
+        && std::env::var("BROOD_GUI_GPU").as_deref() != Ok("1")
+    {
+        return Err(format!("only a software adapter ({})", info.name));
+    }
+    Ok(())
+}
+
 /// The device and queue on `adapter`: dual-source blending where it has it.
 pub(super) fn request_device(
     adapter: &wgpu::Adapter,
@@ -528,7 +564,6 @@ pub(super) fn request_device(
 
 /// The texture an offscreen target draws into: the window's size and format, drawable
 /// through its sRGB view as a swapchain image is, and copyable for the readback.
-#[cfg(test)]
 pub(super) fn offscreen_texture(
     device: &wgpu::Device,
     config: &wgpu::SurfaceConfiguration,
