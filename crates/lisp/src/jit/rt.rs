@@ -262,12 +262,12 @@ pub unsafe extern "C" fn brood_rt_vec2_room(
     }
 }
 
-/// Build the closure for a native arm's `Inst::MakeClosure` (`BROOD_JIT_CLOSURES=1`,
-/// ADR-803) — the VM's `MakeClosure` arm (`exec_chunk`), step for step: the `ncap` capture
-/// values are staged on top of `roots`, exactly where the VM's operand stack leaves them; a
-/// fresh env frame off GLOBAL binds them (and the `letrec` self-name, when there is one); the
-/// closure goes through `make_closure_cached`. The fresh closure is written to `*out` and the
-/// staged captures are dropped.
+/// Build the closure for a native arm's `Inst::MakeClosure` (ADR-803) — the VM's `MakeClosure`
+/// arm (`exec_chunk`), step for step: the `ncap` capture values are staged on top of `roots`,
+/// exactly where the VM's operand stack leaves them; a fresh env frame off GLOBAL binds them
+/// (and the `letrec` self-name, when there is one); the closure goes through
+/// `make_closure_cached`. The fresh closure is written to `*out` and the staged captures are
+/// dropped.
 ///
 /// `inst` points at the arm's own `Inst::MakeClosure`, inside its chunk, which the arm
 /// keep-alive pins for the process's life — the contract `brood_rt_const_load` runs under.
@@ -1432,11 +1432,11 @@ pub unsafe extern "C" fn brood_rt_global(
             );
         }
         match crate::eval::compile::jit_resolve_global(&mut *heap, sym) {
-            Some(v) => {
+            Ok(v) => {
                 *out = v;
-                0
+                status::DONE
             }
-            None => 1,
+            Err(miss) => miss,
         }
     }
 }
@@ -1447,8 +1447,9 @@ pub unsafe extern "C" fn brood_rt_global(
 /// `env_get` every call — the difference between a hot recursive callee (`fib`) costing
 /// one cached read vs. a full name resolution per call. Late binding is preserved by the
 /// epoch stamp: a `def` bumps the global epoch, the probe misses, and it re-resolves
-/// (and the JIT'd arm is itself invalidated by the same epoch). 0 on success, 1 if
-/// unbound (error parked).
+/// (and the JIT'd arm is itself invalidated by the same epoch). The [`status`] protocol: DONE
+/// with the value in `*out`, DEOPT for a name a module load would bind (the VM's lazy path
+/// loads it), ERROR with the unbound error parked.
 ///
 /// # Safety
 /// `heap`/`out` must be live; `sym` is an interned [`crate::core::value::Symbol`].
@@ -1473,11 +1474,11 @@ pub unsafe extern "C" fn brood_rt_global_ic(
             );
         }
         match crate::eval::compile::jit_resolve_global_ic(&mut *heap, sym, site) {
-            Some(v) => {
+            Ok(v) => {
                 *out = v;
-                0
+                status::DONE
             }
-            None => 1,
+            Err(miss) => miss,
         }
     }
 }

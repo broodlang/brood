@@ -237,9 +237,9 @@ pub const FLAGS: &[DebugFlag] = &[
         "opt OUT of the hot re-lowering / inline fast-frame call path (§7.5, default ON): a hot arm's body is recompiled on the deferred queue with the Brood-to-Brood call ceremony emitted inline (bintree -10.6%, -19% at 2x run length; short runs unaffected). The A/B and bisect lever",
     ),
     f(
-        "BROOD_JIT_CLOSURES",
+        "BROOD_NO_JIT_CLOSURES",
         OPTOUT,
-        "opt IN (=1) to native code for functions holding a `(fn …)` literal (ADR-803): the literal is built by one runtime callback, and an arm holding one is exempt from the call-mediated profitability gate, so a function that hands a closure to `map`/`reduce` lowers with the rest of its work. Default OFF: tiering the boot path's closure arms costs every short run a fixed compile price, and the 2026-08-29 rows lost with the gate removed outright",
+        "opt OUT of native code for functions holding a `(fn …)` literal (ADR-803, default ON): the literal is built by one runtime callback, so a function that does its own work and hands a closure to `map`/`fold` lowers with that work; an arm of only loads, calls and the literal stays on the VM. nqueens -10% instructions, no row worse. The A/B and bisect lever",
     ),
     f(
         "BROOD_DEVIRT_DBG",
@@ -907,11 +907,10 @@ pub fn inline_fast_frame() -> bool {
     !is_set(&OFF, "BROOD_NO_XCALL")
 }
 
-/// `BROOD_JIT_CLOSURES=1`: a `(fn …)` literal is in the JIT subset, and an arm holding one
-/// skips the call-mediated gate (ADR-803). Opt-in.
+/// A `(fn …)` literal is in the JIT subset (ADR-803); `BROOD_NO_JIT_CLOSURES` opts out.
 pub fn jit_closures() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    is_armed(&ON, "BROOD_JIT_CLOSURES")
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !is_set(&OFF, "BROOD_NO_JIT_CLOSURES")
 }
 
 /// Lazy module loading (ADR-335); `BROOD_NO_LAZY_LOAD` pins the eager policy.

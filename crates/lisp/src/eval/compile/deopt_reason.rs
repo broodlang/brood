@@ -124,6 +124,9 @@ pub(crate) enum DeoptReason {
     SlotNumberNotFloat = 56,
     /// A run of element reads over one decoded vector storage: index out of range.
     CachedVectorRefOutOfRange = 57,
+    /// A global read or tail-call head missed on a name whose module a load would bind (an
+    /// isolate rolled the load back, ADR-803): the VM's lazy path loads it where it can park.
+    GlobalMissLoads = 58,
     /// Native recursion past the depth cap: drain the subtree on the VM.
     NativeDepthExceeded = 101,
     /// Entry hoist: a vector slot's element base was null (not a vector).
@@ -198,6 +201,7 @@ impl DeoptReason {
         DeoptReason::SelfCallCarryTag,
         DeoptReason::SlotNumberNotFloat,
         DeoptReason::CachedVectorRefOutOfRange,
+        DeoptReason::GlobalMissLoads,
         DeoptReason::NativeDepthExceeded,
         DeoptReason::HoistedSlotVectorBaseNull,
         DeoptReason::HoistedGlobalUnbound,
@@ -286,6 +290,7 @@ impl DeoptReason {
             DeoptReason::SelfCallCarryTag => "self-call-carry-tag",
             DeoptReason::SlotNumberNotFloat => "slot-number-not-float",
             DeoptReason::CachedVectorRefOutOfRange => "cached-vector-ref-out-of-range",
+            DeoptReason::GlobalMissLoads => "global-miss-loads",
             DeoptReason::NativeDepthExceeded => "native-depth-exceeded",
             DeoptReason::HoistedSlotVectorBaseNull => "hoisted-slot-vector-base-null",
             DeoptReason::HoistedGlobalUnbound => "hoisted-global-unbound",
@@ -398,6 +403,7 @@ mod tests {
                 | DeoptReason::SelfCallCarryTag
                 | DeoptReason::SlotNumberNotFloat
                 | DeoptReason::CachedVectorRefOutOfRange
+                | DeoptReason::GlobalMissLoads
                 | DeoptReason::NativeDepthExceeded
                 | DeoptReason::HoistedSlotVectorBaseNull
                 | DeoptReason::HoistedGlobalUnbound

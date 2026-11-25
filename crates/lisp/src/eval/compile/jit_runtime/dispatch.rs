@@ -421,15 +421,21 @@ pub(crate) fn jit_dispatch_call(
                 Some((v, _)) => v,
                 None => {
                     let cenv = heap.read_root_env(heap.jit_call_env);
-                    match heap
-                        .env_get(cenv, head)
-                        .or_else(|| crate::eval::derive::root_escape_value(heap, head))
-                    {
+                    match heap.env_get(cenv, head) {
                         Some(v) => v,
-                        None => {
-                            heap.jit_pending_error = Some(crate::eval::unbound_error(heap, head));
-                            return None;
-                        }
+                        // The VM's last resort for a miss in a run that cannot park
+                        // (`exec_chunk`'s `global_miss_in_arm`): the root escape, an alias, or
+                        // the module's load (ADR-335). Native code reaches it once a binding it
+                        // was compiled against has gone — an isolate rolled the load back
+                        // (ADR-803). The call is a safepoint — the arguments are staged on
+                        // `roots` and the caller's handles spilled — so the load may collect.
+                        None => match crate::eval::derive::global_miss(heap, cenv, head) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                heap.jit_pending_error = Some(e);
+                                return None;
+                            }
+                        },
                     }
                 }
             },

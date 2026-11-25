@@ -2942,3 +2942,21 @@ to the VM's; red with captures staged out of order and with the self-name unboun
 best of five: `nqueens` −16% at `BENCH_N=12`, `nbody` −5%, the other rows (spawn, startup
 included) flat. NOT run: `make ab`/`ab-vm`, the fuzz differential, gcstress under the flag —
 the gates for flipping the default.
+
+2026-11-25. **…and by default: closure literals in the JIT, refined (ADR-803).**
+b3d-skeleton had 38 functions on the VM for good because each builds a closure (the joint
+chain's world matrices among them, about a fifth of the game's tick). The literal lowers as one
+`brood_rt_make_closure` callback running the VM's own `MakeClosure` arm on captures staged on
+`roots` (a safepoint: handles beneath spilled, roots base reloaded). Landed first as opt-in
+`BROOD_JIT_CLOSURES=1` with a call-mediated-gate exemption; measured, the exemption won nothing
+and admitted pure call plumbing (matmul +2.5% instructions, all compile), so it is gone, and a
+chunk of only loads, calls and literals keeps the literal out. With that, no row is worse and
+the lever is on by default (`BROOD_NO_JIT_CLOSURES=1` opts out): nqueens −9.8% instructions
+(−16% wall at `BENCH_N=12`), latency −3.4%, spawn-live −1.9%, startup and the rest flat. A
+chunk calling `%receive` keeps the literal out, so receive chunks are as they were. Guard:
+`crates/cli/tests/jit_closure_literal.rs`, sabotaged red three ways. Run on the test machine:
+the full sweep of benchmark rows both ways, `make test`, and the gates listed in the commit.
+`make test` found one real bug on the way: native code raised `unbound` for a name an isolate
+had unloaded since it compiled (`seq/keep` in `image_registrations_match_source`), where the VM
+loads it again; a non-tail call now loads it, a read or tail head deopts to the VM's lazy path
+(`jit_isolate_lazy_miss`).

@@ -12,6 +12,28 @@ use cranelift_codegen::ir::{
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
 
+/// Branch on a `brood_rt_global{,_ic}` status: on to `cont` with the value, to the arm's
+/// `deopt` block for a name a module load would bind (the VM's lazy path loads it), or to
+/// `error` with the unbound error parked.
+pub(super) fn branch_on_global_status(
+    b: &mut FunctionBuilder,
+    status: cranelift_codegen::ir::Value,
+    error: Block,
+    deopt: Block,
+    cont: Block,
+) {
+    let miss = b.create_block();
+    b.ins().brif(status, miss, &[], cont, &[]);
+    b.switch_to_block(miss);
+    b.set_cold_block(miss);
+    let is_error = b
+        .ins()
+        .icmp_imm_s(IntCC::Equal, status, crate::jit::rt::status::ERROR);
+    let reason = deopt_code(b, DeoptReason::GlobalMissLoads);
+    b.ins()
+        .brif(is_error, error, &[], deopt, &[BlockArg::Value(reason)]);
+}
+
 /// The value a guard passes to its deopt block: `reason`'s code, which the shared deopt
 /// path parks on the heap (`brood_rt_note_deopt`). Every guard goes through here, so a
 /// reason is always a [`DeoptReason`] — never a bare number another guard might reuse.

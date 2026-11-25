@@ -165,7 +165,7 @@ pub(super) fn emit_call(
             .call(funcs.globic, &[heap, out_a, sym_v2, site_v2, funcs.ctx]);
         let cstatus = b.inst_results(cv)[0];
         let callee_ok = b.create_block();
-        b.ins().brif(cstatus, error, &[], callee_ok, &[]);
+        super::emit::branch_on_global_status(b, cstatus, error, frame.deopt, callee_ok);
         b.switch_to_block(callee_ok);
         let (cw0, cw1, cw2) = read_out_slot(b, out_slot);
         Some([cw0, cw1, cw2])
@@ -956,9 +956,8 @@ pub(super) fn emit_self_call(
     Some(())
 }
 
-/// `Inst::MakeClosure` — a `(fn …)` literal (`BROOD_JIT_CLOSURES=1`, ADR-803). The callback
-/// runs the VM's own `MakeClosure` arm, so this only has to put the world in the shape that
-/// arm expects: the `ncap` capture values staged on top of `roots` (where the VM's operand
+/// `Inst::MakeClosure` — a `(fn …)` literal (ADR-803). The callback runs the VM's own
+/// `MakeClosure` arm, so this only has to put the world in the shape that arm expects: the `ncap` capture values staged on top of `roots` (where the VM's operand
 /// stack leaves them), then one `brood_rt_make_closure(heap, out, inst)` call, then the fresh
 /// closure read back from `out` as a `Handle`.
 ///

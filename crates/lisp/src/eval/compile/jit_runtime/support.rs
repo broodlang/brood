@@ -68,20 +68,16 @@ pub(crate) fn jit_take_error(heap: &mut Heap) -> Option<LispError> {
 }
 
 /// Resolve free global `sym` in the executing JIT'd arm's env — the callee-loading
-/// `Inst::Global`/`GlobalIc` lowering (and a global read in value position). Returns the
-/// value, or parks an unbound error and returns `None`. Reads the *live* env each call,
-/// so a `def` rebind is seen immediately (the same late binding as `Inst::Global`).
+/// `Inst::Global`/`GlobalIc` lowering (and a global read in value position). Reads the *live*
+/// env each call, so a `def` rebind is seen immediately (the same late binding as
+/// `Inst::Global`). The value, or the [`miss_status`] of the miss.
 #[cfg(feature = "jit")]
 #[inline]
-pub(crate) fn jit_resolve_global(heap: &mut Heap, sym: Symbol) -> Option<Value> {
+pub(crate) fn jit_resolve_global(heap: &mut Heap, sym: Symbol) -> Result<Value, i64> {
     let env = heap.read_root_env(heap.jit_call_env);
     match heap.env_get(env, sym) {
-        Some(v) => Some(v),
-        None => {
-            let e = crate::eval::unbound_error(heap, sym);
-            heap.jit_pending_error = Some(e);
-            None
-        }
+        Some(v) => Ok(v),
+        None => Err(miss_status(heap, sym, None)),
     }
 }
 
@@ -94,15 +90,16 @@ pub(crate) fn jit_resolve_global(heap: &mut Heap, sym: Symbol) -> Option<Value> 
 /// native-linked recursion regress `spawn` (millions of redundant `env_get`s). Late
 /// binding holds via the epoch stamp (a `def` bumps the epoch → miss → re-resolve;
 /// the JIT'd arm is invalidated by the same epoch). Dynamic vars are never cached.
+/// The value, or the [`miss_status`] of the miss.
 #[cfg(feature = "jit")]
 #[inline]
-pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> Option<Value> {
+pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> Result<Value, i64> {
     let env = heap.read_root_env(heap.jit_call_env);
     if heap.is_global(env) {
         let epoch = heap.global_epoch();
         if let Some(v) = heap.vm_global_ic_probe(site, sym, epoch) {
             crate::perf_bump!(global_ic_hit);
-            return Some(v);
+            return Ok(v);
         }
         crate::perf_bump!(global_ic_miss);
         match heap
@@ -113,36 +110,44 @@ pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> 
                 if !heap.is_dynamic(sym) {
                     heap.vm_global_ic_put(site, sym, epoch, v);
                 }
-                Some(v)
+                Ok(v)
             }
-            None => {
-                park_unbound(heap, sym, site);
-                None
-            }
+            None => Err(miss_status(heap, sym, Some(site))),
         }
     } else {
         match heap
             .env_get(env, sym)
             .or_else(|| crate::eval::derive::root_escape_value(heap, sym))
         {
-            Some(v) => Some(v),
-            None => {
-                park_unbound(heap, sym, site);
-                None
-            }
+            Some(v) => Ok(v),
+            None => Err(miss_status(heap, sym, Some(site))),
         }
     }
 }
 
-/// Park the unbound-name error for a native arm's global read at `site`, and the site, so the
-/// arm's error block (`brood_rt_trace_push`) can locate it from the arm's
-/// `staged_head_pos` — as the VM's miss path does — where this callback has no arm to read.
+/// What a native global read does about a miss (`brood_rt_global{,_ic}`'s status). A name
+/// whose module a load would bind, or another process is loading, DEOPTs: a load here would
+/// run arbitrary Brood — it collects, and a value read is no safepoint — and every wait in it
+/// would block the OS worker, while the VM re-runs the read through its lazy path, where the
+/// load runs as ordinary frames that park. Native code meets this only after a binding it was
+/// compiled against has gone (an isolate rolling the load back); a fresh lazy name is bound
+/// to its loading stub. Any other miss is the unbound error, parked with the site so the
+/// arm's error block (`brood_rt_trace_push`) can locate it from `staged_head_pos`, as the
+/// VM's miss path does.
 #[cfg(feature = "jit")]
 #[cold]
-fn park_unbound(heap: &mut Heap, sym: Symbol, site: u32) {
+fn miss_status(heap: &mut Heap, sym: Symbol, site: Option<u32>) -> i64 {
+    if crate::eval::derive::module_to_load_off_native(heap, sym).is_some()
+        || crate::eval::derive::module_loading_elsewhere(heap, sym).is_some()
+    {
+        return crate::jit::rt::status::DEOPT;
+    }
     let e = crate::eval::unbound_error(heap, sym);
     heap.jit_pending_error = Some(e);
-    heap.jit_miss_gsite = site;
+    if let Some(site) = site {
+        heap.jit_miss_gsite = site;
+    }
+    crate::jit::rt::status::ERROR
 }
 
 /// Stamp [`Heap::jit_stack_limit`] from the live remaining stack, before entering native

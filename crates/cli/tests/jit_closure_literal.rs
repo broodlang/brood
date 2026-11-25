@@ -1,5 +1,5 @@
-//! **A function holding a `(fn …)` literal lowers natively under `BROOD_JIT_CLOSURES=1`, and
-//! answers exactly what it answers on the VM** (ADR-803).
+//! **A function holding a `(fn …)` literal lowers natively, and answers exactly what it
+//! answers on the VM** (ADR-803).
 //!
 //! The literal is built by `brood_rt_make_closure`, which runs the VM's own `MakeClosure` arm
 //! on captures the native code stages on `roots`. Each shape below is one way that can go
@@ -7,11 +7,12 @@
 //! callback), a `letrec` self-name (the closure binds itself into the env it captures), a
 //! capture-free literal (its eighth sighting promotes it to RUNTIME, the one route from this
 //! callback to a collection), a literal returned as the arm's value, and the same functions run
-//! from many processes at once.
+//! from many processes at once. Each also branches or builds a collection: an arm of only
+//! loads, calls and the literal is kept out on purpose, and `plumbing` checks that it is.
 //!
-//! Two runs of the same program: flag off (the baseline — every one of these arms is refused
-//! by the subset, which the test asserts, so the flag is what changes the tier) and flag on
-//! (every arm must settle `:native`). The answers must match line for line.
+//! Two runs of the same program: `BROOD_NO_JIT_CLOSURES=1` (the baseline — every one of these
+//! arms is refused by the subset, which the test asserts, so the lever is what changes the
+//! tier) and the default (every arm must settle `:native`). The answers must match line for line.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -34,9 +35,9 @@ fn run(file: &PathBuf, closures: bool) -> String {
         // nothing to compare.
         .env_remove("BROOD_TIER");
     if closures {
-        cmd.env("BROOD_JIT_CLOSURES", "1");
+        cmd.env_remove("BROOD_NO_JIT_CLOSURES");
     } else {
-        cmd.env_remove("BROOD_JIT_CLOSURES");
+        cmd.env("BROOD_NO_JIT_CLOSURES", "1");
     }
     support::dies_with_parent(&mut cmd);
     let out = cmd.output().expect("run brood");
@@ -53,14 +54,19 @@ const PROGRAM: &str = r#"
 ;; A letrec self-name: the closure is bound into its own captured env, and reads itself
 ;; there as a VALUE (a direct self-call would compile to a loop and never look).
 (defn count-down (n)
-  (letrec (go (fn (i acc) (if (= i 0) acc (apply go [(- i 1) (+ acc i)])))) (go n 0)))
+  (if (< n 0)
+    0
+    (letrec (go (fn (i acc) (if (= i 0) acc (apply go [(- i 1) (+ acc i)])))) (go n 0))))
 ;; Capture-free: built thousands of times, so it is promoted from native code.
-(defn doubled (xs) (map xs (fn (x) (* x 2))))
+(defn doubled (xs) (if (empty? xs) [] (map xs (fn (x) (* x 2)))))
 ;; The literal is the arm's value, called after the arm has returned.
-(defn adder (n label) (fn (x) [label (+ x n)]))
+(defn adder (n label) (if (= n 0) nil (fn (x) [label (+ x n)])))
 ;; Captures of several kinds — a float, a map, a string — read back by the closure.
 (defn tagged (xs scale meta name)
-  (fold xs [] (fn (acc x) (conj acc [name (get meta :k) (* scale x)]))))
+  (if (empty? xs) [] (fold xs [] (fn (acc x) (conj acc [name (get meta :k) (* scale x)])))))
+;; Only call plumbing: native code would run the VM's own callbacks, so the literal does
+;; not bring it into the subset.
+(defn plumbing (xs k) (map xs (fn (x) (+ x k))))
 
 (def xs [(list 1 2) (list 3 4) (list 5 6)])
 (def nums [1 2 3 4 5])
@@ -70,7 +76,8 @@ const PROGRAM: &str = r#"
    (count-down (math/rem i 50))
    (doubled nums)
    ((adder i :a) 10)
-   (tagged nums 0.5 {:k i} "t")])
+   (tagged nums 0.5 {:k i} "t")
+   (plumbing nums i)])
 
 (defn drive (i acc) (if (= i 0) acc (drive (- i 1) (round i))))
 (def last-round (drive 3000 nil))
@@ -92,6 +99,7 @@ const PROGRAM: &str = r#"
 (io/puts (str "state doubled " (pr-str (state-of doubled 1))))
 (io/puts (str "state adder " (pr-str (state-of adder 2))))
 (io/puts (str "state tagged " (pr-str (state-of tagged 4))))
+(io/puts (str "state plumbing " (pr-str (state-of plumbing 2))))
 "#;
 
 const ARMS: [&str; 5] = ["pair-up", "count-down", "doubled", "adder", "tagged"];
@@ -113,7 +121,7 @@ fn closure_literals_lower_natively_and_answer_as_the_vm_does() {
     assert_eq!(
         on_answers.len(),
         3,
-        "BROOD_JIT_CLOSURES=1 run did not finish:\n{on}"
+        "default (closures on) run did not finish:\n{on}"
     );
     assert_eq!(
         off_answers, on_answers,
@@ -129,13 +137,22 @@ fn closure_literals_lower_natively_and_answer_as_the_vm_does() {
         assert_eq!(
             off_state,
             [format!("state {arm} [:bailed \"chunk-outside-jit-subset\"]").as_str()],
-            "flag OFF: `{arm}` should be refused by the subset — if it lowers without the \
-             flag, this test no longer shows the flag is what lowers it\n{off}"
+            "BROOD_NO_JIT_CLOSURES=1: `{arm}` should be refused by the subset — if it lowers \
+             anyway, this test no longer shows the literal is what kept it out\n{off}"
         );
         assert_eq!(
             on_state,
             [format!("state {arm} [:native nil]").as_str()],
-            "flag ON: `{arm}` did not settle native\n{on}"
+            "default: `{arm}` did not settle native\n{on}"
         );
     }
+    // A chunk of loads, calls and the literal stays out by default too: native code for it
+    // costs a compile and gains nothing (matmul's setup, +2.5% instructions).
+    let refused = ["state plumbing [:bailed \"chunk-outside-jit-subset\"]"];
+    assert_eq!(lines_with(&off, "state plumbing "), refused, "{off}");
+    assert_eq!(
+        lines_with(&on, "state plumbing "),
+        refused,
+        "default: a pure call-plumbing arm was admitted\n{on}"
+    );
 }

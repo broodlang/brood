@@ -144,7 +144,7 @@ pub(super) fn emit_global_read(
         };
         let status = b.inst_results(c)[0];
         let cont = b.create_block();
-        b.ins().brif(status, reads.error, &[], cont, &[]);
+        emit::branch_on_global_status(b, status, reads.error, frame.deopt, cont);
         b.switch_to_block(cont);
         let handle = handle_from_out_slot(b, reads.out_slot);
         stack.push(unbox_float_global(

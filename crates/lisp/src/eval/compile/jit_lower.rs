@@ -974,7 +974,6 @@ fn jit_lower_arm_inner(
                     prim::emit_make_map(&mut b, &mut stack, *n, frame, funcs)?;
                 }
                 // A `(fn …)` literal: one callback running the VM's own arm (ADR-803).
-                // Admitted to the subset only under `BROOD_JIT_CLOSURES=1`.
                 Inst::MakeClosure { names, .. } => {
                     call::emit_make_closure(
                         &mut b,
