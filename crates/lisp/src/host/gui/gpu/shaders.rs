@@ -779,6 +779,14 @@ fn vertex_at(index: u32) -> VertexIn {
     return input;
 }
 
+// `mesh::softness_at`: a pressed vertex's softness, wholly soft for a mesh without one
+fn contact_softness(index: u32) -> f32 {
+    if (draw.deform.z == 1u) {
+        return clamp(mesh_softness[index], 0.0, 1.0);
+    }
+    return 1.0;
+}
+
 // pass A: each pressed vertex posed (into the scene's posed buffer) and each contact's deepest
 // press into it kept (a positive float's bits order as the float does)
 @compute @workgroup_size(64)
@@ -795,6 +803,10 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     posed_out[at] = vec4<f32>(world, 1.0);
     posed_out[at + 1u] = vec4<f32>(normal, 0.0);
     posed_out[at + 2u] = vec4<f32>(tangent, input.tangent.w);
+    // bone, or the limb that presses (softness 0), neither pressed nor sizing a ring
+    if (contact_softness(id.x) <= 0.0) {
+        return;
+    }
     let count = min(contact_list.count.x, 16u);
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let distance = contact_distance(slot, world).w;
@@ -815,9 +827,9 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
     var point = posed_out[at].xyz;
     var normal = posed_out[at + 1u].xyz;
     let tangent = posed_out[at + 2u];
-    var softness = 0.0;
-    if (draw.deform.z == 1u) {
-        softness = clamp(mesh_softness[id.x], 0.0, 1.0);
+    let softness = contact_softness(id.x);
+    if (softness <= 0.0) {
+        return;
     }
     let count = min(contact_list.count.x, 16u);
     for (var slot = 0u; slot < count; slot = slot + 1u) {
