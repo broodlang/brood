@@ -721,8 +721,8 @@ struct DrawU {
 
 struct ContactList {
     count: vec4<u32>,
-    // two vec4 a contact: `[x y z kind]`, `[x y z w]` (`scenes::contact_words`)
-    shapes: array<vec4<f32>, 32>,
+    // three vec4 a contact: `[x y z kind]`, `[x y z w]`, its drag (`scenes::contact_words`)
+    shapes: array<vec4<f32>, 48>,
 };
 @group(3) @binding(8) var<storage, read> mesh_vertices: array<f32>;
 @group(3) @binding(9) var<uniform> contact_list: ContactList;
@@ -730,17 +730,27 @@ struct ContactList {
 @group(3) @binding(11) var<storage, read_write> posed_out: array<vec4<f32>>;
 @group(3) @binding(12) var<storage, read> mesh_softness: array<f32>;
 
-// (`mesh::RING_WIDTH`, `RING_SPREAD`, `RING_LIFT`, `FLAT_DEPTH`)
+// (`mesh::RING_WIDTH`, `RING_SPREAD`, `RING_LIFT`, `EDGE_BAND`, `EDGE_SPREAD`, `FIRM_INSET`, `FIRM_SOFTNESS`)
 const RING_WIDTH: f32 = 0.012;
 const RING_SPREAD: f32 = 2.0;
 const RING_LIFT: f32 = 0.35;
-const FLAT_DEPTH: f32 = 0.002;
+const EDGE_BAND: f32 = 0.004;
+const EDGE_SPREAD: f32 = 0.5;
+const FIRM_INSET: f32 = 0.25;
+const FIRM_SOFTNESS: f32 = 0.5;
+const MAX_SQUASH: f32 = 0.02;
+
+// `mesh::smooth_outside`: `distance`'s smooth maximum with 0 over `band`
+fn smooth_outside(distance: f32, band: f32) -> f32 {
+    let share = max((band - abs(distance)) / max(band, 1e-9), 0.0);
+    return max(distance, 0.0) + share * share * band * 0.25;
+}
 
 // `mesh::Contact::signed_distance`: how far `point` lies outside contact `slot` (negative inside),
 // in w, and the unit direction out of it there, in xyz
 fn contact_distance(slot: u32, point: vec3<f32>) -> vec4<f32> {
-    let first = contact_list.shapes[slot * 2u];
-    let second = contact_list.shapes[slot * 2u + 1u];
+    let first = contact_list.shapes[slot * 3u];
+    let second = contact_list.shapes[slot * 3u + 1u];
     let kind = u32(first.w + 0.5);
     if (kind == 0u) {
         return vec4<f32>(first.xyz, dot(first.xyz, point) - second.x);
@@ -837,21 +847,37 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         let measured = contact_distance(slot, point);
         let out = measured.xyz;
         let distance = measured.w;
-        if (distance < 0.0) {
-            point = point - out * distance;
-            // the skin faces out of the body, into what presses it
-            let flat = clamp(-distance / FLAT_DEPTH, 0.0, 1.0);
-            normal = safe_normalize(normal + (-out - normal) * flat);
-        } else if (softness > 0.0 && depth > 0.0) {
-            let width = RING_WIDTH + RING_SPREAD * depth;
+        // (`mesh::deform_by_contacts`: the patch's edge eased over a band, a firm part sunk a
+        // little behind the surface, the ring rising from nothing at the edge)
+        let band = EDGE_BAND + EDGE_SPREAD * depth;
+        let eased = smooth_outside(distance, band);
+        let into = 1.0 - smoothstep(-band, band, distance);
+        let inset = FIRM_INSET * depth * clamp(1.0 - softness / FIRM_SOFTNESS, 0.0, 1.0) * into;
+        let moved = min(eased - distance - inset, MAX_SQUASH * softness);
+        var lift = 0.0;
+        var slope = 0.0;
+        if (depth > 0.0 && distance > 0.0) {
+            let width = (RING_WIDTH + RING_SPREAD * depth) * (0.5 + softness);
             let reach = distance / width;
             if (reach < 3.0) {
-                let lift = RING_LIFT * softness * depth * exp(-reach * reach);
-                let slope = 2.0 * reach / width * lift;
-                let away = safe_normalize(out - normal * dot(out, normal));
-                point = point + normal * lift;
-                normal = safe_normalize(normal + away * slope);
+                let crest = RING_LIFT * softness * depth;
+                let fall = exp(0.5 - reach * reach) * 1.41421356;
+                lift = crest * reach * fall;
+                slope = crest / width * fall * (1.0 - 2.0 * reach * reach);
             }
+        }
+        let sideways = out - normal * dot(out, normal);
+        point = point + out * moved + normal * lift;
+        // (its `:drag`: wholly inside the patch, less through its edge and ring)
+        let reach = (RING_WIDTH + RING_SPREAD * depth) * (0.5 + softness);
+        let outside = max(distance, 0.0) / reach;
+        let held = into + (1.0 - into) * exp(-outside * outside);
+        point = point + contact_list.shapes[slot * 3u + 2u].xyz * held;
+        let turned = safe_normalize(normal + (-out - normal) * into);
+        if (dot(sideways, sideways) > 1e-8) {
+            normal = safe_normalize(turned - safe_normalize(sideways) * slope);
+        } else {
+            normal = turned;
         }
     }
     posed_out[at] = vec4<f32>(point, 1.0);

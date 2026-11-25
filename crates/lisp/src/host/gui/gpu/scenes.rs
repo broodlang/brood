@@ -79,16 +79,16 @@ struct ContactTarget {
     depths: wgpu::Buffer,
 }
 
-/// A scene's `:contacts` as the shader's `ContactList` holds them (ADR-805): how many, then two
-/// vec4 each, `[x y z kind]` and `[x y z w]`: a plane's normal and offset (kind 0), a sphere's
+/// A scene's `:contacts` as the shader's `ContactList` holds them (ADR-805): how many, then three
+/// vec4 each (the third its `:drag`), `[x y z kind]` and `[x y z w]`: a plane's normal and offset (kind 0), a sphere's
 /// centre and radius (1), a capsule's start, end and radius (2).
 fn contact_words(scene: &Scene) -> Vec<u8> {
     use crate::host::gui::mesh::{Contact, MAX_CONTACTS};
     let contacts = &scene.contacts[..scene.contacts.len().min(MAX_CONTACTS)];
     let mut bytes = words_bytes(&[contacts.len() as u32, 0, 0, 0]);
-    let mut floats = vec![0.0f32; MAX_CONTACTS * 8];
+    let mut floats = vec![0.0f32; MAX_CONTACTS * 12];
     for (slot, contact) in contacts.iter().enumerate() {
-        let at = slot * 8;
+        let at = slot * 12;
         let [first, second] = match *contact {
             Contact::Plane { normal, offset } => [
                 [normal[0], normal[1], normal[2], 0.0],
@@ -105,6 +105,10 @@ fn contact_words(scene: &Scene) -> Vec<u8> {
         };
         floats[at..at + 4].copy_from_slice(&first);
         floats[at + 4..at + 8].copy_from_slice(&second);
+        // the third: how far it drags the skin it presses along its surface
+        if let Some(drag) = scene.contact_drags.get(slot) {
+            floats[at + 8..at + 11].copy_from_slice(drag);
+        }
     }
     bytes.extend(floats_bytes(&floats));
     bytes
@@ -1176,7 +1180,7 @@ impl MeshGpu {
                         contacts: buffer(
                             device,
                             "contacts",
-                            16 + crate::host::gui::mesh::MAX_CONTACTS as u64 * 32,
+                            16 + crate::host::gui::mesh::MAX_CONTACTS as u64 * 48,
                             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                         ),
                         depths: buffer(
@@ -1702,6 +1706,7 @@ pub(super) fn scene_uniform_len() -> usize {
         background: [0.0; 4],
         palettes: Vec::new(),
         contacts: Vec::new(),
+        contact_drags: Vec::new(),
         draws: Vec::new(),
     };
     scene_words(&scene, &shadow_plan(&scene, None), &emitter_plan(&scene)).len() * 4
