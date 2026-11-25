@@ -10,11 +10,15 @@ pub(crate) mod dial; // dialling a TCP peer by name with the resolve and the con
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file_watch; // file change notification as process messages (ADR-782); wasm has none
 pub mod gui; // optional windowed display backend (feature "gui") — ADR-046 frontend #2
+#[cfg(feature = "native-kernels")]
+pub mod native;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod net; // thin non-blocking TCP socket mechanism (ADR-062); policy lives in bundled std/net/* (ADR-097)
 #[cfg(target_arch = "wasm32")]
 #[path = "host/net_wasm.rs"]
 pub mod net; // wasm has no sockets — stub with the same API (fails at runtime)
+#[cfg(any(feature = "wasm", feature = "native-kernels"))]
+pub(crate) mod numbers; // a numeric array argument's one shape at a native boundary (ADR-806/806) // native numeric kernels through one C ABI (ADR-807); policy in std/native.blsp
 pub(crate) mod owned; // the owner-indexed handle table behind sockets, subprocesses, wasm instances and tree handles
 #[cfg(windows)]
 pub(crate) mod owner_only; // Windows's owner-only: a protected one-entry DACL (file/spit-private, file/mkdir-private)

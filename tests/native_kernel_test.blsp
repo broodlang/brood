@@ -1,0 +1,111 @@
+;; Native numeric kernels through the one C ABI (ADR-807): `int32_t name(const double *in,
+;; size_t in_count, double *out, size_t out_count)`. The library is a few lines of C compiled
+;; here, so the file is skipped without a C compiler, as `grammar_vet_test.blsp` is. Covered:
+;; a call's doubles in and out, ints taken as doubles, a kernel's nonzero return as an error,
+;; a missing entry point, the refusal of a fetched package's library (`_deps`), the
+;; offloaded call, and a crash in a CHILD runtime that names and quarantines the library,
+;; which the parent then refuses until `forget`.
+
+(defmodule native-kernel-test (:use test) (:use native) (:use suite-helpers))
+
+(purge-stale-temp "brood-nativekernel-")
+
+(def nkt-cc? (and (os/which "cc") (not (= (os/type) :windows))))
+
+(def- nkt-source
+  (str "#include <stdint.h>\n#include <stddef.h>\n"
+    ;; out[i] = 2 * in[i] for every out slot it has an input for, 0.5 past them
+    "int32_t twice(const double *in, size_t n, double *out, size_t m) {\n"
+    "  for (size_t i = 0; i < m; i++) out[i] = i < n ? 2.0 * in[i] : 0.5;\n" "  return 0; }\n"
+    ;; one out slot: the sum of the inputs
+    "int32_t sum(const double *in, size_t n, double *out, size_t m) {\n"
+    "  double s = 0; for (size_t i = 0; i < n; i++) s += in[i];\n"
+    "  if (m < 1) return 3; out[0] = s; return 0; }\n"
+    "int32_t refuse(const double *in, size_t n, double *out, size_t m) { return 7; }\n"
+    "int32_t crash(const double *in, size_t n, double *out, size_t m) {\n"
+    "  *(volatile int *)0 = 1; return 0; }\n"))
+
+(defn- nkt-build (dir name)
+  ;; compile the kernels into `dir`/lib`name`.so; answers its path
+  (let (c-file (path/join dir (str name ".c"))
+        library (path/join dir (str "lib" name ".so")))
+    (file/spit c-file nkt-source)
+    (let (result (os/cmd "cc" ["-shared" "-fPIC" "-O1" "-o" library c-file]))
+      (when (not (os/cmd-ok? result))
+        (error "nkt-build: cc failed: " (get result :stderr)))
+      library)))
+
+(defn- nkt-dir ()
+  (let (dir (temp-dir "brood-nativekernel-"))
+    (file/mkdir dir)
+    dir))
+
+(when nkt-cc?
+  (describe "native kernels"
+    (test "doubles in, doubles out"
+      (let (lib (open (nkt-build (nkt-dir) "kern")))
+        (assert= [2.0 -3.0 0.5] (call lib "twice" [1.0 -1.5] 3))
+        ;; ints are taken as doubles; a list works as a vector does
+        (assert= [6.0] (call lib "sum" (list 1 2 3.0) 1))
+        (assert= [] (call lib "twice" [] 0))
+        (assert= [0.0] (call lib "sum" nil 1))
+        (close lib)))
+
+    (test "a vector of number vectors flattens one level, in order"
+      (let (lib (open (nkt-build (nkt-dir) "kern")))
+        (assert= [2.0 4.0 6.0 8.0] (call lib "twice" [[1.0 2.0] [3.0] (list 4)] 4))
+        (assert= [10.0] (call lib "sum" [1.0 [2.0 3.0] [4.0]] 1))
+        (assert-error (call lib "twice" [[[1.0]]] 1))
+        (close lib)))
+
+    (test "a long array round-trips"
+      (let (lib (open (nkt-build (nkt-dir) "kern"))
+            xs (into [] (map (range 6000) (fn (i) (* 0.25 i)))))
+        (assert= (into [] (map xs (fn (x) (* 2.0 x)))) (call lib "twice" xs 6000))
+        (close lib)))
+
+    (test "the offloaded call answers the same"
+      (let (lib (open (nkt-build (nkt-dir) "kern")))
+        (assert= [2.0 4.0] (call-blocking lib "twice" [1.0 2.0] 2))
+        (close lib)))
+
+    (test "a kernel's error code, a missing entry point and a bad argument are errors"
+      (let (lib (open (nkt-build (nkt-dir) "kern")))
+        (is (includes? (try (call lib "refuse" [1.0] 1) (catch e (error-message e))) "returned 7"))
+        (is (includes? (try (call lib "sum" [1.0] 0) (catch e (error-message e))) "returned 3"))
+        (assert-error (call lib "no_such_kernel" [1.0] 1))
+        (assert-error (call lib "twice" [1.0 :x] 2))
+        (assert-error (call lib "twice" [1.0] -1))
+        ;; still usable after each
+        (assert= [2.0] (call lib "twice" [1.0] 1))
+        (close lib)
+        (assert-error (call lib "twice" [1.0] 1))))
+
+    (test "a library under _deps is never loaded"
+      (let (dir (nkt-dir)
+            deps (path/join dir "_deps"))
+        (file/mkdir deps)
+        (let (library (nkt-build deps "fetched")
+              refused (check-allow :discarded-catch
+                        (try (open library) (catch e (error-message e)))))
+          (is (includes? refused "_deps")))))
+
+    (test "a crash in a child runtime quarantines the library, and the parent refuses it"
+      (let (exe (sibling-binary "brood")
+            dir (nkt-dir)
+            library (nkt-build dir "crashy")
+            script (path/join dir "crash.blsp"))
+        (when exe
+          (file/spit script
+            (str "(native/call (native/open " (pr-str library) ") \"crash\" [1.0] 1)\n"))
+          (let (result (os/cmd exe [script]))
+            (is (not (os/cmd-ok? result))))
+          (let (refused (check-allow :discarded-catch
+                          (try (open library) (catch e (error-message e)))))
+            (is (includes? refused "quarantined")))
+          ;; cleared, it loads again (its other kernels are sound)
+          (assert= true (forget library))
+          (assert= false (forget library))
+          (let (lib (open library))
+            (assert= [4.0] (call lib "twice" [2.0] 1))
+            (close lib)))))))

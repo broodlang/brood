@@ -38,6 +38,7 @@ pub(crate) fn prim2_int_fast(op: PrimOp, a: i64, b: i64) -> Option<Value> {
         | PrimOp::TableHas
         | PrimOp::TableGet
         | PrimOp::MapGet
+        | PrimOp::SetHas
         | PrimOp::ContractAwait => None,
     }
 }
@@ -193,6 +194,13 @@ pub(crate) fn prim2_inline_exec(
         None if op == PrimOp::ContractAwait => Ok(Some(y)),
         None if op == PrimOp::MapGet => {
             if let Some(v) = heap.map_get_inline(x, y) {
+                crate::perf_bump!(prim2_inline);
+                return Ok(Some(v));
+            }
+            Ok(None)
+        }
+        None if op == PrimOp::SetHas => {
+            if let Some(v) = heap.set_has_inline(x, y) {
                 crate::perf_bump!(prim2_inline);
                 return Ok(Some(v));
             }

@@ -38,6 +38,8 @@ use crate::core::value::{self, Value};
 use crate::error::{LispError, LispResult};
 use crate::host::owned::OwnedTable;
 
+mod lists; // numeric lists by memory copy (ADR-806)
+
 /// Fuel budget per call — generous for real compute (hundreds of millions of
 /// abstract ops) while still bounding a runaway guest to well under a second.
 const FUEL_PER_CALL: u64 = 2_000_000_000;
@@ -211,6 +213,9 @@ struct Export {
     func: Func,
     params: Box<[Type]>,
     results: Box<[Type]>,
+    /// Set when every parameter is a numeric list and the result one or none: the call
+    /// copies the lists instead of building a `Val` per element (ADR-806).
+    lists: Option<lists::Shape>,
 }
 
 struct WasmInst {
@@ -451,10 +456,16 @@ pub fn load(src: &[u8], owner: u64, grants: Option<&Grants>) -> Result<u64, Lisp
             }
         };
         if let Some(func) = func {
+            let params: Box<[Type]> = signature.params().map(|(_, ty)| ty).collect();
+            let results: Box<[Type]> = signature.results().collect();
+            let lists = crate::diagnostics::debug_flags::wasm_fast_lists()
+                .then(|| lists::Shape::of(&params, &results))
+                .flatten();
             let export = Export {
                 func,
-                params: signature.params().map(|(_, ty)| ty).collect(),
-                results: signature.results().collect(),
+                params,
+                results,
+                lists,
             };
             exports.insert(key, export);
         }
@@ -547,8 +558,13 @@ pub fn call(heap: &mut Heap, id: u64, name: &str, args: &[Value]) -> LispResult 
     let mut inst = lock_inst(&inst);
     let inst = &mut *inst;
     let key = inst.aliases.get(name).map(String::as_str).unwrap_or(name);
-    let (func, param_tys, result_count) = match inst.exports.get(key) {
-        Some(export) => (export.func, export.params.clone(), export.results.len()),
+    let (func, param_tys, result_count, lists) = match inst.exports.get(key) {
+        Some(export) => (
+            export.func,
+            export.params.clone(),
+            export.results.len(),
+            export.lists.clone(),
+        ),
         None => {
             return Err(LispError::runtime(format!(
                 "%wasm-call: no export `{name}` in this component (see %wasm-exports)"
@@ -561,6 +577,13 @@ pub fn call(heap: &mut Heap, id: u64, name: &str, args: &[Value]) -> LispResult 
             param_tys.len(),
             args.len()
         )));
+    }
+    if let Some(shape) = lists {
+        let store = &mut inst.store;
+        store
+            .set_fuel(FUEL_PER_CALL)
+            .map_err(|e| wasm_err("%wasm-call", e))?;
+        return lists::call(heap, store, func, &shape, name, args);
     }
     let mut boundary = Boundary {
         resources: &mut inst.resources,
@@ -711,7 +734,13 @@ fn lower(
                     .collect();
                 return Ok(Val::List(out));
             }
-            let items = seq_items(heap, who, v)?;
+            // A numeric list takes the one shape every native boundary takes for numbers
+            // (`host::numbers`): nested vectors flatten one level, as on the copying path.
+            let items = if matches!(elem, Type::Float64 | Type::Float32 | Type::S32 | Type::U32) {
+                crate::host::numbers::flat_items(heap, who, v)?
+            } else {
+                seq_items(heap, who, v)?
+            };
             let mut out = Vec::with_capacity(items.len());
             for item in items {
                 out.push(lower(heap, who, item, &elem, boundary)?);

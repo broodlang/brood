@@ -1,0 +1,62 @@
+;;; `empty?`, `first` and `rest` of a MAP in native code (`brood_rt_is_empty`/`_first`/`_rest`,
+;;; `*_without_eval` in builtins/sequences.rs). Those declined every map, from when a record
+;;; was a map: a record's `Counted`/`Seqable` method decides for it, which needs the
+;;; evaluator. A record has been its own value kind since ADR-542, so the decline was stale
+;;; both ways: a plain map deopted on every call until the arm latched off the native tier
+;;; (`is-empty-declined`: b3d's `within-reach` and `reach-braked`), and a record slipped
+;;; through to run its method nested under native code. Now a map answers from its size and
+;;; a record deopts to the VM.
+;;;
+;;; The TIER case settles an arm fed only maps and asserts it stays native with no deopts:
+;;; with the old decline it latched `:bailed`. The VALUE cases run the shapes through arms
+;;; of their own, so a deopting record does not touch the tier case's arm.
+
+(defmodule jit-empty-map-test (:use test) (:use suite-helpers))
+
+(defrecord em-box (a b))
+(defrecord em-tally (n))
+(impl Counted jit-empty-map-test/em-tally (->count (t) (get t :n)))
+
+(defn em-hot (m) (if (empty? m) 0 1))
+(defn em-first-hot (m) (if (empty? m) nil (first m)))
+(defn- em-sum (m i acc) (if (= i 0) acc (em-sum m (- i 1) (+ acc (em-hot m)))))
+
+(defn em-any (m) (if (empty? m) :empty :full))
+(defn em-first-any (m) (if (= m 0) nil (first m)))
+(defn em-rest-any (m) (if (= m 0) nil (rest m)))
+
+(describe "empty?, first and rest of a map in native code"
+  (test "an arm fed maps settles native and stays there"
+    (when (%native-tier?)
+      (assert= :native
+        (settle em-hot 1 (fn () (em-sum {:a 1} 300 0) (em-sum {} 300 0)) 500))
+      (em-sum {:a 1} 5000 0)
+      (em-sum {} 5000 0)
+      (let (state (%jit-arm-state em-hot 1))
+        (assert= :native (get state :state))
+        (assert= 0 (get state :deopts-total)))))
+
+  (test "a map answers from its size"
+    (em-sum {:a 1} 2000 0)
+    (assert= 1 (em-hot {:a 1}))
+    (assert= 0 (em-hot {}))
+    (assert= :full (em-any {:a 1 :b 2}))
+    (assert= :empty (em-any {}))
+    (assert= [:a 1] (em-first-hot {:a 1}))
+    (assert= nil (em-first-hot {})))
+
+  (test "first and rest of a map are the builtin's"
+    (fold (range 2000) nil (fn (_acc i) (em-first-any {:k i}) (em-rest-any {:k i})))
+    (assert= [:k 1] (em-first-any {:k 1}))
+    (assert= nil (em-rest-any {:k 1}))
+    (assert= 1 (count (em-rest-any {:a 1 :b 2}))))
+
+  (test "a record still asks its own method"
+    (fold (range 2000) nil (fn (_acc _i) (em-any {:a 1})))
+    ;; a record with fields is not empty; a `Counted` record of size 0 is
+    (assert= :full (em-any (em-box 1 2)))
+    (assert= :empty (em-any (em-tally 0)))
+    (assert= :full (em-any (em-tally 3)))
+    ;; a lazy view realises
+    (assert= :empty (em-any (seq/lmap [] inc)))
+    (assert= :full (em-any (seq/lmap [1] inc)))))

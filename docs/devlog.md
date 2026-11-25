@@ -2960,3 +2960,35 @@ the full sweep of benchmark rows both ways, `make test`, and the gates listed in
 had unloaded since it compiled (`seq/keep` in `image_registrations_match_source`), where the VM
 loads it again; a non-tail call now loads it, a read or tail head deopts to the VM's lazy path
 (`jit_isolate_lazy_miss`).
+
+2026-11-25. **Kernels at native speed: WASM numeric lists by copy (ADR-806), a narrow C ABI for a
+project's own kernels (ADR-807), and `empty?` of a map in native code.** For b3d's skeleton
+pass, whose Rust kernel (world-matrices, bit-identical to Brood) lost to Brood at the WASM
+boundary. (1) An export of numeric-list parameters and a numeric-list result is called through
+wasmtime's typed API: one runtime-typed list wrapper per direction delegating to wasmtime's own
+copying implementations. 5 600 floats each way: 439 → 32 µs. (2) `native/open`/`call` load a C
+library from the project's own tree (never `_deps`) and call `int32_t name(const double *in,
+size_t, double *out, size_t)`; a crash names and quarantines the library (ADR-660's marks).
+5 600 doubles each way: 19.7 µs. (3) Both take a vector of number vectors, flattened one level
+in Rust: packing b3d's pose flat in Brood cost ~510 µs, more than its Brood pass. Its pose as
+176 sixteen-float vectors: 14 µs native, 23 µs WASM. (4) `brood_rt_is_empty`/`first`/`rest`
+declined every MAP, a leftover from records being maps (ADR-542 made them their own kind): a
+plain map deopted every call until the arm latched (`is-empty-declined`: b3d's `within-reach`,
+`reach-braked`), and a record slipped through to run its method nested. Now a map answers and a
+record deopts (`tests/jit_empty_map_test.blsp`). Run on the test machine: the new `.blsp` files,
+`wasm_test`, the new CLI tests, and sabotage of each guard; the full gates in the commit.
+
+2026-11-25. **`math/clamp` and `contains?` at native cost (ADR-808).** From womanblend's frame,
+~1 ms and ~0.9 ms a tick. Three costs, each general: a float `max`/`min` had no native lowering
+and bailed the whole arm (now the VM's `extremum` exactly — ties and NaN keep the first, a
+winning int stays an int); a contract made only of type variables (`clamp`, `max`, `min`) bound
+a shim that could refuse nothing yet cost ~950 ns and hid the primitive (now no shim: a clamp
+step under armed contracts 980 → 35 ns); `contains?` on a set called `%set-has?` and kept its
+map branch inline, so it stayed on the VM (now `%set-has?` is `PrimOp::SetHas` and the map branch
+a tail call: ~890 → ~56 ns from a native caller). First guards stayed green under sabotage —
+the suite runs with contracts armed, so the `Max` op was never reached — and were rewritten to
+assert on `math/clamp`'s own arm and the prim table; red under sabotage after. Also `make test`'s
+`polymorphic_arithmetic` failed once inside a loaded full run (its trace shows `magnitude` never
+tiered before the 0.1 s program ended); 30/30 alone and beside a suite since — a load-sensitive
+test to watch. Disk was full mid-run; `target/debug` and `target/release-fast` cleared (asked).
+

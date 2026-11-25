@@ -805,6 +805,7 @@ fn jit_lower_arm_inner(
         thas: callbacks.table_has,
         tget: callbacks.table_get,
         mget: callbacks.map_get,
+        shas: callbacks.set_has,
         vlen: callbacks.vector_len,
         count: callbacks.count,
         equal: callbacks.equal,

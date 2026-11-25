@@ -1,0 +1,166 @@
+;; Numeric lists across a WASM component call by memory copy (ADR-806): an export whose
+;; parameters are all `list<float64|float32|s32|u32>` and whose result is one or none is
+;; called through wasmtime's typed API (`host/wasm/lists.rs`) instead of a `Val` per element.
+;; Every answer and error here is the general path's — `crates/cli/tests/wasm_fast_lists.rs`
+;; runs this file's kernels both ways and compares — so the cases pin the conversions: an int
+;; where a float is declared, a range error for an int that does not fit, a vector back.
+
+(defmodule wasm-lists-test (:use test) (:use wasm))
+
+;; A bump allocator, and kernels over (ptr, len) lists. A list result is returned through a
+;; pointer to its (ptr, len) pair, at address 16.
+(def *kernels-wat*
+  "(component
+     (core module $m
+       (memory (export \"mem\") 4)
+       (global $next (mut i32) (i32.const 1024))
+       (func $alloc (export \"realloc\") (param i32 i32 i32 i32) (result i32)
+         (local $p i32)
+         ;; align up to 8
+         (local.set $p (i32.and (i32.add (global.get $next) (i32.const 7)) (i32.const -8)))
+         (global.set $next (i32.add (local.get $p) (local.get 3)))
+         (local.get $p))
+       (func $ret (param $ptr i32) (param $len i32) (result i32)
+         (i32.store (i32.const 16) (local.get $ptr))
+         (i32.store (i32.const 20) (local.get $len))
+         (i32.const 16))
+       ;; twice(xs: list<float64>) -> list<float64>
+       (func (export \"twice\") (param $xs i32) (param $n i32) (result i32)
+         (local $out i32) (local $i i32)
+         (local.set $out (call $alloc (i32.const 0) (i32.const 0) (i32.const 8)
+                           (i32.mul (local.get $n) (i32.const 8))))
+         (block $done
+           (loop $loop
+             (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+             (f64.store
+               (i32.add (local.get $out) (i32.mul (local.get $i) (i32.const 8)))
+               (f64.mul (f64.const 2)
+                 (f64.load (i32.add (local.get $xs) (i32.mul (local.get $i) (i32.const 8))))))
+             (local.set $i (i32.add (local.get $i) (i32.const 1)))
+             (br $loop)))
+         (call $ret (local.get $out) (local.get $n)))
+       ;; gather(xs: list<float64>, at: list<s32>) -> list<float64>: out[i] = xs[at[i]]
+       (func (export \"gather\") (param $xs i32) (param $xn i32) (param $at i32) (param $n i32)
+         (result i32)
+         (local $out i32) (local $i i32)
+         (local.set $out (call $alloc (i32.const 0) (i32.const 0) (i32.const 8)
+                           (i32.mul (local.get $n) (i32.const 8))))
+         (block $done
+           (loop $loop
+             (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+             (f64.store
+               (i32.add (local.get $out) (i32.mul (local.get $i) (i32.const 8)))
+               (f64.load (i32.add (local.get $xs)
+                 (i32.mul (i32.load (i32.add (local.get $at) (i32.mul (local.get $i) (i32.const 4))))
+                          (i32.const 8)))))
+             (local.set $i (i32.add (local.get $i) (i32.const 1)))
+             (br $loop)))
+         (call $ret (local.get $out) (local.get $n)))
+       ;; halve(xs: list<float32>) -> list<float32>
+       (func (export \"halve\") (param $xs i32) (param $n i32) (result i32)
+         (local $out i32) (local $i i32)
+         (local.set $out (call $alloc (i32.const 0) (i32.const 0) (i32.const 4)
+                           (i32.mul (local.get $n) (i32.const 4))))
+         (block $done
+           (loop $loop
+             (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+             (f32.store
+               (i32.add (local.get $out) (i32.mul (local.get $i) (i32.const 4)))
+               (f32.mul (f32.const 0.5)
+                 (f32.load (i32.add (local.get $xs) (i32.mul (local.get $i) (i32.const 4))))))
+             (local.set $i (i32.add (local.get $i) (i32.const 1)))
+             (br $loop)))
+         (call $ret (local.get $out) (local.get $n)))
+       ;; bump(xs: list<u32>) -> list<u32>: each plus one (wrapping, as u32 does)
+       (func (export \"bump\") (param $xs i32) (param $n i32) (result i32)
+         (local $out i32) (local $i i32)
+         (local.set $out (call $alloc (i32.const 0) (i32.const 0) (i32.const 4)
+                           (i32.mul (local.get $n) (i32.const 4))))
+         (block $done
+           (loop $loop
+             (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+             (i32.store
+               (i32.add (local.get $out) (i32.mul (local.get $i) (i32.const 4)))
+               (i32.add (i32.const 1)
+                 (i32.load (i32.add (local.get $xs) (i32.mul (local.get $i) (i32.const 4))))))
+             (local.set $i (i32.add (local.get $i) (i32.const 1)))
+             (br $loop)))
+         (call $ret (local.get $out) (local.get $n)))
+       ;; touch(xs: list<float64>): no result
+       (func (export \"touch\") (param i32 i32)))
+     (core instance $i (instantiate $m))
+     (func $twice (param \"xs\" (list float64)) (result (list float64))
+       (canon lift (core func $i \"twice\") (memory (core memory $i \"mem\"))
+         (realloc (core func $i \"realloc\"))))
+     (func $gather (param \"xs\" (list float64)) (param \"at\" (list s32)) (result (list float64))
+       (canon lift (core func $i \"gather\") (memory (core memory $i \"mem\"))
+         (realloc (core func $i \"realloc\"))))
+     (func $halve (param \"xs\" (list float32)) (result (list float32))
+       (canon lift (core func $i \"halve\") (memory (core memory $i \"mem\"))
+         (realloc (core func $i \"realloc\"))))
+     (func $bump (param \"xs\" (list u32)) (result (list u32))
+       (canon lift (core func $i \"bump\") (memory (core memory $i \"mem\"))
+         (realloc (core func $i \"realloc\"))))
+     (func $touch (param \"xs\" (list float64))
+       (canon lift (core func $i \"touch\") (memory (core memory $i \"mem\"))
+         (realloc (core func $i \"realloc\"))))
+     (export \"twice\" (func $twice))
+     (export \"gather\" (func $gather))
+     (export \"halve\" (func $halve))
+     (export \"bump\" (func $bump))
+     (export \"touch\" (func $touch)))")
+
+(describe "wasm: numeric lists cross by copy"
+  (test "a list<float64> in and out"
+    (let (inst (instantiate *kernels-wat*))
+      (assert= [2.0 -3.0 0.5] (call inst "twice" [1.0 -1.5 0.25]))
+      ;; a list, and an int where a float is declared, as the general path takes them
+      (assert= [2.0 4.0] (call inst "twice" (list 1 2.0)))
+      (assert= [] (call inst "twice" []))
+      (close inst)))
+
+  (test "a vector of number vectors flattens one level, in order"
+    (let (inst (instantiate *kernels-wat*))
+      ;; b3d's pose: matrices as they are, no flat list built in Brood
+      (assert= [2.0 4.0 6.0 8.0 10.0] (call inst "twice" [[1.0 2.0] [3.0] (list 4 5.0)]))
+      (assert= [2.0 4.0 6.0] (call inst "twice" [1.0 [2.0 3.0]]))
+      (assert= [] (call inst "twice" [[] []]))
+      (assert= [30.0 10.0] (call inst "gather" [[10.0 20.0] [30.0]] [[2] [0]]))
+      ;; one level only, and still numbers
+      (assert-error (call inst "twice" [[[1.0]]]))
+      (assert-error (call inst "twice" [[1.0 :x]]))
+      (close inst)))
+
+  (test "a float64 list and an s32 list together"
+    (let (inst (instantiate *kernels-wat*))
+      (assert= [30.0 10.0 30.0] (call inst "gather" [10.0 20.0 30.0] [2 0 2]))
+      (close inst)))
+
+  (test "float32 and u32 lists keep their element types"
+    (let (inst (instantiate *kernels-wat*))
+      (assert= [0.5 -2.0] (call inst "halve" [1.0 -4.0]))
+      (assert= [1 8 0] (call inst "bump" [0 7 4294967295]))
+      (close inst)))
+
+  (test "an export with no result answers nil"
+    (let (inst (instantiate *kernels-wat*))
+      (assert= nil (call inst "touch" [1.0 2.0]))
+      (close inst)))
+
+  (test "a long list round-trips exactly"
+    (let (inst (instantiate *kernels-wat*)
+          xs (into [] (map (range 6000) (fn (i) (* 0.5 i)))))
+      (assert= (into [] (map xs (fn (x) (* 2.0 x)))) (call inst "twice" xs))
+      (close inst)))
+
+  (test "the general path's errors"
+    (let (inst (instantiate *kernels-wat*))
+      ;; an s32 that does not fit, a negative u32, a non-number
+      (assert-error (call inst "gather" [1.0] [5000000000]))
+      (assert-error (call inst "bump" [-1]))
+      (assert-error (call inst "twice" [1.0 :x]))
+      (assert-error (call inst "twice" 3))
+      (assert-error (call inst "twice" [1.0] [2.0]))
+      ;; the instance is still usable after each
+      (assert= [2.0] (call inst "twice" [1.0]))
+      (close inst))))

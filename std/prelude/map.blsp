@@ -195,6 +195,22 @@ guard, as in `seq`: this file loads six before `*impls*`."
 
 Order matches [[keys]] — the map's internal order, not insertion order."
   (map (seq (%expect-map "vals" m)) second))
+(defn %contains-key? (m k)
+  "`contains?` for everything but a set: a map's (or record's) key, probed with two
+distinct sentinels — a present key returns its stored value both times, an absent one each
+sentinel, and those differ."
+  ;; A vector is refused by name (ADR-156, Clojure's index trap): without this the
+  ;; error came from `%map-get`, an internal the caller never called.
+  (if (vector? m)
+    (%raise {:kind :type
+             :code "E0030"
+             :message (str "contains?: expected a map or set, got vector (" (pr-str m) ")")
+             :hint "`contains?` asks about keys, never indexes: for an element use `(includes? v x)`, for an index `(< -1 i (count v))`."})
+    (let (a (%map-get m k :%contains-miss-a))
+      (if (= a :%contains-miss-a)
+        (if (= (%map-get m k :%contains-miss-b) :%contains-miss-b) false true)
+        true))))
+
 (defn contains? (m k)
   "True if map `m` has key `k` (distinguishes a stored `nil`/`false` from
 absence). O(1) via the CHAMP hash path (`%map-get`), not an O(n) key scan: probe
@@ -206,19 +222,12 @@ can.)
     (contains? {:a 1} :a)      ;=> true
     (contains? {:a nil} :a)    ;=> true    ; a stored nil is still present
     (contains? {:a 1} :zz)     ;=> false"
-  (if (set? m)
-    (%set-has? m k)
-    ;; A vector is refused by name (ADR-156, Clojure's index trap): without this the
-    ;; error came from `%map-get`, an internal the caller never called.
-    (if (vector? m)
-      (%raise {:kind :type
-               :code "E0030"
-               :message (str "contains?: expected a map or set, got vector (" (pr-str m) ")")
-               :hint "`contains?` asks about keys, never indexes: for an element use `(includes? v x)`, for an index `(< -1 i (count v))`."})
-      (let (a (%map-get m k :%contains-miss-a))
-        (if (= a :%contains-miss-a)
-          (if (= (%map-get m k :%contains-miss-b) :%contains-miss-b) false true)
-          true)))))
+  ;; A set's membership is one inline probe (`%set-has?` compiles to a primitive op), and
+  ;; everything else is a tail call to `%contains-key?`: with no call left for the set case
+  ;; to pay, this compiles to native code and is cheap enough to inline into its callers.
+  ;; It used to hold the map branch inline, which kept it on the VM (`call-mediated-boxed`)
+  ;; and cost a membership test ~900 ns from native code.
+  (if (set? m) (%set-has? m k) (%contains-key? m k)))
 
 ;; ---- map: merge / update / nested access -----------------------------------
 ;; All Brood over the kernel ops (`%map-assoc`/`%map-pairs`) and the surface above

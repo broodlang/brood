@@ -108,6 +108,35 @@ native code" compatible with "don't trust third-party native code."
 dependency rule in `CLAUDE.md`. The Lisp-visible policy (manifest parsing, the
 per-package API) still lives in Brood (ADR-006).
 
+## The one native exception: a project's own numeric kernels (ADR-807)
+
+The table above judges a *plugin ABI* — native code that sees `Value`s, handles and the GC,
+shipped by packages. ADR-807 admits something much narrower, and only for a **project's own
+code**: a C-ABI library the project builds from its own tree, called as
+
+```c
+int32_t name(const double *in, size_t in_count, double *out, size_t out_count);
+```
+
+(`std/native.blsp`: `native/open`, `native/call`, `native/call-blocking`). Row by row:
+
+- **cross-kernel** — no Brood value crosses, so the library depends on nothing of the
+  runtime's layout; a runtime upgrade never rebuilds it. It is still per-target, which is
+  why it is the project's own build and never a shipped artifact.
+- **safe** — not sandboxed: a bad kernel can still crash the runtime. The grammar defences
+  apply instead (ADR-660): every call is marked, so a crash record names the library and
+  quarantines its bytes, and the next `open` refuses it until it is rebuilt or `forget`.
+- **supply chain** — the loader refuses any path under `_deps`, whatever the policy asked:
+  a fetched package ships native code as a WASM component, as above. ADR-037 stays shut.
+- **schedulable** — not metered; a long kernel goes through `native/call-blocking` on the
+  offload pool, so it pins an OS thread, never a scheduler worker.
+
+It exists because a measured hot loop paid more at the WASM boundary than the kernel saved
+(b3d's skeleton: ~5 600 floats each way), and the intended shape keeps WASM in it: one Rust
+crate built both as this library and as a component, the library when it is built, the
+component otherwise, and the Brood version as the reference both are tested against. The
+WASM side's numeric lists cross by copy (ADR-806), so the component is a real fallback.
+
 ## The boundary: marshal, never share handles
 
 A moving, generational GC (ADR-054/055) relocates LOCAL handles; per-process

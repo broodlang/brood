@@ -69,6 +69,8 @@ mod text_search;
 // qualified name belongs to a baked-in module that `*features*` records as loaded.
 mod editor_native;
 pub(crate) mod modules;
+#[cfg(feature = "native-kernels")]
+mod native;
 mod nodes;
 pub(crate) mod numeric;
 mod offload;
@@ -199,6 +201,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     offload::register(&mut primitives);
     #[cfg(feature = "wasm")]
     wasm::register(&mut primitives);
+    #[cfg(feature = "native-kernels")]
+    native::register(&mut primitives);
     build_info::register(&mut primitives);
     nodes::register(&mut primitives);
     // Last: registration order feeds the intern table (see `syntax_scan::register`).

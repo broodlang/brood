@@ -383,7 +383,7 @@ fn record_dir_from_env() -> Option<std::path::PathBuf> {
 
 /// `text` safe inside a Brood string literal and on one line: a quote or backslash becomes
 /// `'` or `/`, a control character a space, and it is cut to `max` bytes on a char boundary.
-/// Only the native crash record and grammar vetting write one.
+/// Only the native crash record, grammar vetting and the kernel marks (ADR-807) write one.
 #[cfg(any(unix, windows))]
 pub(crate) fn literal_safe(text: &str, max: usize) -> String {
     let mut out = String::new();

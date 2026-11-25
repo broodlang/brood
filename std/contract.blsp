@@ -323,10 +323,28 @@ type; `i` is the position of the first rest argument."
       (%eq n 3) (%contract-shim-rest-3 name orig spec ret)
       else (%contract-shim-rest-0 name orig spec ret))))
 
+;; A declaration that can refuse nothing: every parameter and the result a type variable
+;; (`?A` accepts any value — `type_verdicts.rs` `symbol_verdict`) or `any`. Its shim would
+;; vouch for every call and still cost one: `math/clamp`, `(x:?A lo:?A hi:?A -> ?A)`, took
+;; ~980 ns a call armed against ~34 ns unarmed, and hid `math/max`/`min` from the compiler,
+;; which inlines them only when it sees the primitive. Arity is the original's to check
+;; either way.
+(defn- %contract-unchecked? (type)
+  (every? type
+    (fn (part)
+      (and (symbol? part)
+        (or (contains? #{'-> '& '&optional 'any} part)
+          (string/starts-with? (->string part) "?"))))))
+
 (defn shim (name orig type)
   "The checking shim to bind for the global `name` declared `type` (an arrow), wrapping
-`orig`. The prelude's `%contract-wrap` — the kernel's policy hook — calls this once per
-contracted binding, having already decided the binding is to be enforced.
+`orig` — or `orig` itself when the declaration can refuse nothing (every type a type
+variable or `any`), since such a shim would only cost. The prelude's `%contract-wrap` — the
+kernel's policy hook — calls this once per contracted binding, having already decided the
+binding is to be enforced.
 
-    ((contract/shim 'f (fn (x) x) '(int -> int)) 3)   ;=> 3"
-  (%contract-shim name orig (%contract-spec type)))
+    ((contract/shim 'f (fn (x) x) '(int -> int)) 3)   ;=> 3
+    (let (id (fn (x) x)) (identical? id (contract/shim 'f id '(?A -> ?A))))   ;=> true"
+  (if (%contract-unchecked? type)
+    orig
+    (%contract-shim name orig (%contract-spec type))))

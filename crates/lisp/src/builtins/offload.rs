@@ -56,6 +56,9 @@ const OFFLOAD_ALLOWED: &[&str] = &[
     // the handle is an int token, args/results are data, and the instance
     // registry is global with a per-instance mutex — off-worker is sound.
     "%wasm-call",
+    // A kernel call is the same: a token, a name and numbers in, numbers out, and the
+    // library registry is global (ADR-807).
+    "%native-call",
     // A G-buffer bake marches for seconds on its own threads; its scene and request are data.
     "%sdf-bake",
 ];

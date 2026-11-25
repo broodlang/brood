@@ -1,0 +1,84 @@
+;;; `math/max`, `math/min` and `math/clamp` with floats in native code (`min_max` in
+;;; jit_lower/emit.rs). A float `max`/`min` had no native lowering: it bailed the whole arm,
+;;; so `math/clamp` and every function it inlined into ran on the VM — ~400 ns a call in
+;;; womanblend's frame, ~1 ms a tick.
+;;;
+;;; The answers are the VM's `extremum`, exactly: the FIRST argument stands unless
+;;; `first < second` (max) or `first > second` (min), so a tie keeps the first, a NaN
+;;; (unordered) keeps the first, and the answer is the winning operand itself — an int that
+;;; wins stays an int. Each arm settles NATIVE before its answers are checked (under a
+;;; ceiling below Native the value checks run on whatever engine is live).
+
+(defmodule jit-min-max-float-test (:use test) (:use suite-helpers))
+
+;; Each has a branch: a body that is one call on its own parameters is a thin wrapper the
+;; caller redirects past, so it would never have an arm of its own to settle.
+(defn mm-clamp (x lo hi) (if (nil? x) nil (math/clamp x lo hi)))
+(defn mm-max (a b) (if (nil? a) nil (math/max a b)))
+(defn mm-min (a b) (if (nil? a) nil (math/min a b)))
+(defn mm-max-literal (a) (if (nil? a) nil (math/max a 0)))
+(defn mm-scaled-max (a b) (math/max (* a 1.0) (* b 1.0)))
+
+(defn- mm-drive (f args i)
+  (when (> i 0) (apply f args) (mm-drive f args (- i 1))))
+
+(defn- settle-on (f argc args)
+  (when (%native-tier?)
+    (assert= :native (settle f argc (fn () (mm-drive f args 300)) 500))))
+
+(describe "max, min and clamp with floats in native code"
+  (test "clamp settles native and constrains"
+    (settle-on mm-clamp 3 [0.5 0.0 1.0])
+    ;; `math/clamp`'s OWN arm. The suite runs with contracts armed, and only both changes
+    ;; settle it native: its declaration `(x:?A lo:?A hi:?A -> ?A)` can refuse nothing, so no
+    ;; shim is bound (without that, the name is a shim whose body calls), and its float
+    ;; `max`/`min` lower (without that, the arm bails).
+    (settle-on math/clamp 3 [0.5 0.0 1.0])
+    (assert= 0.5 (mm-clamp 0.5 0.0 1.0))
+    (assert= 0.0 (mm-clamp -2.5 0.0 1.0))
+    (assert= 1.0 (mm-clamp 7.25 0.0 1.0))
+    ;; the bounds as they are given, ints included
+    (assert= 0 (mm-clamp -2.5 0 1))
+    (assert= 1 (mm-clamp 7.25 0 1))
+    (assert= 0.5 (mm-clamp 0.5 0 1)))
+
+  (test "two floats: the larger, the first on a tie, the first beside a NaN"
+    (settle-on mm-max 2 [1.5 2.5])
+    (settle-on mm-min 2 [1.5 2.5])
+    (assert= 2.5 (mm-max 1.5 2.5))
+    (assert= 1.5 (mm-min 1.5 2.5))
+    (assert= -0.0 (mm-max -0.0 0.0))
+    (assert= 0.0 (mm-max 0.0 -0.0))
+    (is (math/nan? (mm-max nan 1.0)))
+    (assert= 1.0 (mm-max 1.0 nan))
+    (is (math/nan? (mm-min nan 1.0)))
+    (assert= 1.0 (mm-min 1.0 nan)))
+
+  (test "an int beside a float stays an int when it wins"
+    (settle-on mm-max 2 [1.5 2.5])
+    (assert= 5 (mm-max 5 3.0))
+    (is (int? (mm-max 5 3.0)))
+    (assert= 3.5 (mm-max 3 3.5))
+    (assert= 2 (mm-min 2 2.5))
+    (is (int? (mm-min 2 2.5)))
+    ;; a tie between an int and a float keeps the first, whichever kind it is
+    (is (int? (mm-max 2 2.0)))
+    (is (float? (mm-max 2.0 2))))
+
+  (test "a literal int bound"
+    (settle-on mm-max-literal 1 [1.5])
+    (assert= 1.5 (mm-max-literal 1.5))
+    (assert= 0 (mm-max-literal -1.5))
+    (is (int? (mm-max-literal -1.5))))
+
+  (test "unboxed floats compare and select unboxed"
+    (settle-on mm-scaled-max 2 [1.5 2.5])
+    (assert= 2.5 (mm-scaled-max 1.5 2.5))
+    (assert= 3.0 (mm-scaled-max 3 2))
+    (is (math/nan? (mm-scaled-max nan 1.0))))
+
+  (test "two ints still answer as ints, and a decimal still reaches the VM"
+    (mm-drive mm-max [1 2] 300)
+    (assert= 9 (mm-max 9 4))
+    (assert= 4 (mm-min 9 4))
+    (assert= 2.5M (mm-max 2.5M 1.5M))))

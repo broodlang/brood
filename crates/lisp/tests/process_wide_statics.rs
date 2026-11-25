@@ -73,6 +73,11 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     ("host/file_watch.rs", "WATCHER", OneMachine),
     ("host/file_watch.rs", "ROUTES", ProcessUniqueKeys),
     ("host/wasm.rs", "REGISTRY", ProcessUniqueKeys),
+    // Native kernel libraries (ADR-807): tokens are random and unique across the process, as
+    // a wasm instance's are; the crash marks are the process's one record of what native code
+    // it loaded, read by the one fatal-signal handler, as the grammar marks are.
+    ("host/native.rs", "REGISTRY", ProcessUniqueKeys),
+    ("host/native.rs", "MARKS", OneMachine),
     // Compiled components keyed by the BLAKE3 of their source bytes: the bytes decide the code,
     // and each load still gets a store and instance of its own.
     ("host/wasm.rs", "COMPILED", PureCache),

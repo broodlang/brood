@@ -134,15 +134,15 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
                     // later call ran out of spill slots (and, before the call-spill capacity was
                     // kept below the block-argument window, spilled ONTO that window).
                     | Inst::Prim2 {
-                        op: PrimOp::MapGet | PrimOp::VectorRef,
+                        op: PrimOp::MapGet | PrimOp::SetHas | PrimOp::VectorRef,
                         ..
                     }
                     | Inst::Prim2SlotSlot {
-                        op: PrimOp::MapGet | PrimOp::VectorRef,
+                        op: PrimOp::MapGet | PrimOp::SetHas | PrimOp::VectorRef,
                         ..
                     }
                     | Inst::Prim2SlotInt {
-                        op: PrimOp::MapGet | PrimOp::VectorRef,
+                        op: PrimOp::MapGet | PrimOp::SetHas | PrimOp::VectorRef,
                         ..
                     }
                     | Inst::Prim3 { .. }
@@ -495,6 +495,7 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
                 | PrimOp::TableHas
                 | PrimOp::TableGet
                 | PrimOp::MapGet
+                | PrimOp::SetHas
         )
         // `Cons` is admitted: the lowering calls `brood_rt_cons` (same bump-allocate
         // path as `brood_rt_vec2_room`, which works) and reads all 3 result words

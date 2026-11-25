@@ -1,0 +1,50 @@
+;;; `contains?` in native code. Its set case is one inline probe — `%set-has?` compiles to
+;;; `PrimOp::SetHas` — and every other case a tail call to `%contains-key?`, so the function
+;;; compiles to native code. Before, it held the map branch inline and called `%set-has?`,
+;;; which kept it on the VM (`call-mediated-boxed`): a membership test from native code cost
+;;; ~900 ns, ~0.9 ms a tick in womanblend's frame.
+;;;
+;;; The TIER case asserts `contains?` itself settles native, which it never did (sabotage:
+;;; the old body reads `:bailed`). The VALUE cases pin every answer and error it had.
+
+(defmodule contains-native-test (:use test) (:use suite-helpers))
+
+(defrecord cn-point (x y))
+
+(def- cn-set (into #{} (range 64)))
+
+(defn- cn-member (s i) (if (contains? s (math/rem i 100)) 1 0))
+(defn- cn-count-members (s i acc)
+  (if (= i 0) acc (cn-count-members s (- i 1) (+ acc (cn-member s i)))))
+
+(describe "contains? in native code"
+  (test "contains? on a set settles native"
+    (when (%native-tier?)
+      (assert= :native
+        (settle contains? 2 (fn () (cn-count-members cn-set 300 0)) 500))))
+
+  (test "set membership"
+    (assert= 64 (cn-count-members cn-set 100 0))
+    (assert= true (contains? #{1 2} 1))
+    (assert= false (contains? #{1 2} 9))
+    ;; nil and false are elements like any other
+    (assert= true (contains? #{nil} nil))
+    (assert= true (contains? #{false} false))
+    (assert= false (contains? #{} nil))
+    ;; structural, never numeric: 1.0 is not 1
+    (assert= false (contains? #{1} 1.0))
+    (assert= true (contains? #{[1 2]} [1 2])))
+
+  (test "map and record keys, and the errors"
+    (cn-count-members cn-set 300 0)
+    (assert= true (contains? {:a 1} :a))
+    (assert= true (contains? {:a nil} :a))
+    (assert= false (contains? {:a 1} :zz))
+    (assert= true (contains? (cn-point 1 2) :x))
+    (assert= false (contains? (cn-point 1 2) :zz))
+    ;; the errors it always raised, on purpose (the checker flags each)
+    (check-allow :type-mismatch
+      ;; nil is no collection here (the map path's own type error, as it always was)
+      (assert-error (contains? nil :a))
+      (is (includes? (try (contains? [1 2] 0) (catch e (error-message e))) "got vector"))
+      (assert-error (contains? 42 1)))))

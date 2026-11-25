@@ -37,6 +37,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `builtins/json.rs` — `%json-encode-plain`: `json/encode` natively, for the values its built-in rules cover.
   - `builtins/line_diff.rs` — `%diff-line-hunks` — the line diff under `std/diff`'s `line-hunks` / `line-status`, native (ADR-468).
   - `builtins/modules.rs` — The module system's kernel: the catalogue of **baked-in** std modules ([`CORE_MODULES`] always, [`TOOLCHAIN_MODULES`] under `toolchain`, [`DEV_MODULES`] under `dev-tools`), the namespace and compile-context primitives (`%in-ns`, `%refer`, `%alias`, `%mark-private`, `%register-sig`), and the bundle manifest a released binary answers from.
+  - `builtins/native.rs` — Native numeric kernels (ADR-807, feature `native-kernels`): open a C-ABI library from the project's own tree, call `int32_t name(const double *in, size_t, double *out, size_t)`, close it.
   - `builtins/nodes.rs` — Distributed nodes (ADR-033/034): listen, connect, name the local node, monitor and disconnect peers.
   - `builtins/numeric.rs` — Numeric primitives: the binary arithmetic and comparison kernels behind `+ - * / <`, ratios, `math/floor`, `bit/*` and decimals.
   - `builtins/offload.rs` — The dirty-native offload pool (ADR-144): run a blocking native call on a helper OS thread and deliver its result back as a message, so a slow `os/run-process` or a blocking read never stalls a scheduler worker.
@@ -114,8 +115,10 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `host/dial.rs` — Dialling a TCP peer by name with every wait bounded — the one policy both the node links (`dist`) and the socket primitives (`host::net`) dial through.
   - `host/file_watch.rs` — File change notification (ADR-782): a process watches a file or a directory and gets a `[:file-watch handle path kind]` message when it changes, instead of polling `file/size`.
   - `host/gui.rs` — The windowed (GUI) frontend for the M3 display/input seam — ADR-046's second frontend, alongside the terminal (crossterm) one in `builtins.rs`.
+  - `host/native.rs` — Native numeric kernels through one narrow C ABI (ADR-807, feature `native-kernels`).
   - `host/net.rs` — TCP sockets (ADR-062) — and UDP sockets (ADR-449) — on one **reactor thread** (ADR-143), delivering to process mailboxes (ADR-059).
   - `host/net_wasm.rs` — WASM stub for the TCP/TLS socket mechanism (`crate::host::net`).
+  - `host/numbers.rs` — The one shape a numeric array argument takes at a native boundary — a WASM component's `list<float64|float32|s32|u32>` parameter (ADR-806) and a native kernel's input (ADR-807): a vector or proper list whose items are numbers, or are themselves vectors or lists of numbers, flattened one level in order.
   - `host/owned.rs` — A handle table whose entries belong to a green process, indexed by owner.
   - `host/owner_only.rs` — Windows's owner-only (KI-365): a protected DACL with one entry, full control for the user this process runs as.
   - `host/picture.rs` — Pictures for the display's `[:image …]` op (ADR-686): encoded bytes decoded ONCE per content, and the geometry every painter shares — where a picture lands in its rect (`place`), the picture resampled to the pixels it is drawn at (`ScaledPictures`), and the half-block cells a terminal shows it in (`half_blocks`).
@@ -230,6 +233,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
 - `mcp-server.blsp` (`mcp-server`) — A Model Context Protocol server: the JSON-RPC dispatcher behind `nest mcp`, for any program that serves tools to an agent.
 - `memo.blsp` (`memo`) — Bounded memoisation for hot paths: `defmemo` defines a function that remembers its last few calls, compared by `=` — for arguments like a buffer's rope, where hashing would read the whole text on every call; `defmemo-by` one that keeps one answer per key, valid while the key's input is unchanged.
 - `multimap.blsp` (`multimap`) — Multi-valued map: one key may have multiple associated values.
+- `native.blsp` (`native`) — Native numeric kernels (ADR-807): `open` a C-ABI library the project built from its own tree, `call` an entry point `int32_t name(const double *in, size_t in_count, double *out, size_t out_count)` with a vector of numbers and get a vector of floats back, `close` it.
 - `net/dns.blsp` (`dns`) — Resolve a hostname to its A/AAAA records, over TCP.
 - `net/http.blsp` (`http`) — A minimal HTTP/1.0 server over the TCP + file libraries (ADR-062).
 - `net/reconnect.blsp` (`reconnect`) — Supervised node auto-reconnect (dist self-healing): `watch` keeps the link to a peer node alive with exponential-backoff `(node/connect …)` retries; `subscribe` delivers `[:nodeup name]` / `[:nodedown name]` to your mailbox; `unwatch` stops.

@@ -10,9 +10,9 @@ use super::OrBail;
 use super::emit::{
     DeoptReason, Frame, Funcs, NumberKind, as_f64_guarded, as_f64_pair, as_int, call_handle,
     cmp_dispatch, deopt_code, dispatch_instead_of_guess, emit_arith, emit_dispatched,
-    emit_float_arith, eq_dispatch, handle_from_out_slot, inline_vec_ref, load_slot_int,
-    number_kind, op_is_float, op_maybe_float, read_out_slot, read_words, slot_untyped,
-    storage_element, table_prim, vector_ref, vector_storage,
+    emit_float_arith, eq_dispatch, handle_from_out_slot, inline_vec_ref, load_slot_int, min_max,
+    min_max_applies, number_kind, op_is_float, op_maybe_float, read_out_slot, read_words,
+    slot_untyped, storage_element, table_prim, vector_ref, vector_storage,
 };
 use crate::core::value::jit_layout::{
     PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_KEYWORD, TAG_PAIR, TAG_RANGE, TAG_SEQVIEW,
@@ -986,6 +986,13 @@ pub(super) fn emit_prim2(
             let h = table_prim(b, fref, tbl, key, frame, funcs);
             stack.push(h);
         }
+    } else if matches!(op, PrimOp::SetHas) {
+        // `(%set-has? s x)`: source 0 the set, source 1 the element (`[0,1]`, the native's
+        // own order). A non-set receiver deopts, and the VM's native raises its error.
+        let set = read_words(b, aa_op, frame);
+        let element = read_words(b, bb_op, frame);
+        let h = table_prim(b, funcs.shas, set, element, frame, funcs);
+        stack.push(h);
     } else if matches!(op, PrimOp::MapGet) {
         // `(get m k)` on a map: `map` is always `[0,1]` here (`resolve_prim` returns only
         // that for `get`), so source 0 is the map and source 1 the key. Status 1 — a
@@ -1042,6 +1049,9 @@ pub(super) fn emit_prim2(
         let wa = read_words(b, aa_op, frame);
         let wb = read_words(b, bb_op, frame);
         stack.push(Op::Int(eq_dispatch(b, wa, wb, frame, funcs)));
+    } else if min_max_applies(b, *op, aa_op, bb_op, frame) {
+        // `max`/`min` with a float about: the VM's `extremum` exactly (see `min_max`).
+        stack.push(min_max(b, *op, aa_op, bb_op, map, frame));
     } else if dispatch_instead_of_guess(b, *op, aa_op, bb_op, frame) {
         // The arm's arithmetic proved polymorphic (`jit_arith_dispatch`): whichever path
         // below would take this on a guess, dispatch by tag instead.
@@ -1145,6 +1155,12 @@ pub(super) fn emit_prim2_slot_slot(
         };
         let h = table_prim(b, fref, tbl, key, frame, funcs);
         stack.push(h);
+    } else if matches!(op, PrimOp::SetHas) {
+        // `(%set-has? slot_a slot_b)` — the slot/slot twin of the operand form above.
+        let set = read_words(b, Op::Slot(slot_a), frame);
+        let element = read_words(b, Op::Slot(slot_b), frame);
+        let h = table_prim(b, funcs.shas, set, element, frame, funcs);
+        stack.push(h);
     } else if matches!(op, PrimOp::MapGet) {
         // `(get slot_a slot_b)` on a map — the slot/slot twin of the operand form above.
         let m = read_words(b, Op::Slot(slot_a), frame);
@@ -1209,6 +1225,16 @@ pub(super) fn emit_prim2_slot_slot(
         let wa = read_words(b, Op::Slot(slot_a), frame);
         let wb = read_words(b, Op::Slot(slot_b), frame);
         stack.push(Op::Int(cmp_dispatch(b, *op, wa, wb, map, frame)?));
+    } else if min_max_applies(b, *op, Op::Slot(slot_a), Op::Slot(slot_b), frame) {
+        // `(%max lo (%min hi x))`'s fused slots, with a float about (see `min_max`).
+        stack.push(min_max(
+            b,
+            *op,
+            Op::Slot(slot_a),
+            Op::Slot(slot_b),
+            map,
+            frame,
+        ));
     } else if dispatch_instead_of_guess(b, *op, Op::Slot(slot_a), Op::Slot(slot_b), frame) {
         // Polymorphic arithmetic (`jit_arith_dispatch`): by tag, not by guess.
         stack.push(emit_dispatched(
@@ -1378,6 +1404,14 @@ pub(super) fn emit_prim2_slot_int(
             funcs,
         );
         stack.push(h);
+    } else if matches!(op, PrimOp::Max | PrimOp::Min)
+        && (op_is_float(Op::Slot(slot_a), frame)
+            || min_max_applies(b, *op, Op::Slot(slot_a), Op::Slot(slot_a), frame))
+    {
+        // `(math/max x 0)`: a literal int beside a slot that may be a float. The answer is
+        // the winning operand, so the literal stays an int when it wins (see `min_max`).
+        let literal = Op::Int(b.ins().iconst(types::I64, int_b));
+        stack.push(min_max(b, *op, Op::Slot(slot_a), literal, map, frame));
     } else if frame.arith_dispatch
         && dispatch_instead_of_guess(b, *op, Op::Slot(slot_a), Op::Slot(slot_a), frame)
     {

@@ -1721,6 +1721,9 @@ fn every_inlinable_head_still_reaches_its_primitive() {
         ("get", PrimOp::MapGet),
         ("table/get", PrimOp::TableGet),
         ("table/contains?", PrimOp::TableHas),
+        // `contains?`'s whole set case: without it `contains?` still compiles (the call is in
+        // tail position) but pays a native call per membership test.
+        ("%set-has?", PrimOp::SetHas),
     ] {
         assert_eq!(
             resolve_prim(&interp.heap, value::intern(head)).map(|(op, _)| op),

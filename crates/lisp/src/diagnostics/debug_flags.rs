@@ -242,6 +242,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "opt OUT of native code for functions holding a `(fn …)` literal (ADR-803, default ON): the literal is built by one runtime callback, so a function that does its own work and hands a closure to `map`/`fold` lowers with that work; an arm of only loads, calls and the literal stays on the VM. nqueens -10% instructions, no row worse. The A/B and bisect lever",
     ),
     f(
+        "BROOD_NO_WASM_FAST_LISTS",
+        OPTOUT,
+        "opt OUT of copying numeric lists across a WASM component call (ADR-806, default ON): an export whose parameters are all `list<float64|float32|s32|u32>` and whose result is one or none is called through wasmtime's typed API, which copies the lists, instead of a `Val` per element. The A/B lever",
+    ),
+    f(
         "BROOD_DEVIRT_DBG",
         OPTOUT,
         "trace each ability call the compiler devirtualizes (ADR-182: a literal or record-constructor first arg skips `%identity-of`)",
@@ -911,6 +916,12 @@ pub fn inline_fast_frame() -> bool {
 pub fn jit_closures() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     !is_set(&OFF, "BROOD_NO_JIT_CLOSURES")
+}
+
+/// Numeric lists cross a WASM call by copy (ADR-806); `BROOD_NO_WASM_FAST_LISTS` opts out.
+pub fn wasm_fast_lists() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !is_set(&OFF, "BROOD_NO_WASM_FAST_LISTS")
 }
 
 /// Lazy module loading (ADR-335); `BROOD_NO_LAZY_LOAD` pins the eager policy.

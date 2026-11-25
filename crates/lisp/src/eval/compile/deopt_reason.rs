@@ -127,6 +127,10 @@ pub(crate) enum DeoptReason {
     /// A global read or tail-call head missed on a name whose module a load would bind (an
     /// isolate rolled the load back, ADR-803): the VM's lazy path loads it where it can park.
     GlobalMissLoads = 58,
+    /// `max`/`min` dispatched by tag: the first operand is neither an int nor a float.
+    MinMaxFirstOperand = 59,
+    /// `max`/`min` dispatched by tag: the second operand is neither an int nor a float.
+    MinMaxSecondOperand = 60,
     /// Native recursion past the depth cap: drain the subtree on the VM.
     NativeDepthExceeded = 101,
     /// Entry hoist: a vector slot's element base was null (not a vector).
@@ -202,6 +206,8 @@ impl DeoptReason {
         DeoptReason::SlotNumberNotFloat,
         DeoptReason::CachedVectorRefOutOfRange,
         DeoptReason::GlobalMissLoads,
+        DeoptReason::MinMaxFirstOperand,
+        DeoptReason::MinMaxSecondOperand,
         DeoptReason::NativeDepthExceeded,
         DeoptReason::HoistedSlotVectorBaseNull,
         DeoptReason::HoistedGlobalUnbound,
@@ -291,6 +297,8 @@ impl DeoptReason {
             DeoptReason::SlotNumberNotFloat => "slot-number-not-float",
             DeoptReason::CachedVectorRefOutOfRange => "cached-vector-ref-out-of-range",
             DeoptReason::GlobalMissLoads => "global-miss-loads",
+            DeoptReason::MinMaxFirstOperand => "min-max-first-operand",
+            DeoptReason::MinMaxSecondOperand => "min-max-second-operand",
             DeoptReason::NativeDepthExceeded => "native-depth-exceeded",
             DeoptReason::HoistedSlotVectorBaseNull => "hoisted-slot-vector-base-null",
             DeoptReason::HoistedGlobalUnbound => "hoisted-global-unbound",
@@ -404,6 +412,8 @@ mod tests {
                 | DeoptReason::SlotNumberNotFloat
                 | DeoptReason::CachedVectorRefOutOfRange
                 | DeoptReason::GlobalMissLoads
+                | DeoptReason::MinMaxFirstOperand
+                | DeoptReason::MinMaxSecondOperand
                 | DeoptReason::NativeDepthExceeded
                 | DeoptReason::HoistedSlotVectorBaseNull
                 | DeoptReason::HoistedGlobalUnbound

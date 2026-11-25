@@ -954,6 +954,16 @@ impl Heap {
         }
     }
 
+    /// The inline `(%set-has? s x)` (`PrimOp::SetHas`): a set answers whether it holds `x`;
+    /// anything else declines, so the native raises its own type error. Shared by the VM's
+    /// `Prim2` arm and `brood_rt_set_has`, so the two cannot disagree.
+    pub fn set_has_inline(&self, coll: Value, x: Value) -> Option<Value> {
+        match coll {
+            Value::Set(id) => Some(Value::boolean(self.map_get(id, x).is_some())),
+            _ => None,
+        }
+    }
+
     /// The inline `(assoc coll k v)` for a map, a record (which stays the same record,
     /// ADR-542) or a vector at an integer index it has: a fresh vector with that element
     /// replaced, as `%vector-assoc` makes it. `None` declines (an index out of range or not

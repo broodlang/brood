@@ -595,13 +595,17 @@ fn record_redirect(heap: &mut Heap, args: &[Value], shim: &str, v: Value) -> Opt
 }
 
 /// `first` / `rest` for the JIT's non-pair fallback (`brood_rt_first`/`_rest`): the cases
-/// the kernel decides on its own — nil, vector, range, bytes, set, and the type error —
+/// the kernel decides on its own — nil, vector, range, bytes, set, map, and the type error —
 /// answered; `None` for the two that need the evaluator (a record's `Seqable` dispatch,
 /// a lazy seq-view's realisation), which the caller turns into a deopt so the VM's own
 /// `first`/`rest` runs them. Everything else here is exactly the builtin.
+///
+/// A record is its own value kind (ADR-542), not a map: this declined every `Map` from when
+/// it was, so a plain map deopted on every call (and latched the arm off native code) while
+/// a record slipped through to run its `Seqable` method nested under native code.
 #[cfg(feature = "jit")]
 pub(crate) fn first_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult> {
-    if matches!(v, Value::Map(_) | Value::SeqView(_)) {
+    if matches!(v, Value::Record { .. } | Value::SeqView(_)) {
         return None;
     }
     let genv = heap.global();
@@ -611,7 +615,7 @@ pub(crate) fn first_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult
 /// See [`first_without_eval`].
 #[cfg(feature = "jit")]
 pub(crate) fn rest_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult> {
-    if matches!(v, Value::Map(_) | Value::SeqView(_)) {
+    if matches!(v, Value::Record { .. } | Value::SeqView(_)) {
         return None;
     }
     let genv = heap.global();
@@ -620,11 +624,11 @@ pub(crate) fn rest_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult>
 
 /// `empty?` for the JIT's non-nil/non-pair fallback (`brood_rt_is_empty`) — see
 /// [`first_without_eval`], whose split this mirrors: a vector, string, set, bytes, range,
-/// rope or table answers from its own length; a map (a record's `Seqable` view decides,
-/// and a record IS a map) and a lazy seq-view (it realises) need the evaluator and deopt.
+/// rope, table or map answers from its own length; a record (its `Counted` or `Seqable`
+/// method decides) and a lazy seq-view (it realises) need the evaluator and deopt.
 #[cfg(feature = "jit")]
 pub(crate) fn is_empty_without_eval(heap: &mut Heap, v: Value) -> Option<LispResult> {
-    if matches!(v, Value::Map(_) | Value::SeqView(_)) {
+    if matches!(v, Value::Record { .. } | Value::SeqView(_)) {
         return None;
     }
     let genv = heap.global();

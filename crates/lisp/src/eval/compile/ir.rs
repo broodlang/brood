@@ -77,6 +77,11 @@ pub enum PrimOp {
     ///
     /// `BROOD_NO_MAPGET=1` disables the lowering (`debug_flags::map_get_lowering`).
     MapGet,
+    /// `(%set-has? s x)` — set membership, the whole of `contains?` on a set. A call before,
+    /// so `contains?` could not lower and every membership test from native code went
+    /// through the VM (~900 ns where the probe is ~10). Answers a set's membership
+    /// (`Heap::set_has_inline`); any other receiver defers to the native and its error.
+    SetHas,
     /// `(%contract-await ret call)` — answers `call`'s value. A contract shim wraps the
     /// call to its original in it, and its `Inst::Prim2` is the MARK a suspended frame is
     /// recognised by: a frame whose resume point is this instruction is a shim waiting on
@@ -225,6 +230,7 @@ impl PrimOp {
             _ if name == kw::TABLE_GET => PrimOp::TableGet,
             _ if name == kw::EQ_PRIM => PrimOp::Eq,
             "%contract-await" => PrimOp::ContractAwait,
+            "%set-has?" => PrimOp::SetHas,
             _ => return None,
         })
     }

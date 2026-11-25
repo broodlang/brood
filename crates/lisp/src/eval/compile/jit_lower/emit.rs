@@ -163,6 +163,9 @@ pub(super) struct Funcs {
     /// `table_prim` helper drives it: status 0 hands back the value, status 1 deopts to the
     /// VM, which owns every branch of `get` this declines.
     pub mget: FuncRef,
+    /// `brood_rt_set_has` — the membership probe behind [`PrimOp::SetHas`], `mget`'s shape:
+    /// status 0 answers a bool, 1 (not a set) deopts to the VM's native and its error.
+    pub shas: FuncRef,
     /// `brood_rt_vector_len` — the length read behind [`PrimOp1::VectorLen`]: `(heap,
     /// vec 3w) -> len`, `-1` for a non-vector (deopt). No out slot; the answer is the return.
     pub vlen: FuncRef,
@@ -523,6 +526,7 @@ pub(super) fn emit_int_arith(
         | PrimOp::TableHas
         | PrimOp::TableGet
         | PrimOp::MapGet
+        | PrimOp::SetHas
         | PrimOp::ContractAwait => return None,
     })
 }
@@ -542,6 +546,7 @@ pub(super) fn emit_arith(
         // Table ops and the CHAMP probe are runtime callbacks lowered in `prim.rs`.
         PrimOp::TableHas | PrimOp::TableGet => return super::bail("prim-table-op-not-int-arith"),
         PrimOp::MapGet => return super::bail("prim-map-get-not-int-arith"),
+        PrimOp::SetHas => return super::bail("prim-set-has-not-int-arith"),
         // A contract shim's mark — out of the subset (`chunk_in_jit_subset`), never here.
         PrimOp::ContractAwait => return super::bail("prim-contract-await-vm-only"),
         _ => {}
@@ -1930,7 +1935,14 @@ pub(super) fn dispatch_instead_of_guess(
     if !f.arith_dispatch
         || !matches!(
             op,
-            PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div | PrimOp::Lt | PrimOp::Le
+            PrimOp::Add
+                | PrimOp::Sub
+                | PrimOp::Mul
+                | PrimOp::Div
+                | PrimOp::Lt
+                | PrimOp::Le
+                | PrimOp::Max
+                | PrimOp::Min
         )
     {
         return false;
@@ -1966,6 +1978,9 @@ pub(super) fn emit_dispatched(
     map: [u8; 2],
     f: Frame,
 ) -> Option<Op> {
+    if matches!(op, PrimOp::Max | PrimOp::Min) {
+        return Some(min_max(b, op, first, second, map, f));
+    }
     let first_words = dispatch_words(b, first, f);
     let second_words = dispatch_words(b, second, f);
     if matches!(op, PrimOp::Lt | PrimOp::Le) {
@@ -1980,6 +1995,87 @@ pub(super) fn emit_dispatched(
     } else {
         arith_dispatch(b, op, first_words, second_words, map, f)
     }
+}
+
+/// Should `max`/`min` on these operands take [`min_max`] rather than the integer path? When an
+/// operand is a float, or the arm computes in floats and neither operand is a certain int.
+/// Two certain ints keep the integer path's unboxed select.
+pub(super) fn min_max_applies(
+    b: &FunctionBuilder,
+    op: PrimOp,
+    first: Op,
+    second: Op,
+    f: Frame,
+) -> bool {
+    if !matches!(op, PrimOp::Max | PrimOp::Min) {
+        return false;
+    }
+    let kinds = [number_kind(b, first, f), number_kind(b, second, f)];
+    kinds.contains(&NumberKind::Float) || (f.float_context && !kinds.contains(&NumberKind::Int))
+}
+
+/// `(%max x y)` / `(%min x y)` with a float about — the VM's `extremum`, exactly: the FIRST
+/// argument stands unless `first < second` (max) or `first > second` (min) as a numeric
+/// ordering, so a tie keeps the first, a NaN (unordered) keeps the first, and the answer is
+/// the winning OPERAND itself — an int that wins stays an int (`(math/max 5 3.0)` is `5`).
+/// Two certain floats compare and select unboxed; otherwise the operands' words are
+/// compared by tag (int × int as ints, any int/float mix as floats, an int promoted as the
+/// VM's `num_to_f64` does) and the winner's words are the answer, boxed in registers. A
+/// non-number deopts: a record's `Ord` and a decimal are the VM's. Before this a float
+/// `max`/`min` bailed the whole arm off native code — `math/clamp` and everything it inlines
+/// into ran on the VM. `map` orders the operands as for `emit_arith`.
+pub(super) fn min_max(
+    b: &mut FunctionBuilder,
+    op: PrimOp,
+    first: Op,
+    second: Op,
+    map: [u8; 2],
+    f: Frame,
+) -> Op {
+    use cranelift_codegen::ir::condcodes::FloatCC;
+    let (float_cc, int_cc) = if matches!(op, PrimOp::Max) {
+        (FloatCC::LessThan, IntCC::SignedLessThan)
+    } else {
+        (FloatCC::GreaterThan, IntCC::SignedGreaterThan)
+    };
+    let (first, second) = if map[0] == 0 {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    if number_kind(b, first, f) == NumberKind::Float
+        && number_kind(b, second, f) == NumberKind::Float
+    {
+        let x = as_f64(b, first, f);
+        let y = as_f64(b, second, f);
+        let replace = b.ins().fcmp(float_cc, x, y);
+        return Op::Float(b.ins().select(replace, y, x));
+    }
+    let x = dispatch_words(b, first, f);
+    let y = dispatch_words(b, second, f);
+    let x_tag = b.ins().band_imm_s(x[0], 0xff);
+    let y_tag = b.ins().band_imm_s(y[0], 0xff);
+    let done = b.create_block();
+    b.append_block_param(done, types::I8);
+    let x_int = b.ins().icmp_imm_s(IntCC::Equal, x_tag, TAG_INT as i64);
+    let y_int = b.ins().icmp_imm_s(IntCC::Equal, y_tag, TAG_INT as i64);
+    let both_int = b.ins().band(x_int, y_int);
+    let int_block = b.create_block();
+    let float_block = b.create_block();
+    b.ins().brif(both_int, int_block, &[], float_block, &[]);
+    b.switch_to_block(int_block);
+    let replace = b.ins().icmp(int_cc, x[1], y[1]);
+    b.ins().jump(done, &[BlockArg::Value(replace)]);
+    b.switch_to_block(float_block);
+    let x_float = float_or_promoted_int(b, x_tag, x[1], f, DeoptReason::MinMaxFirstOperand, true);
+    let y_float = float_or_promoted_int(b, y_tag, y[1], f, DeoptReason::MinMaxSecondOperand, true);
+    let replace = b.ins().fcmp(float_cc, x_float, y_float);
+    b.ins().jump(done, &[BlockArg::Value(replace)]);
+    b.switch_to_block(done);
+    let replace = b.block_params(done)[0];
+    let pick = |b: &mut FunctionBuilder, index: usize| b.ins().select(replace, y[index], x[index]);
+    let (w0, w1, w2) = (pick(b, 0), pick(b, 1), pick(b, 2));
+    Op::Handle(w0, w1, w2)
 }
 
 /// `+ - * /` dispatched at RUNTIME by tag, for an operand whose type no guess can settle:

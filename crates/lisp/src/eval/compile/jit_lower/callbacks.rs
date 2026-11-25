@@ -50,6 +50,7 @@ pub(super) struct CallbackIds {
     table_has: FuncId,
     table_get: FuncId,
     map_get: FuncId,
+    set_has: FuncId,
     vector_len: FuncId,
     count: FuncId,
     equal: FuncId,
@@ -104,6 +105,7 @@ pub(super) struct CallbackRefs {
     pub(super) table_has: FuncRef,
     pub(super) table_get: FuncRef,
     pub(super) map_get: FuncRef,
+    pub(super) set_has: FuncRef,
     pub(super) vector_len: FuncRef,
     pub(super) count: FuncRef,
     pub(super) equal: FuncRef,
@@ -330,6 +332,8 @@ pub(super) fn declare_callbacks(module: &mut JITModule, pointer: Type) -> Option
     let table_has = import(module, "brood_rt_table_has", &pair_signature)?;
     let table_get = import(module, "brood_rt_table_get2", &pair_signature)?;
     let map_get = import(module, "brood_rt_map_get", &pair_signature)?;
+    // brood_rt_set_has(heap, out, set 3 words, element 3 words) -> status: `map_get`'s shape.
+    let set_has = import(module, "brood_rt_set_has", &pair_signature)?;
     // brood_rt_vector_len(heap, vec 3 words) -> len, or -1 for a non-vector (deopt).
     let vector_len = import(
         module,
@@ -419,6 +423,7 @@ pub(super) fn declare_callbacks(module: &mut JITModule, pointer: Type) -> Option
         table_has,
         table_get,
         map_get,
+        set_has,
         vector_len,
         count,
         equal,
@@ -480,6 +485,7 @@ pub(super) fn import_callbacks(
     let table_has = declare(ids.table_has, b.func);
     let table_get = declare(ids.table_get, b.func);
     let map_get = declare(ids.map_get, b.func);
+    let set_has = declare(ids.set_has, b.func);
     let vector_len = declare(ids.vector_len, b.func);
     let count = declare(ids.count, b.func);
     let equal = declare(ids.equal, b.func);
@@ -529,6 +535,7 @@ pub(super) fn import_callbacks(
         table_has,
         table_get,
         map_get,
+        set_has,
         vector_len,
         count,
         equal,

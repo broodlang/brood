@@ -988,6 +988,36 @@ pub unsafe extern "C" fn brood_rt_map_get(
     }
 }
 
+/// `(%set-has? s x)` from native code (`PrimOp::SetHas`): `Heap::set_has_inline`, so the VM
+/// and native code answer alike. 0 with the bool in `*out`; 1 for a receiver that is not a
+/// set, which deopts so the VM's native raises its type error.
+///
+/// # Safety
+/// `heap`/`out` live; the word triples are bytes the JIT read out of real `Value`s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn brood_rt_set_has(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    s0: i64,
+    s1: i64,
+    s2: i64,
+    x0: i64,
+    x1: i64,
+    x2: i64,
+) -> i64 {
+    // SAFETY: contracts heap, out and words; a CHAMP probe allocates nothing.
+    unsafe {
+        let h = &mut *heap;
+        match h.set_has_inline(words_to_val(s0, s1, s2), words_to_val(x0, x1, x2)) {
+            Some(v) => {
+                *out = v;
+                status::DONE
+            }
+            None => status::DEOPT,
+        }
+    }
+}
+
 /// Structural `=` on two operands native code could not decide inline — the residual case
 /// of `eq_dispatch` (KI-132). The lowering compares Int×Int and Sym/Keyword identity in
 /// machine ops; every other pair (strings, floats, structural values) lands here rather

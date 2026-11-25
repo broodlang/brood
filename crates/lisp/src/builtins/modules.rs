@@ -387,6 +387,10 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // the `%wasm-*` primitives (feature `wasm`; without it the primitives are
     // unbound and requiring this module errors clearly). Opt-in.
     embedded_module!("wasm", "std/wasm.blsp"),
+    // Native numeric kernels (ADR-807): a C-ABI library the project builds from its own
+    // tree, called with two arrays of doubles. Policy over the `%native-*` primitives
+    // (feature `native-kernels`; without it requiring this module errors clearly). Opt-in.
+    embedded_module!("native", "std/native.blsp"),
     // Supervised node auto-reconnect (dist self-healing): `watch` keeps a peer
     // link alive with exponential-backoff `(connect …)` retries; subscribers get
     // [:nodeup]/[:nodedown]. Pure Brood over connect/monitor-node/nodes. Opt-in.

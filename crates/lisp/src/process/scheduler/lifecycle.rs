@@ -101,6 +101,9 @@ fn retire_pid_tail(pid: u64, reason: Message) {
     // And any wasm instances it loaded — each holds a whole store and linear memory.
     #[cfg(feature = "wasm")]
     crate::host::wasm::close_process_instances(pid);
+    // And any kernel libraries it opened (ADR-807).
+    #[cfg(feature = "native-kernels")]
+    crate::host::native::close_process_kernels(pid);
     // And the tree-sitter trees it held (ADR-495): a handle is its owner's, never evicted
     // by anyone else's allocations, so its owner's exit is what frees a forgotten one.
     crate::host::treesit::close_process_trees(pid);

@@ -22,7 +22,7 @@ shuttle-model = []
 # `cargo build`/`cargo test`/rust-analyzer and the shipped `brood`/`nest` binaries.
 # The lean `nest release` bundle and unsupported hosts strip it via
 # `--no-default-features` (then re-add what they need), same as `dev-tools`/`treesit`.
-default = ["dev-tools", "treesit", "jit", "wasm", "stdimage", "brotli", "checker", "image-formats", "toolchain"]
+default = ["dev-tools", "treesit", "jit", "wasm", "native-kernels", "stdimage", "brotli", "checker", "image-formats", "toolchain"]
 # The stdlib startup image (ADR-256/281), on by default: a `require`d std module
 # materialises its bindings from `~/.cache/brood` instead of re-reading and re-evaluating
 # its source. A feature as well as a runtime switch for the same reason the JIT is both —
@@ -145,6 +145,11 @@ treesit-grammars = ["treesit-ruby", "treesit-elixir"]
 # is compiled in exactly once — adding/updating a native extension never
 # rebuilds the runtime (docs/interop.md).
 wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
+# Native numeric kernels (ADR-807): a C-ABI library the project builds from its own tree,
+# called as `int32_t name(const double *in, size_t, double *out, size_t)` — two arrays of
+# doubles, no Brood value crosses. Never loaded from a fetched package (`_deps`); a crash is
+# attributed and quarantines the library. Default-on; the policy is std/native.blsp.
+native-kernels = ["dep:libloading"]
 
 [dependencies]
 # Cross-platform time: std::time on native, the JS clock on wasm (Instant/SystemTime

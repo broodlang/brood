@@ -1,0 +1,66 @@
+;; std/native.blsp — native numeric kernels, the Brood layer (ADR-807).
+;;
+;; A project's hot numeric code can live in a C-ABI library the project builds from its
+;; own tree and be called with two arrays of doubles:
+;;
+;;     int32_t name(const double *in, size_t in_count, double *out, size_t out_count);
+;;
+;; No Brood value crosses, so the kernel needs nothing of the runtime. It is native code
+;; all the same, so the runtime guards it the way it guards grammar libraries: a library
+;; under a `_deps` directory (a fetched package) is never loaded, and a crash inside a call
+;; names the library in the crash record and quarantines its bytes, which a later `open`
+;; refuses. A PACKAGE ships native code as a WASM component (std/wasm.blsp), never as this.
+;;
+;; The intended shape is three implementations of one kernel: this library when it is built,
+;; the same Rust crate as a WASM component otherwise, and the Brood version, which stays the
+;; reference the tests compare the others against.
+;;
+;; Mechanism is the `%native-*` primitives; this module is the policy.
+
+(defmodule native
+  "Native numeric kernels (ADR-807): `open` a C-ABI library the project built from its own
+tree, `call` an entry point `int32_t name(const double *in, size_t in_count, double *out,
+size_t out_count)` with a vector of numbers and get a vector of floats back, `close` it.
+Never loads from a fetched package; a crash quarantines the library (`forget` clears it).
+Long calls go through the offload pool (`call-blocking`).")
+
+(defn open (path:string -> int)
+  "Load the kernel library at `path` (relative to the working directory — the project's
+root under `nest run`). Answers a handle for `call`. The library belongs to the process
+that opened it and is closed when that process exits. Refused for a path under a `_deps`
+directory (a fetched package ships native code as a WASM component instead), and while the
+library's bytes are quarantined after a crash.
+
+    (native/open \"native/target/release/libskeleton.so\")   ;~> an int handle, for native/call"
+  (%native-open path))
+
+(defn call (lib:int name:string input out-count:int)
+  "Call entry point `name` of `lib` with `input` (a vector or list of numbers, passed as
+doubles — or of vectors of numbers, flattened one level in order, so sixteen-float
+matrices go in as they are) and `out-count` doubles for it to fill; answers them as a vector
+of floats. A nonzero return from the kernel raises an error naming it. Runs inline — for calls short
+enough not to hold a scheduler worker; see `call-blocking`.
+
+    (native/call lib \"scale\" [1.0 2.0] 2)   ;~> [2.0 4.0], for a kernel that doubles each input"
+  (%native-call lib name input out-count))
+
+(defn call-blocking (lib:int name:string input out-count:int)
+  "Like `call`, on the dirty-offload OS pool (ADR-144): only this process waits, never a
+scheduler worker. For long kernels.
+
+    (native/call-blocking lib \"solve\" xs 4096)   ;~> the kernel's 4096 doubles, computed off the scheduler"
+  (proc/offload %native-call lib name input out-count))
+
+(defn close (lib:int -> nil)
+  "Close `lib`. A call still running on it finishes first.
+
+    (native/close lib)   ;~> nil"
+  (%native-close lib))
+
+(defn forget (path:string -> bool)
+  "Clear the quarantine a crash left on the library at `path`, so `open` loads it again;
+true when there was one. Rebuilding the library also clears it in effect: a quarantine is
+kept by the library's bytes.
+
+    (native/forget \"native/target/release/libskeleton.so\")   ;~> true after a crash, else false"
+  (%native-forget path))
