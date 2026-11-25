@@ -1897,6 +1897,8 @@ fn scene_spec(
     let mut contact_drags = Vec::new();
     // and the joints of each one's own limb, whose skin it never presses (`:skip [j …]`, up to four)
     let mut contact_skips = Vec::new();
+    // and the one limb whose skin alone each presses (`:only [j …]`, up to four)
+    let mut contact_onlys = Vec::new();
     if let Some(given) = get(map, "contacts") {
         let Value::Vector(list) = given else {
             return Err(":contacts is a vector of contact maps".into());
@@ -1927,6 +1929,15 @@ fn scene_spec(
                 }
             }
             contact_skips.push(skip);
+            let mut only = [u16::MAX; 4];
+            if let Some(Value::Vector(joints)) = get(contact, "only") {
+                for (slot, joint) in heap.vector(joints).iter().take(4).enumerate() {
+                    if let Value::Int(joint) = joint {
+                        only[slot] = u16::try_from(*joint).unwrap_or(u16::MAX);
+                    }
+                }
+            }
+            contact_onlys.push(only);
             use crate::host::gui::mesh::Contact;
             let contact = if let Some(plane) = numbers(get(contact, "plane"), 4) {
                 let length =
@@ -1975,6 +1986,7 @@ fn scene_spec(
         contacts,
         contact_drags,
         contact_skips,
+        contact_onlys,
     }))
 }
 

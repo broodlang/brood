@@ -1175,6 +1175,10 @@ pub struct Scene {
     /// whose skin it never presses, a vertex skipped where its weights on them pass a half: a
     /// thigh's capsule presses the other thigh, not its own (ADR-805). One a contact, or none.
     pub contact_skips: Vec<[u16; 4]>,
+    /// Each contact's one limb: up to four joints (`u16::MAX` none) whose skin alone it presses,
+    /// a vertex pressed only where its weights on them pass a half: a plane between her thighs
+    /// pressing one thigh's skin, another the other's (ADR-805). One a contact, or none.
+    pub contact_onlys: Vec<[u16; 4]>,
 }
 
 /// The most contacts a scene presses its skin with (ADR-805). 64 since ADR-810: womanblend's
@@ -1296,6 +1300,9 @@ pub fn deform_by_contacts(
         if skipped & (1 << slot) != 0 {
             continue;
         }
+        // the press as far as skin can be squashed (`MAX_SQUASH`), never a raw depth: one part driven
+        // deep through a contact (a foot through the floor in a crouch) must not swell every ring
+        let depth = depth.min(MAX_SQUASH);
         let (distance, out) = contact.signed_distance(point);
         // the patch's edge eased over `band`: the distance's smooth maximum with 0, so skin meets
         // the surface tangentially instead of creasing where the patch ends
@@ -4411,19 +4418,32 @@ pub fn softness_at(mesh: &Mesh, index: usize) -> f32 {
 
 /// Which of `skips` (each contact's own limb's joints) vertex `index` of `mesh` belongs to, as
 /// bits by contact: its skin weights on that contact's joints pass a half (ADR-805).
-pub fn skipped_by(mesh: &Mesh, index: usize, skips: &[[u16; 4]]) -> u16 {
+pub fn skipped_by(mesh: &Mesh, index: usize, skips: &[[u16; 4]], onlys: &[[u16; 4]]) -> u16 {
     let (Some(joints), Some(weights)) = (mesh.joints.get(index), mesh.weights.get(index)) else {
-        return 0;
+        // an unskinned vertex: only a contact with an `:only` passes it by
+        return onlys
+            .iter()
+            .enumerate()
+            .take(MAX_CONTACTS)
+            .filter(|(_, only)| only[0] != u16::MAX)
+            .fold(0, |bits, (slot, _)| bits | (1 << slot));
     };
-    let mut bits = 0u16;
-    for (slot, skip) in skips.iter().enumerate().take(MAX_CONTACTS) {
-        let share: f32 = joints
+    let share = |set: &[u16; 4]| -> f32 {
+        joints
             .iter()
             .zip(weights)
-            .filter(|(joint, _)| skip.contains(joint))
+            .filter(|(joint, _)| set.contains(joint))
             .map(|(_, weight)| *weight)
-            .sum();
-        if share > 0.5 {
+            .sum()
+    };
+    let mut bits = 0u16;
+    for slot in 0..skips.len().max(onlys.len()).min(MAX_CONTACTS) {
+        // its own limb (`:skip`), or not the one limb it presses (`:only`)
+        let own = skips.get(slot).is_some_and(|skip| share(skip) > 0.5);
+        let elsewhere = onlys
+            .get(slot)
+            .is_some_and(|only| only[0] != u16::MAX && share(only) <= 0.5);
+        if own || elsewhere {
             bits |= 1 << slot;
         }
     }
@@ -4446,7 +4466,12 @@ fn press_posed(scene: &Scene, posed: &mut [Posed]) {
             if softness_at(&item.mesh, index) <= 0.0 {
                 continue;
             }
-            let skipped = skipped_by(&item.mesh, index, &scene.contact_skips);
+            let skipped = skipped_by(
+                &item.mesh,
+                index,
+                &scene.contact_skips,
+                &scene.contact_onlys,
+            );
             for (slot, (depth, contact)) in depths.iter_mut().zip(contacts).enumerate() {
                 if skipped & (1 << slot) == 0 {
                     *depth = depth.max(-contact.signed_distance(vertex.world).0);
@@ -4464,7 +4489,12 @@ fn press_posed(scene: &Scene, posed: &mut [Posed]) {
                 vertex.world,
                 vertex.normal,
                 softness,
-                skipped_by(&item.mesh, index, &scene.contact_skips),
+                skipped_by(
+                    &item.mesh,
+                    index,
+                    &scene.contact_skips,
+                    &scene.contact_onlys,
+                ),
             );
             let tangent = [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]];
             let square = normalize(
@@ -4741,6 +4771,7 @@ mod tests {
             contacts: Vec::new(),
             contact_drags: Vec::new(),
             contact_skips: Vec::new(),
+            contact_onlys: Vec::new(),
             draws: vec![draw],
         }
     }
@@ -8441,6 +8472,13 @@ mod tests {
         let (deep, _) =
             deform_by_contacts(&floor, &deep_depths, &[], [0.0, -0.05, 0.0], down, 0.1, 0);
         assert!(deep[1] < -0.04, "{deep:?}");
+        // one part driven 15 cm through the floor (a foot, in a crouch) does not swell the soft skin
+        // near it: the ring is sized by what skin can squash, not by that depth
+        let (near, _) = deform_by_contacts(&floor, &[0.15], &[], [0.0, 0.05, 0.0], down, 1.0, 0);
+        assert!(
+            (0.05 - near[1]).abs() < 0.008,
+            "the ring stays small: {near:?}"
+        );
         // dragged along the floor by its friction: inside, the whole drag; far off, none
         let drag = [[0.003, 0.0, 0.0]];
         let (held, _) =
@@ -8490,9 +8528,17 @@ mod tests {
         .expect("a skinned triangle");
         // contact 0 is joint 3's own limb, contact 1 nobody's
         let skips = [[3, u16::MAX, u16::MAX, u16::MAX], [u16::MAX; 4]];
-        assert_eq!(skipped_by(&mesh, 0, &skips), 0b01);
-        assert_eq!(skipped_by(&mesh, 1, &skips), 0b01, "60 % on its own limb");
-        assert_eq!(skipped_by(&mesh, 2, &skips), 0);
+        assert_eq!(skipped_by(&mesh, 0, &skips, &[]), 0b01);
+        assert_eq!(
+            skipped_by(&mesh, 1, &skips, &[]),
+            0b01,
+            "60 % on its own limb"
+        );
+        assert_eq!(skipped_by(&mesh, 2, &skips, &[]), 0);
+        // a contact with `:only [5]` presses joint 5's skin alone: the vertex wholly on 3 is passed by
+        let onlys = [[5, u16::MAX, u16::MAX, u16::MAX]];
+        assert_eq!(skipped_by(&mesh, 0, &[], &onlys), 0b1);
+        assert_eq!(skipped_by(&mesh, 2, &[], &onlys), 0);
         // skipped, a vertex inside the contact is left as it is
         let floor = [Contact::Plane {
             normal: [0.0, 1.0, 0.0],
