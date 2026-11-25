@@ -98,14 +98,18 @@
         (when exe
           (file/spit script
             (str "(native/call (native/open " (pr-str library) ") \"crash\" [1.0] 1)\n"))
-          (let (result (os/cmd exe [script]))
-            (is (not (os/cmd-ok? result))))
-          (let (refused (check-allow :discarded-catch
-                          (try (open library) (catch e (error-message e)))))
-            (is (includes? refused "quarantined")))
-          ;; cleared, it loads again (its other kernels are sound)
-          (assert= true (forget library))
-          (assert= false (forget library))
-          (let (lib (open library))
-            (assert= [4.0] (call lib "twice" [2.0] 1))
-            (close lib)))))))
+          (let (result (os/cmd exe [script])
+                ;; a `brood` built without the feature (the lean `make` build beside a
+                ;; `release-fast` nest) cannot load a kernel at all: nothing to quarantine
+                lean? (includes? (get result :stderr "") "unbound symbol"))
+            (when (not lean?)
+              (is (not (os/cmd-ok? result)))
+              (let (refused (check-allow :discarded-catch
+                              (try (open library) (catch e (error-message e)))))
+                (is (and (string? refused) (includes? refused "quarantined"))))
+              ;; cleared, it loads again (its other kernels are sound)
+              (assert= true (forget library))
+              (assert= false (forget library))
+              (let (lib (open library))
+                (assert= [4.0] (call lib "twice" [2.0] 1))
+                (close lib)))))))))
