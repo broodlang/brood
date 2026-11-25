@@ -1263,6 +1263,10 @@ pub fn deform_by_contacts(
     normal: [f32; 3],
     softness: f32,
 ) -> ([f32; 3], [f32; 3]) {
+    // bone, or the limb that presses (softness 0): never pressed
+    if softness <= 0.0 {
+        return (point, normal);
+    }
     let mut point = point;
     let mut normal = normal;
     for (contact, &depth) in contacts.iter().zip(depths) {
@@ -4335,6 +4339,16 @@ pub fn pressed(draw: &Draw) -> bool {
         )
 }
 
+/// How soft `mesh`'s flesh is at vertex `index` (ADR-805): its `:softness`, or wholly soft when it
+/// has none; 0 is bone, or a limb that presses, which is never pressed.
+pub fn softness_at(mesh: &Mesh, index: usize) -> f32 {
+    if mesh.softness.is_empty() {
+        1.0
+    } else {
+        mesh.softness.get(index).copied().unwrap_or(0.0)
+    }
+}
+
 /// The scene's `:deform` draws' posed vertices pressed by its contacts (ADR-805): each
 /// contact's deepest press found over them all, then each vertex laid onto what it passed into
 /// and lifted in a ring round it ([`deform_by_contacts`]), its tangent kept square to its new
@@ -4349,11 +4363,17 @@ fn press_posed(scene: &Scene, posed: &mut [Posed]) {
         posed
             .iter()
             .filter(|item| pressed(item.draw))
-            .flat_map(|item| item.vertices.iter().map(|vertex| &vertex.world)),
+            .flat_map(|item| {
+                item.vertices
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| softness_at(&item.mesh, *index) > 0.0)
+                    .map(|(_, vertex)| &vertex.world)
+            }),
     );
     for item in posed.iter_mut().filter(|item| pressed(item.draw)) {
         for (index, vertex) in item.vertices.iter_mut().enumerate() {
-            let softness = item.mesh.softness.get(index).copied().unwrap_or(0.0);
+            let softness = softness_at(&item.mesh, index);
             let (world, normal) =
                 deform_by_contacts(contacts, &depths, vertex.world, vertex.normal, softness);
             let tangent = [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]];
@@ -8299,6 +8319,9 @@ mod tests {
         // the same point as bone: no ring
         let (bone, _) = deform_by_contacts(&floor, &depths, [0.02, 0.0005, 0.0], down, 0.0);
         assert_eq!(bone, [0.02, 0.0005, 0.0]);
+        // and bone inside the floor: never pressed (a limb that presses is softness 0 too)
+        let (bone_inside, _) = deform_by_contacts(&floor, &depths, [0.0, -0.005, 0.0], down, 0.0);
+        assert_eq!(bone_inside, [0.0, -0.005, 0.0]);
         // far off: untouched
         let (far, far_normal) = deform_by_contacts(&floor, &depths, [0.0, 0.2, 0.0], down, 1.0);
         assert_eq!((far, far_normal), ([0.0, 0.2, 0.0], down));
