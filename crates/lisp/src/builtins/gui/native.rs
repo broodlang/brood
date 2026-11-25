@@ -1895,6 +1895,8 @@ fn scene_spec(
     let mut contacts = Vec::new();
     // and how far each drags the skin along its surface this frame (`:drag [x y z]`, metres)
     let mut contact_drags = Vec::new();
+    // and the joints of each one's own limb, whose skin it never presses (`:skip [j …]`, up to four)
+    let mut contact_skips = Vec::new();
     if let Some(given) = get(map, "contacts") {
         let Value::Vector(list) = given else {
             return Err(":contacts is a vector of contact maps".into());
@@ -1916,6 +1918,15 @@ fn scene_spec(
                 numbers(get(contact, "drag"), 3)
                     .map_or([0.0; 3], |drag| [drag[0], drag[1], drag[2]]),
             );
+            let mut skip = [u16::MAX; 4];
+            if let Some(Value::Vector(joints)) = get(contact, "skip") {
+                for (slot, joint) in heap.vector(joints).iter().take(4).enumerate() {
+                    if let Value::Int(joint) = joint {
+                        skip[slot] = u16::try_from(*joint).unwrap_or(u16::MAX);
+                    }
+                }
+            }
+            contact_skips.push(skip);
             use crate::host::gui::mesh::Contact;
             let contact = if let Some(plane) = numbers(get(contact, "plane"), 4) {
                 let length =
@@ -1963,6 +1974,7 @@ fn scene_spec(
         draws,
         contacts,
         contact_drags,
+        contact_skips,
     }))
 }
 

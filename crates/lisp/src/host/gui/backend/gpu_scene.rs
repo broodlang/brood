@@ -67,6 +67,7 @@ fn scene() -> Scene {
         palettes: vec![],
         contacts: Vec::new(),
         contact_drags: Vec::new(),
+        contact_skips: Vec::new(),
         draws: vec![Draw {
             mesh: 1,
             model: identity,

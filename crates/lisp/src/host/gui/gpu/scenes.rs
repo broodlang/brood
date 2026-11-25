@@ -79,16 +79,16 @@ struct ContactTarget {
     depths: wgpu::Buffer,
 }
 
-/// A scene's `:contacts` as the shader's `ContactList` holds them (ADR-805): how many, then three
-/// vec4 each (the third its `:drag`), `[x y z kind]` and `[x y z w]`: a plane's normal and offset (kind 0), a sphere's
+/// A scene's `:contacts` as the shader's `ContactList` holds them (ADR-805): how many, then four
+/// vec4 each (the third its `:drag`, the fourth its `:skip` joints), `[x y z kind]` and `[x y z w]`: a plane's normal and offset (kind 0), a sphere's
 /// centre and radius (1), a capsule's start, end and radius (2).
 fn contact_words(scene: &Scene) -> Vec<u8> {
     use crate::host::gui::mesh::{Contact, MAX_CONTACTS};
     let contacts = &scene.contacts[..scene.contacts.len().min(MAX_CONTACTS)];
     let mut bytes = words_bytes(&[contacts.len() as u32, 0, 0, 0]);
-    let mut floats = vec![0.0f32; MAX_CONTACTS * 12];
+    let mut floats = vec![0.0f32; MAX_CONTACTS * 16];
     for (slot, contact) in contacts.iter().enumerate() {
-        let at = slot * 12;
+        let at = slot * 16;
         let [first, second] = match *contact {
             Contact::Plane { normal, offset } => [
                 [normal[0], normal[1], normal[2], 0.0],
@@ -108,6 +108,19 @@ fn contact_words(scene: &Scene) -> Vec<u8> {
         // the third: how far it drags the skin it presses along its surface
         if let Some(drag) = scene.contact_drags.get(slot) {
             floats[at + 8..at + 11].copy_from_slice(drag);
+        }
+        // the fourth: its own limb's joints, whose skin it never presses (-1: none)
+        let skip = scene
+            .contact_skips
+            .get(slot)
+            .copied()
+            .unwrap_or([u16::MAX; 4]);
+        for (offset, joint) in skip.iter().enumerate() {
+            floats[at + 12 + offset] = if *joint == u16::MAX {
+                -1.0
+            } else {
+                f32::from(*joint)
+            };
         }
     }
     bytes.extend(floats_bytes(&floats));
@@ -1180,7 +1193,7 @@ impl MeshGpu {
                         contacts: buffer(
                             device,
                             "contacts",
-                            16 + crate::host::gui::mesh::MAX_CONTACTS as u64 * 48,
+                            16 + crate::host::gui::mesh::MAX_CONTACTS as u64 * 64,
                             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                         ),
                         depths: buffer(
@@ -1707,6 +1720,7 @@ pub(super) fn scene_uniform_len() -> usize {
         palettes: Vec::new(),
         contacts: Vec::new(),
         contact_drags: Vec::new(),
+        contact_skips: Vec::new(),
         draws: Vec::new(),
     };
     scene_words(&scene, &shadow_plan(&scene, None), &emitter_plan(&scene)).len() * 4
