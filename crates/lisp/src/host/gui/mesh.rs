@@ -5694,6 +5694,95 @@ mod tests {
     }
 
     #[test]
+    fn a_key_spot_with_a_bigger_map_still_shadows_beside_a_point_cube_and_occlusion() {
+        // (ADR-800) a game's light set: a key spot whose map is bigger than the rest, a point
+        // lamp's cube of smaller maps, the camera's occlusion view: the key's shadow under the
+        // card must stay as dark as the key alone casts it, whatever else shares the arrays
+        let key = |resolution: u32| {
+            let mut light = shadowed(Light::spot(
+                [0.0, 2.0, 0.0],
+                [0.0, -1.0, 0.0],
+                [8.0; 3],
+                0.0,
+                [1.2, 1.4],
+            ));
+            light.shadow.as_mut().unwrap().resolution = resolution;
+            // (as the game's key: a softbox's size and a softness: the soft, contact-hardening
+            // read, `soft_shadow`)
+            light.shadow.as_mut().unwrap().softness = 0.12;
+            light.shadow.as_mut().unwrap().normal_bias = 2.0;
+            light.size = 1.3;
+            light
+        };
+        let lamp = {
+            let mut light = shadowed(Light::point([3.5, 1.5, 3.5], [0.0; 3], 0.0));
+            light.shadow.as_mut().unwrap().resolution = 1024;
+            light.shadow.as_mut().unwrap().softness = 0.03;
+            light
+        };
+        let (alone, meshes) = floor_and_card(key(2048));
+        let reference = red_at(&paint(&alone, &meshes), 0.75, 0.0);
+        let mut unlit = alone.clone();
+        unlit.lights[0].shadow = None;
+        let bright = red_at(&paint(&unlit, &meshes), 0.75, 0.0);
+        assert!(
+            u16::from(reference) + 60 < u16::from(bright),
+            "the key alone: {reference} against {bright}"
+        );
+        let mut with_lamp = alone.clone();
+        with_lamp.lights.push(lamp.clone());
+        let beside_lamp = red_at(&paint(&with_lamp, &meshes), 0.75, 0.0);
+        assert!(
+            (i16::from(beside_lamp) - i16::from(reference)).abs() <= 3,
+            "beside a point cube: {beside_lamp} against {reference}"
+        );
+        let mut with_occlusion = with_lamp.clone();
+        with_occlusion.ambient_occlusion = Some(AmbientOcclusion {
+            radius: 0.015,
+            strength: 0.6,
+        });
+        let beside_both = red_at(&paint(&with_occlusion, &meshes), 0.75, 0.0);
+        assert!(
+            u16::from(beside_both) + 60 < u16::from(bright),
+            "beside a point cube and occlusion: {beside_both} against {bright} lit"
+        );
+        // … and with the occlusion view BIGGER than the lamp's maps (the picture's size, as a
+        // game's picture is bigger than its lamp's 1024): the lamp's maps then sit in slots of
+        // the occlusion view's size
+        let mut small_lamp = with_occlusion.clone();
+        small_lamp.lights[1].shadow.as_mut().unwrap().resolution = 64;
+        let beside_small = red_at(&paint(&small_lamp, &meshes), 0.75, 0.0);
+        assert!(
+            u16::from(beside_small) + 60 < u16::from(bright),
+            "beside a lamp's maps smaller than the occlusion view: {beside_small} against {bright} lit"
+        );
+        // and the POINT lamp's own shadow, its cube's maps in the smaller array, beside a
+        // dark key with the bigger map: as dark as the lamp alone casts it
+        let lit_lamp = {
+            let mut light = shadowed(Light::point([0.0, 2.0, 0.0], [8.0; 3], 0.0));
+            light.shadow.as_mut().unwrap().resolution = 1024;
+            light.shadow.as_mut().unwrap().softness = 0.03;
+            light
+        };
+        let (lamp_alone, meshes) = floor_and_card(lit_lamp);
+        let lamp_reference = red_at(&paint(&lamp_alone, &meshes), 0.75, 0.0);
+        let mut dark_key = key(2048);
+        dark_key.color = [0.0; 3];
+        dark_key.position = [3.5, 2.0, 3.5];
+        let mut lamp_beside_key = lamp_alone.clone();
+        lamp_beside_key.lights.push(dark_key);
+        lamp_beside_key.ambient_occlusion = Some(AmbientOcclusion {
+            radius: 0.015,
+            strength: 0.6,
+        });
+        let lamp_shadow = red_at(&paint(&lamp_beside_key, &meshes), 0.75, 0.0);
+        assert!(
+            (i16::from(lamp_shadow) - i16::from(lamp_reference)).abs() <= 3,
+            "the lamp's shadow beside a bigger key map: {lamp_shadow} against {lamp_reference}"
+        );
+    }
+
+    #[test]
     fn a_spot_and_a_point_light_shadow_the_floor_without_acne() {
         // 2 m up over the floor's middle: the card at 1 m casts a shadow twice its size, x and z
         // −1 … 1, seen past the card's own −0.5 … 0.5
