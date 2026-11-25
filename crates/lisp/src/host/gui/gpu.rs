@@ -60,6 +60,7 @@ mod instances;
 mod passes;
 mod pipelines;
 mod run_cache;
+mod scene_timer;
 mod scenes;
 mod setup;
 mod shaders;
@@ -856,6 +857,14 @@ impl GpuWindow {
         };
         self.queue.submit(std::iter::once(encoder.finish()));
         let t_submit = std::time::Instant::now();
+        // the scene timestamps this frame wrote: read at a later frame (ADR-801)
+        if let Some(timer) = self
+            .scenes
+            .as_mut()
+            .and_then(|scenes| scenes.timer.as_mut())
+        {
+            timer.after_submit();
+        }
         if let Some(path) = dump_path() {
             dump_frame(
                 &self.device,
@@ -914,6 +923,15 @@ impl GpuWindow {
                 times.submit_us,
                 times.present_us,
             );
+            // the card's own time on the scenes of a frame a few before this one (ADR-801)
+            if !fb.scenes.is_empty()
+                && let Some(sample) = crate::host::gui::scene_gpu_times::scene_gpu_times().last()
+            {
+                eprintln!(
+                    "[gui-scene-gpu] shadow={:.0}us scene={:.0}us scenes={}",
+                    sample.shadow_us, sample.scene_us, sample.scenes
+                );
+            }
         }
         Some(times)
     }

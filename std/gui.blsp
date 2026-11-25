@@ -133,6 +133,13 @@
     (gui/latency-histogram id)   ;~> {:key {:count 412 :max-us 18211 :buckets {4351 3 …}} :pointer {…}}"
   (%gui-latency-histogram id))
 
+(defn scene-gpu-times ()
+  "How long the GPU itself took on the 3D scenes of recent frames, oldest first (at most 64), each a map of milliseconds: `:shadow`, from the start of the first shadow-map pass to the end of the last, and `:scene`, the colour pass (rasterising, shading, the multisample resolve), summed over the frame's scenes, with `:scenes`, how many were timed (at most 4). The card's own timestamp queries, read a few frames after the frame they measure, so nothing waits on them. Unlike a paint's phases in `gui/latency`, which are the CPU's, this is the card's. Empty where nothing measures: the CPU painter, an adapter without timestamp queries, `BROOD_GUI_GPU_TIMES=0`. One log for the process; `BROOD_GUI_TRACE=1` prints the newest beside each paint line (ADR-801).
+
+    (gui/scene-gpu-times)   ;~> [{:shadow 0.41 :scene 2.9 :scenes 1} …]
+    (vector? (gui/scene-gpu-times))   ;=> true"
+  (%gui-scene-gpu-times))
+
 (def- *empty-latency* {:count 0 :max-us 0 :buckets {}})
 
 (defn latency-merge (a b)

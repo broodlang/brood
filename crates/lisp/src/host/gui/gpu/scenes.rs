@@ -83,6 +83,9 @@ pub(super) struct MeshGpu {
     samples: u32,
     /// Indexed by `double_sided as usize * 2 + blended as usize`.
     pipelines: [wgpu::RenderPipeline; 4],
+    /// The hair's depth pass and its front pass, one-sided and double-sided (ADR-802).
+    hair_depth_pipelines: [wgpu::RenderPipeline; 2],
+    hair_front_pipelines: [wgpu::RenderPipeline; 2],
     scene_layout: wgpu::BindGroupLayout,
     /// Depth only, both faces, alpha-tested: what renders a shadow map (ADR-788).
     shadow_pipeline: wgpu::RenderPipeline,
@@ -114,6 +117,8 @@ pub(super) struct MeshGpu {
     sampler: wgpu::Sampler,
     pub(super) meshes: HashMap<u32, GpuMesh>,
     pub(super) targets: Vec<SceneTarget>,
+    /// The scene passes' timestamps where the device has them (ADR-801).
+    pub(super) timer: Option<super::scene_timer::SceneTimer>,
 }
 
 fn floats_bytes(values: &[f32]) -> Vec<u8> {
@@ -219,6 +224,26 @@ fn one_pixel(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> wgpu:
         },
     );
     texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Whether a scene's hair is drawn in two passes, its coverage to depth and then its colour
+/// where that depth is its own (ADR-802): on by default (on the game that asked, it cut the
+/// scene from 51 to 8 ms on the card); `BROOD_GUI_HAIR_PREPASS=0` draws it in one pass, to
+/// compare.
+pub(super) fn hair_prepass() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BROOD_GUI_HAIR_PREPASS").as_deref() != Ok("0"))
+}
+
+/// A trial of what a scene's hair costs on the card, for measuring only
+/// (`BROOD_GUI_HAIR_TRIAL`): 0 drawn as ever (the default), 1 its coverage alone, lit by
+/// nothing, 2 without its hair-on-hair shadow. The shader's `HAIR_TRIAL`.
+pub(super) fn hair_trial() -> u32 {
+    std::env::var("BROOD_GUI_HAIR_TRIAL")
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok())
+        .filter(|trial| *trial <= 2)
+        .unwrap_or(0)
 }
 
 /// The samples a pixel scenes are drawn with on `adapter`'s `device`: four; eight when asked
@@ -375,7 +400,14 @@ impl MeshGpu {
                 6 => Float32
             ],
         });
-        let make = |double_sided: bool, blended: bool| {
+        // a colour pipeline: its faces, whether it blends, and its fragment entry, depth state and
+        // colour writes (the hair's depth and front passes differ there, ADR-802)
+        let make_with = |double_sided: bool,
+                         blended: bool,
+                         entry: &str,
+                         depth_write: bool,
+                         depth_compare: wgpu::CompareFunction,
+                         write_mask: wgpu::ColorWrites| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("mesh"),
                 layout: Some(&layout),
@@ -397,8 +429,8 @@ impl MeshGpu {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(!blended),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    depth_write_enabled: Some(depth_write),
+                    depth_compare: Some(depth_compare),
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -408,22 +440,57 @@ impl MeshGpu {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
-                    entry_point: Some("fs_mesh"),
+                    entry_point: Some(entry),
                     // the shader's `SAMPLES`: how many bits of a hair's coverage mask it fills
                     compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: &[("SAMPLES", f64::from(samples))],
+                        constants: &[
+                            ("SAMPLES", f64::from(samples)),
+                            ("HAIR_TRIAL", f64::from(hair_trial())),
+                        ],
                         ..Default::default()
                     },
                     targets: &[Some(wgpu::ColorTargetState {
                         format: COLOR_FORMAT,
                         blend: blended.then_some(PREMULTIPLIED_OVER),
-                        write_mask: wgpu::ColorWrites::ALL,
+                        write_mask,
                     })],
                 }),
                 multiview_mask: None,
                 cache: None,
             })
         };
+        let make = |double_sided: bool, blended: bool| {
+            make_with(
+                double_sided,
+                blended,
+                "fs_mesh",
+                !blended,
+                wgpu::CompareFunction::Less,
+                wgpu::ColorWrites::ALL,
+            )
+        };
+        // the hair's two passes, one-sided and double-sided (ADR-802): its coverage to depth alone,
+        // then its colour where that depth is its own
+        let hair_depth_pipelines = [false, true].map(|double_sided| {
+            make_with(
+                double_sided,
+                false,
+                "fs_hair_depth",
+                true,
+                wgpu::CompareFunction::Less,
+                wgpu::ColorWrites::empty(),
+            )
+        });
+        let hair_front_pipelines = [false, true].map(|double_sided| {
+            make_with(
+                double_sided,
+                false,
+                "fs_hair_front",
+                false,
+                wgpu::CompareFunction::Equal,
+                wgpu::ColorWrites::ALL,
+            )
+        });
         let pipelines = [
             make(false, false),
             make(false, true),
@@ -498,6 +565,8 @@ impl MeshGpu {
         MeshGpu {
             samples,
             pipelines,
+            hair_depth_pipelines,
+            hair_front_pipelines,
             shadow_pipeline,
             shadow_scene_layout,
             shadow_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
@@ -538,6 +607,7 @@ impl MeshGpu {
             }),
             meshes: HashMap::new(),
             targets: Vec::new(),
+            timer: super::scene_timer::SceneTimer::new(device, queue),
         }
     }
 
@@ -865,6 +935,7 @@ impl MeshGpu {
                     double_sided: material.double_sided,
                     blended: material.surface == Surface::Blend,
                     casts: material.cast_shadow,
+                    surface: material.surface,
                 });
             }
             plans.push(plan);
@@ -968,6 +1039,9 @@ impl MeshGpu {
                 resource: self.morph_offset_buffer.as_entire_binding(),
             }],
         });
+        if let Some(timer) = &mut self.timer {
+            timer.begin_frame(device);
+        }
         for (index, scene) in scenes.iter().enumerate() {
             // the material bind groups this scene's draws sample
             let materials: Vec<wgpu::BindGroup> = scene
@@ -1023,14 +1097,32 @@ impl MeshGpu {
             // the shadow maps: every casting draw, once a view, the view by instance index, into
             // the layer of the array its `map` names (ADR-800)
             if let Some(shadow) = &target.shadow {
-                for (view_index, view) in shadow_plans[index].views.iter().enumerate() {
-                    let Some(layer) = shadow
-                        .layers
-                        .get(view.map.array as usize)
-                        .and_then(|layers| layers.get(view.map.layer as usize))
-                    else {
-                        continue;
-                    };
+                let drawn: Vec<_> = shadow_plans[index]
+                    .views
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(view_index, view)| {
+                        shadow
+                            .layers
+                            .get(view.map.array as usize)
+                            .and_then(|layers| layers.get(view.map.layer as usize))
+                            .map(|layer| (view_index, view, layer))
+                    })
+                    .collect();
+                // the span of the scene's shadow passes: the first one's start, the last one's
+                // end (ADR-801)
+                let stamps = match &mut self.timer {
+                    Some(timer) if !drawn.is_empty() => timer.shadow_stamps(index),
+                    _ => None,
+                };
+                let last = drawn.len().saturating_sub(1);
+                for (order, (view_index, view, layer)) in drawn.into_iter().enumerate() {
+                    let timestamp_writes = stamps.and_then(|(start, end)| {
+                        self.timer.as_ref()?.writes(
+                            (order == 0).then_some(start),
+                            (order == last).then_some(end),
+                        )
+                    });
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("scene shadow"),
                         color_attachments: &[],
@@ -1042,7 +1134,7 @@ impl MeshGpu {
                             }),
                             stencil_ops: None,
                         }),
-                        timestamp_writes: None,
+                        timestamp_writes,
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
@@ -1110,6 +1202,12 @@ impl MeshGpu {
                 b: (background[2].clamp(0.0, 1.0) * opacity) as f64,
                 a: opacity as f64,
             };
+            let colour_stamps = self
+                .timer
+                .as_mut()
+                .and_then(|timer| timer.colour_stamps(index));
+            let timestamp_writes = colour_stamps
+                .and_then(|(start, end)| self.timer.as_ref()?.writes(Some(start), Some(end)));
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1129,16 +1227,47 @@ impl MeshGpu {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &scene_group, &[scene_offset]);
+            let is_hair =
+                |draw: &DrawPlan| matches!(draw.surface, Surface::Hair | Surface::Strands);
+            let prepass = hair_prepass();
+            // the hair's coverage to depth first (ADR-802), so its colour is shaded only where
+            // it is the hair in front: every layer of wisps behind is rejected before shading
+            if prepass {
+                for (draw, material) in plans[index].iter().zip(&materials) {
+                    if !is_hair(draw) {
+                        continue;
+                    }
+                    let mesh = &self.meshes[&draw.mesh];
+                    pass.set_pipeline(&self.hair_depth_pipelines[draw.double_sided as usize]);
+                    pass.set_bind_group(1, &draw_group, &[(draw.at as u64 * DRAW_BYTES) as u32]);
+                    pass.set_bind_group(2, &morph_group, &[]);
+                    pass.set_bind_group(3, material, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+            }
             for (draw, material) in plans[index].iter().zip(&materials) {
                 let mesh = &self.meshes[&draw.mesh];
-                pass.set_pipeline(
-                    &self.pipelines[draw.double_sided as usize * 2 + draw.blended as usize],
-                );
+                // each draw's own time on the card, under BROOD_GUI_GPU_TIMES=draws (ADR-801)
+                let stamp = self.timer.as_mut().and_then(|timer| {
+                    timer.draw_stamp(index, draw.mesh, draw.surface, mesh.index_count / 3)
+                });
+                if let (Some(query), Some(timer)) = (stamp, &self.timer) {
+                    pass.write_timestamp(timer.query_set(), query);
+                }
+                if prepass && is_hair(draw) {
+                    pass.set_pipeline(&self.hair_front_pipelines[draw.double_sided as usize]);
+                } else {
+                    pass.set_pipeline(
+                        &self.pipelines[draw.double_sided as usize * 2 + draw.blended as usize],
+                    );
+                }
                 pass.set_bind_group(1, &draw_group, &[(draw.at as u64 * DRAW_BYTES) as u32]);
                 pass.set_bind_group(2, &morph_group, &[]);
                 pass.set_bind_group(3, material, &[]);
@@ -1146,6 +1275,16 @@ impl MeshGpu {
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
+            let end = self
+                .timer
+                .as_mut()
+                .and_then(|timer| timer.draws_end_stamp(index));
+            if let (Some(query), Some(timer)) = (end, &self.timer) {
+                pass.write_timestamp(timer.query_set(), query);
+            }
+        }
+        if let Some(timer) = &mut self.timer {
+            timer.end_frame(encoder);
         }
     }
 }
@@ -1251,6 +1390,8 @@ struct DrawPlan {
     double_sided: bool,
     blended: bool,
     casts: bool,
+    /// How it is shaded: what a draw's GPU time is told by (ADR-801).
+    surface: Surface,
 }
 
 /// `scene`'s `SceneU` uniform (the WGSL struct in `MESH_SRC`), padded to [`SCENE_BYTES`].
