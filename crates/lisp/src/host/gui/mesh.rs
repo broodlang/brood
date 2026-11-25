@@ -1171,6 +1171,10 @@ pub struct Scene {
     /// How far each contact drags the skin it presses along its surface this frame (metres; the
     /// friction that holds skin to glass, kept by the game): one a contact, or none (ADR-805).
     pub contact_drags: Vec<[f32; 3]>,
+    /// Each contact's own limb: up to four joints (the mesh's skin joint indices; `u16::MAX` none)
+    /// whose skin it never presses, a vertex skipped where its weights on them pass a half: a
+    /// thigh's capsule presses the other thigh, not its own (ADR-805). One a contact, or none.
+    pub contact_skips: Vec<[u16; 4]>,
 }
 
 /// The most contacts a scene presses its skin with (ADR-805).
@@ -1275,6 +1279,7 @@ pub fn deform_by_contacts(
     point: [f32; 3],
     normal: [f32; 3],
     softness: f32,
+    skipped: u16,
 ) -> ([f32; 3], [f32; 3]) {
     // bone, or the limb that presses (softness 0): never pressed
     if softness <= 0.0 {
@@ -1283,6 +1288,10 @@ pub fn deform_by_contacts(
     let mut point = point;
     let mut normal = normal;
     for (slot, (contact, &depth)) in contacts.iter().zip(depths).enumerate() {
+        // (a contact whose own limb this skin is presses it not: `skipped_by`)
+        if skipped & (1 << slot) != 0 {
+            continue;
+        }
         let (distance, out) = contact.signed_distance(point);
         // the patch's edge eased over `band`: the distance's smooth maximum with 0, so skin meets
         // the surface tangentially instead of creasing where the patch ends
@@ -4396,6 +4405,27 @@ pub fn softness_at(mesh: &Mesh, index: usize) -> f32 {
     }
 }
 
+/// Which of `skips` (each contact's own limb's joints) vertex `index` of `mesh` belongs to, as
+/// bits by contact: its skin weights on that contact's joints pass a half (ADR-805).
+pub fn skipped_by(mesh: &Mesh, index: usize, skips: &[[u16; 4]]) -> u16 {
+    let (Some(joints), Some(weights)) = (mesh.joints.get(index), mesh.weights.get(index)) else {
+        return 0;
+    };
+    let mut bits = 0u16;
+    for (slot, skip) in skips.iter().enumerate().take(MAX_CONTACTS) {
+        let share: f32 = joints
+            .iter()
+            .zip(weights)
+            .filter(|(joint, _)| skip.contains(joint))
+            .map(|(_, weight)| *weight)
+            .sum();
+        if share > 0.5 {
+            bits |= 1 << slot;
+        }
+    }
+    bits
+}
+
 /// The scene's `:deform` draws' posed vertices pressed by its contacts (ADR-805): each
 /// contact's deepest press found over them all, then each vertex laid onto what it passed into
 /// and lifted in a ring round it ([`deform_by_contacts`]), its tangent kept square to its new
@@ -4405,19 +4435,21 @@ fn press_posed(scene: &Scene, posed: &mut [Posed]) {
         return;
     }
     let contacts = &scene.contacts[..scene.contacts.len().min(MAX_CONTACTS)];
-    let depths = contact_depths(
-        contacts,
-        posed
-            .iter()
-            .filter(|item| pressed(item.draw))
-            .flat_map(|item| {
-                item.vertices
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, _)| softness_at(&item.mesh, *index) > 0.0)
-                    .map(|(_, vertex)| &vertex.world)
-            }),
-    );
+    // each contact's deepest press, over the soft skin it does press (not its own limb's)
+    let mut depths = vec![0.0f32; contacts.len()];
+    for item in posed.iter().filter(|item| pressed(item.draw)) {
+        for (index, vertex) in item.vertices.iter().enumerate() {
+            if softness_at(&item.mesh, index) <= 0.0 {
+                continue;
+            }
+            let skipped = skipped_by(&item.mesh, index, &scene.contact_skips);
+            for (slot, (depth, contact)) in depths.iter_mut().zip(contacts).enumerate() {
+                if skipped & (1 << slot) == 0 {
+                    *depth = depth.max(-contact.signed_distance(vertex.world).0);
+                }
+            }
+        }
+    }
     for item in posed.iter_mut().filter(|item| pressed(item.draw)) {
         for (index, vertex) in item.vertices.iter_mut().enumerate() {
             let softness = softness_at(&item.mesh, index);
@@ -4428,6 +4460,7 @@ fn press_posed(scene: &Scene, posed: &mut [Posed]) {
                 vertex.world,
                 vertex.normal,
                 softness,
+                skipped_by(&item.mesh, index, &scene.contact_skips),
             );
             let tangent = [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]];
             let square = normalize(
@@ -4703,6 +4736,7 @@ mod tests {
             palettes: vec![],
             contacts: Vec::new(),
             contact_drags: Vec::new(),
+            contact_skips: Vec::new(),
             draws: vec![draw],
         }
     }
@@ -8369,15 +8403,16 @@ mod tests {
             [0.0, -0.005, 0.0],
             [0.6, -0.8, 0.0],
             1.0,
+            0,
         );
         assert!(laid[1].abs() < 2e-4, "{laid:?}");
         assert!(laid_normal[1] < -0.99, "{laid_normal:?}");
         // a firm part (a nipple) sits a little behind the surface, sunk into the softer flesh
-        let (firm, _) = deform_by_contacts(&floor, &depths, &[], [0.0, -0.005, 0.0], down, 0.1);
+        let (firm, _) = deform_by_contacts(&floor, &depths, &[], [0.0, -0.005, 0.0], down, 0.1, 0);
         assert!(firm[1] < laid[1] - 0.0005, "{firm:?} against {laid:?}");
         // outside the eased edge, soft: lifted along its own normal (toward the floor, out of the
         // body), at most RING_LIFT × the depth at the crest; and nothing right at the edge
-        let (ring, _) = deform_by_contacts(&floor, &depths, &[], [0.02, 0.012, 0.0], down, 1.0);
+        let (ring, _) = deform_by_contacts(&floor, &depths, &[], [0.02, 0.012, 0.0], down, 1.0, 0);
         let lift = 0.012 - ring[1];
         assert!(lift > 0.0 && lift <= RING_LIFT * 0.005 + 1e-6, "{lift}");
         let edge = smooth_outside(1e-5, EDGE_BAND + EDGE_SPREAD * 0.005);
@@ -8386,26 +8421,28 @@ mod tests {
             "the eased edge lifts skin off the surface only a little: {edge}"
         );
         // the same point as bone: no ring
-        let (bone, _) = deform_by_contacts(&floor, &depths, &[], [0.02, 0.0005, 0.0], down, 0.0);
+        let (bone, _) = deform_by_contacts(&floor, &depths, &[], [0.02, 0.0005, 0.0], down, 0.0, 0);
         assert_eq!(bone, [0.02, 0.0005, 0.0]);
         // and bone inside the floor: never pressed (a limb that presses is softness 0 too)
         let (bone_inside, _) =
-            deform_by_contacts(&floor, &depths, &[], [0.0, -0.005, 0.0], down, 0.0);
+            deform_by_contacts(&floor, &depths, &[], [0.0, -0.005, 0.0], down, 0.0, 0);
         assert_eq!(bone_inside, [0.0, -0.005, 0.0]);
         // far off: untouched
         let (far, far_normal) =
-            deform_by_contacts(&floor, &depths, &[], [0.0, 0.2, 0.0], down, 1.0);
+            deform_by_contacts(&floor, &depths, &[], [0.0, 0.2, 0.0], down, 1.0, 0);
         assert_eq!((far, far_normal), ([0.0, 0.2, 0.0], down));
         // pushed far past the surface, firm skin gives only so far (MAX_SQUASH × softness) and passes
         // it, rather than being flattened away from what lies under it
         let deep_depths = contact_depths(&floor, [[0.0, -0.05, 0.0]].iter());
-        let (deep, _) = deform_by_contacts(&floor, &deep_depths, &[], [0.0, -0.05, 0.0], down, 0.1);
+        let (deep, _) =
+            deform_by_contacts(&floor, &deep_depths, &[], [0.0, -0.05, 0.0], down, 0.1, 0);
         assert!(deep[1] < -0.04, "{deep:?}");
         // dragged along the floor by its friction: inside, the whole drag; far off, none
         let drag = [[0.003, 0.0, 0.0]];
-        let (held, _) = deform_by_contacts(&floor, &depths, &drag, [0.0, -0.005, 0.0], down, 1.0);
+        let (held, _) =
+            deform_by_contacts(&floor, &depths, &drag, [0.0, -0.005, 0.0], down, 1.0, 0);
         assert!((held[0] - 0.003).abs() < 1e-4, "{held:?}");
-        let (free, _) = deform_by_contacts(&floor, &depths, &drag, [0.0, 0.2, 0.0], down, 1.0);
+        let (free, _) = deform_by_contacts(&floor, &depths, &drag, [0.0, 0.2, 0.0], down, 1.0, 0);
         assert!(free[0].abs() < 1e-6, "{free:?}");
     }
 
@@ -8429,6 +8466,44 @@ mod tests {
         // past its end, from the end's cap
         let (past, _) = finger.signed_distance([0.06, 0.0, 0.0]);
         assert!((past - 0.002).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_contact_skips_the_skin_of_its_own_limb() {
+        // three vertices: wholly on joint 3 (a thigh), split 60 / 40 between 3 and 5, wholly on 5
+        let floats_bytes = |values: &[f32]| -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        };
+        let mesh = Mesh::from_parts(MeshParts {
+            positions: floats_bytes(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+            joints: vec![3, 0, 0, 0, 3, 5, 0, 0, 5, 0, 0, 0],
+            weights: floats_bytes(&[1.0, 0.0, 0.0, 0.0, 0.6, 0.4, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+            ..MeshParts::default()
+        })
+        .expect("a skinned triangle");
+        // contact 0 is joint 3's own limb, contact 1 nobody's
+        let skips = [[3, u16::MAX, u16::MAX, u16::MAX], [u16::MAX; 4]];
+        assert_eq!(skipped_by(&mesh, 0, &skips), 0b01);
+        assert_eq!(skipped_by(&mesh, 1, &skips), 0b01, "60 % on its own limb");
+        assert_eq!(skipped_by(&mesh, 2, &skips), 0);
+        // skipped, a vertex inside the contact is left as it is
+        let floor = [Contact::Plane {
+            normal: [0.0, 1.0, 0.0],
+            offset: 0.0,
+        }];
+        let (kept, _) = deform_by_contacts(
+            &floor,
+            &[0.005],
+            &[],
+            [0.0, -0.005, 0.0],
+            [0.0, -1.0, 0.0],
+            1.0,
+            0b1,
+        );
+        assert_eq!(kept, [0.0, -0.005, 0.0]);
     }
 
     #[test]

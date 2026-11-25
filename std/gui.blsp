@@ -796,7 +796,7 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; `:cast-shadow` (true by default), `:deform` (its skin pressed by the scene's `:contacts`).
 ;; `:contacts [{:plane [nx ny nz d]} {:sphere [x y z r]} {:capsule [ax ay az bx by bz r]} …]`
 ;; (at most 16, world space; each may carry `:drag [x y z]`, the skin dragged along it by
-;; friction) press the skin of the `:deform` draws: laid onto what presses it,
+;; friction, and `:skip [j …]`, the joints of its own limb, whose skin it never presses) press the skin of the `:deform` draws: laid onto what presses it,
 ;; soft flesh rising in a ring round it by the mesh's `:softness` (f32 0 … 1 a vertex in its
 ;; spec; 0, bone or a pressing limb, never pressed; none: soft throughout), ADR-805.
 ;; A glTF loader, a skeleton's maths, a camera — policy above this, in the engine. Both window
