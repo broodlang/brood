@@ -721,9 +721,9 @@ struct DrawU {
 
 struct ContactList {
     count: vec4<u32>,
-    // four vec4 a contact: `[x y z kind]`, `[x y z w]`, its drag, its own limb's joints
+    // five vec4 a contact: `[x y z kind]`, `[x y z w]`, its drag, its own limb's joints, its one limb's
     // (`scenes::contact_words`)
-    shapes: array<vec4<f32>, 256>,
+    shapes: array<vec4<f32>, 320>,
 };
 @group(3) @binding(8) var<storage, read> mesh_vertices: array<f32>;
 @group(3) @binding(9) var<uniform> contact_list: ContactList;
@@ -750,8 +750,8 @@ fn smooth_outside(distance: f32, band: f32) -> f32 {
 // `mesh::Contact::signed_distance`: how far `point` lies outside contact `slot` (negative inside),
 // in w, and the unit direction out of it there, in xyz
 fn contact_distance(slot: u32, point: vec3<f32>) -> vec4<f32> {
-    let first = contact_list.shapes[slot * 4u];
-    let second = contact_list.shapes[slot * 4u + 1u];
+    let first = contact_list.shapes[slot * 5u];
+    let second = contact_list.shapes[slot * 5u + 1u];
     let kind = u32(first.w + 0.5);
     if (kind == 0u) {
         return vec4<f32>(first.xyz, dot(first.xyz, point) - second.x);
@@ -778,15 +778,21 @@ fn contact_distance(slot: u32, point: vec3<f32>) -> vec4<f32> {
 // `mesh::skipped_by`: whether contact `slot` is this vertex's own limb, its weights on the contact's
 // `:skip` joints passing a half
 fn contact_skipped(slot: u32, input: VertexIn) -> bool {
-    let skip = contact_list.shapes[slot * 4u + 3u];
-    var share = 0.0;
+    // its own limb (`:skip`), or not the one limb it presses (`:only`, its first joint -1: any)
+    let skip = contact_list.shapes[slot * 5u + 3u];
+    let only = contact_list.shapes[slot * 5u + 4u];
+    var own = 0.0;
+    var one = 0.0;
     for (var at = 0u; at < 4u; at = at + 1u) {
         let joint = f32(input.joints[at]);
         if (any(vec4<f32>(joint) == skip)) {
-            share = share + input.weights[at];
+            own = own + input.weights[at];
+        }
+        if (any(vec4<f32>(joint) == only)) {
+            one = one + input.weights[at];
         }
     }
-    return share > 0.5;
+    return own > 0.5 || (only.x >= 0.0 && one <= 0.5);
 }
 
 // a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 21 a vertex)
@@ -862,7 +868,8 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         if (contact_skipped(slot, input)) {
             continue;
         }
-        let depth = bitcast<f32>(atomicLoad(&contact_depths[slot]));
+        // (as far as skin can be squashed, never a raw depth: `mesh::deform_by_contacts`)
+        let depth = min(bitcast<f32>(atomicLoad(&contact_depths[slot])), MAX_SQUASH);
         let measured = contact_distance(slot, point);
         let out = measured.xyz;
         let distance = measured.w;
@@ -891,7 +898,7 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         let reach = (RING_WIDTH + RING_SPREAD * depth) * (0.5 + softness);
         let outside = max(distance, 0.0) / reach;
         let held = into + (1.0 - into) * exp(-outside * outside);
-        point = point + contact_list.shapes[slot * 4u + 2u].xyz * held;
+        point = point + contact_list.shapes[slot * 5u + 2u].xyz * held;
         let turned = safe_normalize(normal + (-out - normal) * into);
         if (dot(sideways, sideways) > 1e-8) {
             normal = safe_normalize(turned - safe_normalize(sideways) * slope);
