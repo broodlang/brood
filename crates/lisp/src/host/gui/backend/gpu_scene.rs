@@ -1760,3 +1760,85 @@ fn of_two_fibres_over_a_pixel_the_nearer_counts_more_on_the_gpu() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn a_normal_maps_green_tilts_toward_the_images_up_whatever_the_tangents_w_on_the_gpu() {
+    // a quad facing the camera, its image upright (v runs down it, glTF's way), lit from above: a
+    // normal map tilted "up" in green (glTF's +Y, the image's up) must light it more than a flat
+    // one, with its tangent's w either way (her export's w was reversed on two thirds of her skin
+    // and every baked relief was lit upside down, ADR-820). The GPU painter only.
+    let side = 64u32;
+    let quad = |w: f32| {
+        Arc::new(
+            Mesh::from_parts(MeshParts {
+                positions: bytes_of(&[
+                    -0.5f32, -0.5, 0.5, 0.5, -0.5, 0.5, 0.5, 0.5, 0.5, -0.5, 0.5, 0.5,
+                ]),
+                normals: bytes_of(&[0.0f32, 0.0, -1.0].repeat(4)),
+                uvs: bytes_of(&[0.0f32, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]),
+                tangents: bytes_of(&[1.0f32, 0.0, 0.0, w].repeat(4)),
+                indices: [0u16, 1, 2, 0, 2, 3]
+                    .iter()
+                    .flat_map(|index| index.to_le_bytes())
+                    .collect(),
+                ..MeshParts::default()
+            })
+            .expect("a quad"),
+        )
+    };
+    let flat = [128u8, 128, 255, 255].repeat(16);
+    let up = [128u8, 200, 255, 255].repeat(16);
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    scene.lights = vec![Light::directional([0.0, -0.7, 0.7], [1.0, 1.0, 1.0])];
+    scene.draws = vec![Draw {
+        loose: None,
+        mesh: 1,
+        model: [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+        palette: None,
+        morphs: vec![],
+        material: Material {
+            double_sided: true,
+            specular: 0.0,
+            color: [0.8, 0.8, 0.8, 1.0],
+            normal: Some(11),
+            ..Material::default()
+        },
+    }];
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let mut shoot = |w: f32, map: &[u8]| -> Option<i32> {
+            let mut gpu = GpuWindow::offscreen(adapter, side, side).ok()?;
+            gpu.upload_mesh(1, &quad(w));
+            gpu.upload_texture(11, map, 4, 4, crate::host::gui::TextureFilter::Data);
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            renderer.set_bg(Some([0, 0, 0]));
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            let pixels = gpu.read_pixels();
+            Some(i32::from(pixels[((32 * side + 32) * 3) as usize]))
+        };
+        let (Some(level), Some(right), Some(reversed)) =
+            (shoot(-1.0, &flat), shoot(-1.0, &up), shoot(1.0, &up))
+        else {
+            continue;
+        };
+        eprintln!("{name}: flat {level}, green up with w -1 {right}, with w +1 {reversed}");
+        if !(right > level + 5 && reversed > level + 5) {
+            failures.push(format!(
+                "{name}: green up not lit from above: flat {level}, w -1 {right}, w +1 {reversed}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

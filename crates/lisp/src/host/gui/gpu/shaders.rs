@@ -2470,6 +2470,13 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
 // `fs_mesh`'s colour from its textures, its coverage decided: no `discard` anywhere in it, so
 // the hair's front pass (`fs_hair_front`) keeps the early depth test (ADR-802)
 fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: vec4<f32>, occlusion_texel: vec4<f32>, detail_texel: vec4<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>, alpha: f32) -> vec4<f32> {
+    // the surface direction its image runs up (decreasing v, glTF's +Y of a normal map), from the
+    // screen's derivatives (Schüler's cotangent frame): what a normal map's green tilts toward,
+    // whatever handedness its tangent's w says (taken here, in uniform control flow)
+    let world_dx = dpdx(fragment.world);
+    let world_dy = dpdy(fragment.world);
+    let uv_turn = uv_dx.x * uv_dy.y - uv_dy.x * uv_dx.y;
+    let image_up = -(world_dy * uv_dx.x - world_dx * uv_dy.x) * sign(uv_turn);
     var base = srgb_to_linear(texel.rgb) * draw.color.rgb;
     // a `:fibres` strand (ADR-813): its own lightness (`_STRAND`, ±20 %), darker toward its root, and
     // its value and baked self-shadow handed to the light loop
@@ -2523,7 +2530,15 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
     if (framed) {
         let tangent = safe_normalize(fragment.tangent.xyz);
         let bitangent = cross(normal, tangent);
-        let sign = select(1.0, -1.0, fragment.tangent.w < 0.0);
+        // (its handedness from the image's own way up on the surface, not the tangent's w: her
+        // export's w was reversed on two thirds of her skin, and every baked relief, pores,
+        // creases, her navel and nipples, was lit upside down, ADR-820; the w where the
+        // derivatives say nothing, a texel seen edge on)
+        var sign = select(1.0, -1.0, fragment.tangent.w < 0.0);
+        let measured = dot(bitangent, image_up);
+        if (abs(measured) > 1e-12) {
+            sign = select(1.0, -1.0, measured < 0.0);
+        }
         normal = safe_normalize(tangent * local.x + sign * bitangent * local.y + normal * local.z);
     }
     let view = safe_normalize(scene.eye.xyz - fragment.world);
