@@ -1360,6 +1360,12 @@ pub struct Heap {
     /// read with; the arm's own error block does (`brood_rt_trace_push`), and takes it there.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))] // only native code's callbacks set it
     pub(crate) jit_miss_gsite: u32,
+    /// Set by `brood_rt_tail_native` when the builtin it called in a native TAIL call raised:
+    /// the arm's error exit then records its frame by name alone, as the VM records a frame a
+    /// tail call replaced (`brood_rt_trace_push`). With the file, an error a contract shim's
+    /// tail call raised named `contract.blsp` (ADR-811).
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))] // only native code's callbacks set it
+    pub(crate) jit_tail_native_error: bool,
     pub(crate) cur_native_gateway: u64,
     pub(crate) blocked_under_gateway: u64,
     /// Overflow sentinel for the unboxed-`i64` fast path (the register calling convention for
@@ -2053,6 +2059,7 @@ impl Heap {
             native_gateway_seq: 0,
             jit_tail_local_head: u32::MAX,
             jit_miss_gsite: u32::MAX,
+            jit_tail_native_error: false,
             cur_native_gateway: 0,
             blocked_under_gateway: 0,
             jit_i64_overflow: false,

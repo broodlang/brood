@@ -166,6 +166,9 @@ pub(super) struct Funcs {
     /// `brood_rt_set_has` — the membership probe behind [`PrimOp::SetHas`], `mget`'s shape:
     /// status 0 answers a bool, 1 (not a set) deopts to the VM's native and its error.
     pub shas: FuncRef,
+    /// `brood_rt_tail_native(heap, out, argc, ctx) -> status` — a tail call to a builtin,
+    /// called in place so the arm returns its value (ADR-811, `call::emit_call`).
+    pub tailnat: FuncRef,
     /// `brood_rt_vector_len` — the length read behind [`PrimOp1::VectorLen`]: `(heap,
     /// vec 3w) -> len`, `-1` for a non-vector (deopt). No out slot; the answer is the return.
     pub vlen: FuncRef,
@@ -238,6 +241,9 @@ pub(super) struct Frame<'a> {
     /// any more, and every such arm returned `nil`. Carrying it here makes "which exits must
     /// be updated" a question the type system answers.
     pub out_ptr: cranelift_codegen::ir::Value,
+    /// The arm's Done block: a value stored through `out_ptr`, then a jump here, is the arm's
+    /// return (a native tail call to a builtin returns this way, ADR-811).
+    pub done: Block,
     pub nslots: usize,
     pub deopt: cranelift_codegen::ir::Block,
     pub carry_vars: &'a [Option<(Variable, bool)>],
@@ -261,6 +267,9 @@ pub(super) struct Frame<'a> {
     /// operand in a float-context arm — dispatches by tag at runtime instead
     /// (`arith_dispatch`/`cmp_dispatch`), so neither kind of number deopts.
     pub arith_dispatch: bool,
+    /// The inline `count` declined often enough that this lowering calls the real `count`
+    /// (`CompiledArm::jit_count_calls`, ADR-811).
+    pub count_calls: bool,
     /// Base frame slot of the **block-argument spill** region (KI-49). An operand that must
     /// cross a block boundary but is not a profiled `Int` is stored at
     /// `blockarg_spill_base + <its operand-stack index>` and carried as `ParamRepr::Slot`.

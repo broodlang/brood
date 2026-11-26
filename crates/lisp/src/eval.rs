@@ -734,7 +734,7 @@ fn arity_error_for(cl: &Closure, got: usize) -> LispError {
 /// Invoke a builtin, enforcing its declared [`Arity`](crate::core::value::Arity) first. The single gate
 /// every native call passes through (the evaluator loop *and* `apply`), so a
 /// primitive's arity is checked in one place instead of hand-rolled per builtin.
-fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> LispResult {
+pub(crate) fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> LispResult {
     let nat = heap.native(id);
     if !nat.arity.accepts(argv.len()) {
         return Err(LispError::arity(arity_message(

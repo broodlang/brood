@@ -844,6 +844,36 @@ pub(super) fn emit_prim3_table_put(
     Some(())
 }
 
+/// `=` with a float about, or `None` when neither operand is (the other paths take those).
+/// Brood's `=` is structural, and on two floats it is IEEE equality — `0.0` equals `-0.0`, a
+/// NaN equals nothing — so two CERTAIN floats are one ordered `fcmp`. Beside an operand not
+/// certainly a float the answer depends on its kind at runtime (`(= 2.0 2)` is false), so the
+/// structural `eq_dispatch` decides. Before this a float operand sent `=` to the float path,
+/// which bails the whole arm (`float-eq-mixed-int-float-unsafe`; ADR-811).
+fn float_equal(
+    b: &mut FunctionBuilder,
+    op: PrimOp,
+    first: Op,
+    second: Op,
+    frame: Frame,
+    funcs: Funcs,
+) -> Option<cranelift_codegen::ir::Value> {
+    use cranelift_codegen::ir::condcodes::FloatCC;
+    if !matches!(op, PrimOp::Eq) || !(op_is_float(first, frame) || op_is_float(second, frame)) {
+        return None;
+    }
+    if number_kind(b, first, frame) == NumberKind::Float
+        && number_kind(b, second, frame) == NumberKind::Float
+    {
+        let x = super::emit::as_f64(b, first, frame);
+        let y = super::emit::as_f64(b, second, frame);
+        return Some(b.ins().fcmp(FloatCC::Equal, x, y));
+    }
+    let first = read_words(b, first, frame);
+    let second = read_words(b, second, frame);
+    Some(eq_dispatch(b, first, second, frame, funcs))
+}
+
 /// The runtime callback answering `op` as a two-operand heap PROBE — a read of a collection
 /// by key that allocates nothing, `table_prim`'s protocol (0 answers, 1 deopts to the VM's real
 /// function) — or `None` for any other op. One table for both `Prim2` sites, so a new probe is
@@ -1041,6 +1071,10 @@ pub(super) fn emit_prim2(
             let h = vector_ref(b, vec, idx, frame, funcs);
             stack.push(h);
         }
+    } else if let Some(equal) = float_equal(b, *op, aa_op, bb_op, frame, funcs) {
+        // `=` with a float about (ADR-811): two certain floats compare unboxed, any other pair
+        // by structure at runtime — never the bail that kept the arm on the VM.
+        stack.push(Op::Int(equal));
     } else if matches!(op, PrimOp::Eq)
         && !op_is_float(aa_op, frame)
         && !op_is_float(bb_op, frame)
@@ -1200,6 +1234,11 @@ pub(super) fn emit_prim2_slot_slot(
             let h = vector_ref(b, vec, idx, frame, funcs);
             stack.push(h);
         }
+    } else if let Some(equal) =
+        float_equal(b, *op, Op::Slot(slot_a), Op::Slot(slot_b), frame, funcs)
+    {
+        // `(= slot slot)` with a float about: see `float_equal`.
+        stack.push(Op::Int(equal));
     } else if matches!(op, PrimOp::Eq)
         && !op_is_float(Op::Slot(slot_a), frame)
         && !op_is_float(Op::Slot(slot_b), frame)
@@ -1424,6 +1463,13 @@ pub(super) fn emit_prim2_slot_int(
             map,
             frame,
         )?);
+    } else if matches!(op, PrimOp::Eq) && op_is_float(Op::Slot(slot_a), frame) {
+        // `(= floatslot 0)`: structural, so false for a float however close; true only if the
+        // slot holds that int after all (see `float_equal`).
+        let literal = Op::Int(b.ins().iconst(types::I64, int_b));
+        let equal = float_equal(b, *op, Op::Slot(slot_a), literal, frame, funcs)
+            .or_bail("float-equal-declined")?;
+        stack.push(Op::Int(equal));
     } else if op_is_float(Op::Slot(slot_a), frame) {
         // `(op floatslot int-literal)` — Brood coerces the int to f64 (`(+ 1.5 1)` =
         // 2.5). Promote the literal and do float arith.

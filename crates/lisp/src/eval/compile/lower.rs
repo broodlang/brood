@@ -727,6 +727,18 @@ pub(crate) fn resolve_prim(heap: &Heap, h: Symbol) -> Option<(PrimOp, [usize; 2]
             _ => None,
         };
     }
+    // Under armed contracts (`nest run`/`nest test`, ADR-381) the name holds a contract SHIM,
+    // and reading the shim's shape retired the inline: `(math/rem i 7)` cost ~300 ns a call
+    // armed against 15 unarmed (ADR-811). Look through it where the inline's own guard
+    // already enforces the declaration: an op whose inline answers only for two ints
+    // (`int_only_inline`), under a declaration of exactly `(int int -> int)`. Every other
+    // operand defers to the live head — the shim, which checks and blames — so the check the
+    // inline skips is one that cannot fail. `sqrt`'s look-through in `resolve_prim1` is the
+    // precedent; a changed declaration rebinds the name, and the epoch guard re-resolves.
+    let (v, through_shim) = match crate::builtins::contracts::shim_original(heap, v) {
+        Some(original) => (original, true),
+        None => (v, false),
+    };
     let (nid, map): (NativeId, [usize; 2]) = match v.unpack() {
         ValueRef::Native(id) => (id, [0, 1]),
         ValueRef::Fn(id) => {
@@ -746,7 +758,25 @@ pub(crate) fn resolve_prim(heap: &Heap, h: Symbol) -> Option<(PrimOp, [usize; 2]
         _ => return None,
     };
     let op = PrimOp::from_native_name(&heap.native(nid).name)?;
+    if through_shim
+        && !(int_only_inline(op)
+            && crate::builtins::contracts::declares_arrow(heap, h, &["int", "int", "->", "int"]))
+    {
+        return None;
+    }
     Some((op, map))
+}
+
+/// Ops whose inline answers ONLY for two `Int` operands, deferring every other operand to the
+/// live head (`prim2_int_fast` / `prim_apply_float` / the JIT's int path). For them a
+/// declaration of `(int int -> int)` is exactly what the inline enforces, so a contract shim
+/// carrying it can be looked through (`resolve_prim`). Not `+ - * /`: their float path answers
+/// a float operand the shim would refuse.
+fn int_only_inline(op: PrimOp) -> bool {
+    matches!(
+        op,
+        PrimOp::Rem | PrimOp::Quot | PrimOp::BitAnd | PrimOp::BitOr | PrimOp::BitXor
+    )
 }
 
 /// Resolve a fold *reducer value* `f` to an inlinable associative [`PrimOp`]

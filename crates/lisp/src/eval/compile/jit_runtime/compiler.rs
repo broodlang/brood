@@ -570,7 +570,11 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                     | (u64::from(
                         arm.jit_arith_dispatch
                             .load(std::sync::atomic::Ordering::Relaxed),
-                    ) << 33);
+                    ) << 33)
+                    | (u64::from(
+                        arm.jit_count_calls
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    ) << 34);
                 if let Some(key) = arm.share_key {
                     let map = if inlined {
                         &published_inline

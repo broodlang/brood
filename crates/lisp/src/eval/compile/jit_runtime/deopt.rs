@@ -370,6 +370,11 @@ pub(crate) fn jit_any_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
             arith_dispatch_feedback(heap, arm);
             return;
         }
+        // The inline `count` met a receiver only Brood can count.
+        (Some(DeoptReason::CountDeclined), _) => {
+            count_calls_feedback(heap, arm);
+            return;
+        }
         // A register-carried param met another type: at entry, or passed by the loop's own
         // back edge (`SelfCallCarryTag`, KI-410) — either way the slot is polymorphic.
         (Some(DeoptReason::EntryParamTag | DeoptReason::SelfCallCarryTag), slot) => slot,
@@ -455,6 +460,34 @@ fn arith_dispatch_feedback(heap: &Heap, arm: &CompiledArm) {
         if crate::diagnostics::debug_flags::jit_bail_trace() {
             eprintln!(
                 "[jit-relower] arm={} reason=polymorphic-arithmetic: {n} deopts on an int where a float was guessed, or a float where an int was; re-tiering with that arithmetic dispatched by tag",
+                arm.dbg_label()
+            );
+        }
+        reset_arm_untried(heap, arm);
+    }
+}
+
+/// `count-declined` deopts an arm may take before it is re-lowered with `count` a call. Four,
+/// like the arithmetic re-tiers, so it lands before the thrash latch's sixteen.
+const COUNT_CALLS_RELOWER: u32 = 4;
+
+/// The inline `count` declined a receiver whose count only Brood can give (a record's
+/// `Counted`/`Seqable`, a lazy view's realisation): native code cannot run Brood at a primitive,
+/// so each decline deopted, and an arm counting such values every call latched off native code
+/// (`deopt-thrash-latched:count-declined`). After `COUNT_CALLS_RELOWER` of these, flag the arm
+/// and reset it, so its next lowering CALLS the real `count` there — a safepoint like any call,
+/// where the inline answers nothing. Once per arm.
+fn count_calls_feedback(heap: &Heap, arm: &CompiledArm) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if arm.jit_count_calls.load(Relaxed) {
+        return;
+    }
+    let n = arm.jit_count_deopts.fetch_add(1, Relaxed) + 1;
+    if n == COUNT_CALLS_RELOWER {
+        arm.jit_count_calls.store(true, Relaxed);
+        if crate::diagnostics::debug_flags::jit_bail_trace() {
+            eprintln!(
+                "[jit-relower] arm={} reason=count-declined: {n} receivers only Brood can count; re-tiering with `count` a call",
                 arm.dbg_label()
             );
         }

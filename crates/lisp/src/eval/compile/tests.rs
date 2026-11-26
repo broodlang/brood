@@ -1974,6 +1974,48 @@ fn sqrt_call_site_inline_looks_through_a_contract_shim_it_cannot_violate() {
     );
 }
 
+/// ADR-811: `resolve_prim` looks through a contract shim declared exactly `(int int -> int)`
+/// over an op whose inline answers only two ints (`math/rem`: ~300 ns a call armed, 15 unarmed),
+/// and through nothing else — not a narrower declaration, and not an op whose float path would
+/// answer an argument the shim refuses.
+#[test]
+fn int_op_inline_looks_through_a_contract_shim_it_cannot_violate() {
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(require-one 'math)")
+        .expect("load std/math");
+    interp
+        .eval_str("(sig! math/rem (int int -> int))")
+        .expect("force math/rem's own declaration");
+    let bound = interp.eval_str("math/rem").expect("read math/rem back");
+    assert!(
+        crate::builtins::contracts::shim_original(&interp.heap, bound).is_some(),
+        "`sig!` must have bound a contract shim, or this test proves nothing"
+    );
+    assert_eq!(
+        resolve_prim(&interp.heap, value::intern("math/rem")).map(|(op, _)| op),
+        Some(PrimOp::Rem),
+        "a shim declaring (int int -> int) over `%rem` must still inline"
+    );
+    interp
+        .eval_str("(sig! math/rem (int int -> number))")
+        .expect("change the declaration");
+    assert_eq!(
+        resolve_prim(&interp.heap, value::intern("math/rem")).map(|(op, _)| op),
+        None,
+        "any other declaration keeps the call, so the shim's check still runs"
+    );
+    // An op whose inline answers floats is never looked through, whatever the declaration.
+    interp
+        .eval_str("(defn int-add (a:int b:int -> int) (%add a b)) (sig! int-add (int int -> int))")
+        .expect("a contracted wrapper over %add");
+    assert_eq!(
+        resolve_prim(&interp.heap, value::intern("int-add")).map(|(op, _)| op),
+        None,
+        "`%add`'s float path would answer a float the shim refuses"
+    );
+}
+
 /// KI-48: the caller sizes the frame, then `jit_tier` re-loads the code
 /// pointer — and a peer can swap the inlined body in between (`CompiledArm` is shared across
 /// a runtime's processes since ADR-215). Running the inlined native against the small frame

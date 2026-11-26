@@ -222,7 +222,34 @@ pub(super) fn emit_call(
             let local = b.ins().iconst(types::I32, local as i64);
             b.ins().store(MemFlagsData::trusted(), local, heap, offset);
         }
-        b.ins().jump(tailcall, &[]);
+        // A builtin callee is called HERE and its value returned as the arm's own (ADR-811):
+        // the tail exit sent it through the caller's general dispatch, most of a `conj` from
+        // native code. One tag compare for every other callee, which exits as before.
+        let callee_tag_word = match staged_callee {
+            Some(words) => words[0],
+            None => worded[0][0],
+        };
+        let callee_tag = b.ins().band_imm_s(callee_tag_word, 0xff);
+        let is_native = b.ins().icmp_imm_s(
+            IntCC::Equal,
+            callee_tag,
+            crate::core::value::jit_layout::TAG_NATIVE as i64,
+        );
+        let native = b.create_block();
+        b.ins().brif(is_native, native, &[], tailcall, &[]);
+        b.switch_to_block(native);
+        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+        let argc_v = b.ins().iconst(types::I32, argc as i64);
+        let call = b
+            .ins()
+            .call(funcs.tailnat, &[heap, out_addr, argc_v, funcs.ctx]);
+        let status = b.inst_results(call)[0];
+        let returned = b.create_block();
+        b.ins().brif(status, error, &[], returned, &[]);
+        b.switch_to_block(returned);
+        let value = handle_from_out_slot(b, out_slot);
+        super::emit::store_result(b, value, frame.out_ptr, frame);
+        b.ins().jump(frame.done, &[]);
         return Some(Flow::Break);
     }
     // Non-tail: dispatch through the interpreter inline (a safepoint): result →

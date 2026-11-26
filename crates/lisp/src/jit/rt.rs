@@ -1229,6 +1229,57 @@ pub unsafe extern "C" fn brood_rt_call_native_fl(
     }
 }
 
+/// A tail call from native code whose callee is a builtin (ADR-811): `[callee, args…]` are
+/// the top `argc + 1` roots, staged for the tail exit, and the lowering has seen the callee's
+/// `Native` tag. Call it here and answer its value, so the arm returns it itself — the tail
+/// exit (outcome 4) sent every `(defn conj ((coll x) (… (%vector-push coll x) …)))` back
+/// through its caller's general dispatch, most of a `conj` from native code. In tail position
+/// nothing native is live after the call, so a collection the builtin runs is harmless; the
+/// staged roots anchor its arguments, as `brood_rt_call_native_fl`'s do. A collection its
+/// allocation made due runs after it (KI-411). The [`status`] protocol: DONE with the value in
+/// `*out`, ERROR with the error parked.
+///
+/// # Safety
+/// `heap` live; `out` writable; the top `argc + 1` roots are the staged `[callee, args…]`, the
+/// callee a `Value::Native`; `ctx` the running activation's context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn brood_rt_tail_native(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    argc: u32,
+    ctx: *const crate::jit::JitCallCtx,
+) -> i64 {
+    // SAFETY: contracts heap, out and ctx; the staged roots are this call's (`# Safety`).
+    unsafe {
+        crate::jit::JitCallCtx::assert_depth_gateway(ctx, &mut *heap);
+        let h = &mut *heap;
+        let top = h.roots_len();
+        let base = top - argc as usize - 1;
+        let crate::core::value::Value::Native(native) = h.root_at(base) else {
+            let error =
+                crate::error::LispError::type_err("brood_rt_tail_native: callee is not a builtin");
+            return answer_or_park(h, out, Err(error));
+        };
+        let argv: smallvec::SmallVec<[crate::core::value::Value; INLINE_ARGV]> =
+            (base + 1..top).map(|k| h.root_at(k)).collect();
+        let env = h.read_root_env((*ctx).env);
+        let r = crate::eval::call_native(h, native, &argv, env);
+        h.truncate_roots(base);
+        let r = match r {
+            Ok(v) if crate::core::alloc::take_soft_attention() => soft_limit_check(h).map(|()| v),
+            r => r,
+        };
+        let status = answer_or_park(h, out, r);
+        if status == status::DONE {
+            *out = h.collect_if_bytes_spent(*out);
+        } else {
+            // A tail call replaced this arm's frame: its error exit leaves the trace alone.
+            h.jit_tail_native_error = true;
+        }
+        status
+    }
+}
+
 /// The soft-limit half of the VM's `quantum_checks`, for a native arm: measure this process
 /// near the limit; over it, let the selector decide who pays (`process/pressure.rs`).
 #[cold]
@@ -1595,6 +1646,11 @@ pub unsafe extern "C" fn brood_rt_trace_push(
         // read sites, now that the arm is known (`park_unbound`). Taken once, by the innermost
         // arm — the one that made the read.
         let miss_site = std::mem::replace(&mut h.jit_miss_gsite, u32::MAX);
+        // The error came from a builtin this arm called in TAIL position (`brood_rt_tail_native`).
+        // The VM records such a frame by name alone — its tail call replaced the frame, so no
+        // file or position is the caller's — and native code records it the same (ADR-811):
+        // with the file, an error a contract shim's tail call raised named `contract.blsp`.
+        let tail_native = std::mem::take(&mut h.jit_tail_native_error);
         let Some(e) = h.jit_pending_error.as_mut() else {
             return;
         };
@@ -1618,7 +1674,11 @@ pub unsafe extern "C" fn brood_rt_trace_push(
         let arm = &*arm;
         e.push_trace(crate::error::TraceFrame {
             name: arm.fn_name.map(crate::core::value::symbol_name_ref),
-            file: arm.src_file.clone(),
+            file: if tail_native {
+                None
+            } else {
+                arm.src_file.clone()
+            },
             pos: None,
         });
     }

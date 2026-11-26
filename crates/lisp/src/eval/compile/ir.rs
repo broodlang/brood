@@ -709,6 +709,13 @@ pub struct CompiledArm {
     pub jit_arith_dispatch: std::sync::atomic::AtomicBool,
     /// Polymorphic-arithmetic guard deopts (toward `ARITH_DISPATCH_RELOWER`), cumulative.
     pub jit_arith_deopts: std::sync::atomic::AtomicU32,
+    /// Set once the inline `count` declined often enough (`count-declined`: a record, a lazy
+    /// view — a receiver whose count is Brood's to answer): the next lowering calls the real
+    /// `count` there instead of the inline, so the arm stays native rather than deopting until
+    /// the thrash latch switched it off (womanblend's `head-held`, ADR-811).
+    pub jit_count_calls: std::sync::atomic::AtomicBool,
+    /// `count-declined` deopts (toward `COUNT_CALLS_RELOWER`), cumulative.
+    pub jit_count_deopts: std::sync::atomic::AtomicU32,
     /// Free globals this arm reads that held a `Value::Float` when the arm was
     /// enqueued for tiering — the global-read counterpart of the tier-time
     /// `slot_tags` param profile. The profile snapshots the live *frame*, so it
@@ -955,6 +962,8 @@ impl Default for CompiledArm {
             jit_float_deopts: AtomicU32::new(0),
             jit_arith_dispatch: AtomicBool::new(false),
             jit_arith_deopts: AtomicU32::new(0),
+            jit_count_calls: AtomicBool::new(false),
+            jit_count_deopts: AtomicU32::new(0),
             float_globals: OnceLock::new(),
             self_global_ok: AtomicBool::new(false),
             // Sentinel: no binding validated yet.

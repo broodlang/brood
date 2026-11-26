@@ -1,0 +1,35 @@
+;;; `=` with a float operand in native code (ADR-811, `float_equal` in jit_lower/prim.rs).
+;;; Brood's `=` is structural: on two floats it is IEEE equality (`0.0` equals `-0.0`, a NaN
+;;; equals nothing), and an int never equals a float (`(= 2.0 2)` is false). A float operand
+;;; sent `=` to the float path, which bailed the whole arm (`float-eq-mixed-int-float-unsafe`:
+;;; womanblend's `asked`, `drift-of`, `wanted`). Now two certain floats compare unboxed and any
+;;; other pair by structure at runtime. Each arm settles NATIVE before its answers are checked.
+
+(defmodule jit-float-equal-test (:use test) (:use suite-helpers))
+
+(def- fe-v [:same :differ])
+
+(defn fe-floats (x y) (if (= (* x 1.0) (* y 1.0)) (nth fe-v 0) (nth fe-v 1)))
+(defn fe-mixed (x y) (if (= (* x 1.0) y) (nth fe-v 0) (nth fe-v 1)))
+(defn fe-zero (x) (if (= (* x 1.0) 0) (nth fe-v 0) (nth fe-v 1)))
+
+(defn- fe-drive (f args i) (when (> i 0) (apply f args) (fe-drive f args (- i 1))))
+
+(describe "= with a float in native code"
+  (test "two certain floats: IEEE equality"
+    (assert-settles-native fe-floats 2 (fn () (fe-drive fe-floats [1.5 1.5] 300)))
+    (assert= :same (fe-floats 1.5 1.5))
+    (assert= :differ (fe-floats 1.5 2.5))
+    (assert= :same (fe-floats 0.0 -0.0))
+    (assert= :differ (fe-floats nan nan)))
+
+  (test "a float beside an operand of either kind: structural"
+    (assert-settles-native fe-mixed 2 (fn () (fe-drive fe-mixed [1.5 1.5] 300)))
+    (assert= :same (fe-mixed 2.0 2.0))
+    (assert= :differ (fe-mixed 2.0 2))
+    (assert= :differ (fe-mixed 2.0 :two)))
+
+  (test "a float beside an int literal is never equal"
+    (assert-settles-native fe-zero 1 (fn () (fe-drive fe-zero [1.5] 300)))
+    (assert= :differ (fe-zero 0.0))
+    (assert= :differ (fe-zero 1.0))))

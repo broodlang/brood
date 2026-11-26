@@ -1726,6 +1726,10 @@ pub(crate) mod jit_layout {
     /// code and `true` everywhere else (KI-178). Pinned by the layout test.
     pub const TAG_RANGE: u8 = 11;
     pub const TAG_SEQVIEW: u8 = 12;
+    /// `Value::Native`'s discriminant (`… Map=13, Fn=14, Macro=15, Native=16`): a native tail
+    /// call tests its callee's byte against this to call a builtin in place (ADR-811). Pinned
+    /// by the layout test.
+    pub const TAG_NATIVE: u8 = 16;
 
     /// Discriminant-byte → `type-of` keyword id, for the JIT's `PrimOp1::TypeOf`
     /// lowering: one `u32` load indexed by a value's tag byte replaces the whole
@@ -2014,6 +2018,11 @@ mod jit_layout_tests {
                 Value::SeqView(VecId::local_gen(0, 0)),
                 jit_layout::TAG_SEQVIEW,
                 "Value::SeqView",
+            ),
+            (
+                Value::Native(NativeId::local(0)),
+                jit_layout::TAG_NATIVE,
+                "Value::Native",
             ),
         ] {
             // SAFETY: as for `pbytes` — `v` is a live local of `size_of::<Value>()` bytes;

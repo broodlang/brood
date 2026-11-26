@@ -1,0 +1,27 @@
+;;; A builtin in TAIL position, called in place by native code (ADR-811,
+;;; `brood_rt_tail_native`): its value is the arm's own, and an error it raises reads as the
+;;; VM's does. The VM records the frame a tail call replaced by name alone (no file, no
+;;; position); native code recorded its file too, so an error a contract shim's tail call raised
+;;; carried a frame in `contract.blsp` (`contract_dispatch_test`, under the armed suite once the
+;;; contract module had gone native). The arm settles NATIVE first, so the in-place path runs.
+
+(defmodule jit-tail-builtin-test (:use test) (:use suite-helpers))
+
+(def- tb-v [1 2])
+
+(defn tb-tail (s i) (if (< i 0) (nth tb-v 0) (string/substring s 0 i)))
+(defn- tb-drive (i) (when (> i 0) (tb-tail "hello" 3) (tb-drive (- i 1))))
+
+(describe "a builtin in tail position from native code"
+  (test "its value is the arm's"
+    (assert-settles-native tb-tail 2 (fn () (tb-drive 300)))
+    (assert= "hel" (tb-tail "hello" 3))
+    (assert= "" (tb-tail "hello" 0))
+    (assert= 1 (tb-tail "hello" -1)))
+
+  (test "its error's trace names the arm as the VM does: by name, with no file"
+    (tb-drive 300)
+    (let (error (try (tb-tail "hello" 99) (catch error error))
+          frames (get error :trace))
+      (is (any? frames (fn (frame) (string/ends-with? (->string (get frame :fn)) "tb-tail"))))
+      (is (not (any? frames (fn (frame) (get frame :file))))))))

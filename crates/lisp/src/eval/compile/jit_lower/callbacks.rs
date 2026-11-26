@@ -51,6 +51,7 @@ pub(super) struct CallbackIds {
     table_get: FuncId,
     map_get: FuncId,
     set_has: FuncId,
+    tail_native: FuncId,
     vector_len: FuncId,
     count: FuncId,
     equal: FuncId,
@@ -106,6 +107,7 @@ pub(super) struct CallbackRefs {
     pub(super) table_get: FuncRef,
     pub(super) map_get: FuncRef,
     pub(super) set_has: FuncRef,
+    pub(super) tail_native: FuncRef,
     pub(super) vector_len: FuncRef,
     pub(super) count: FuncRef,
     pub(super) equal: FuncRef,
@@ -334,6 +336,13 @@ pub(super) fn declare_callbacks(module: &mut JITModule, pointer: Type) -> Option
     let map_get = import(module, "brood_rt_map_get", &pair_signature)?;
     // brood_rt_set_has(heap, out, set 3 words, element 3 words) -> status: `map_get`'s shape.
     let set_has = import(module, "brood_rt_set_has", &pair_signature)?;
+    // brood_rt_tail_native(heap, out, argc, ctx) -> status: a tail call to a builtin, called in
+    // place on the staged [callee, args] (ADR-811).
+    let tail_native = import(
+        module,
+        "brood_rt_tail_native",
+        &signature(module, &[pointer, pointer, i32, pointer], &[i64]),
+    )?;
     // brood_rt_vector_len(heap, vec 3 words) -> len, or -1 for a non-vector (deopt).
     let vector_len = import(
         module,
@@ -424,6 +433,7 @@ pub(super) fn declare_callbacks(module: &mut JITModule, pointer: Type) -> Option
         table_get,
         map_get,
         set_has,
+        tail_native,
         vector_len,
         count,
         equal,
@@ -486,6 +496,7 @@ pub(super) fn import_callbacks(
     let table_get = declare(ids.table_get, b.func);
     let map_get = declare(ids.map_get, b.func);
     let set_has = declare(ids.set_has, b.func);
+    let tail_native = declare(ids.tail_native, b.func);
     let vector_len = declare(ids.vector_len, b.func);
     let count = declare(ids.count, b.func);
     let equal = declare(ids.equal, b.func);
@@ -536,6 +547,7 @@ pub(super) fn import_callbacks(
         table_get,
         map_get,
         set_has,
+        tail_native,
         vector_len,
         count,
         equal,

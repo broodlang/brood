@@ -608,6 +608,7 @@ fn jit_lower_arm_inner(
         .collect();
     let frame = emit::Frame {
         out_ptr,
+        done: leader_block[len].or_bail("jump-target-not-a-leader")?,
         rb_var,
         base,
         nslots,
@@ -619,6 +620,9 @@ fn jit_lower_arm_inner(
         float_context: has_float_slot,
         arith_dispatch: arm
             .jit_arith_dispatch
+            .load(std::sync::atomic::Ordering::Relaxed),
+        count_calls: arm
+            .jit_count_calls
             .load(std::sync::atomic::Ordering::Relaxed),
         blockarg_spill_base,
         blockarg_spill_len,
@@ -806,6 +810,7 @@ fn jit_lower_arm_inner(
         tget: callbacks.table_get,
         mget: callbacks.map_get,
         shas: callbacks.set_has,
+        tailnat: callbacks.tail_native,
         vlen: callbacks.vector_len,
         count: callbacks.count,
         equal: callbacks.equal,
@@ -965,6 +970,40 @@ fn jit_lower_arm_inner(
                     stack.pop().or_bail("operand-stack-underflow")?;
                 }
                 Inst::SetLocal(slot) => load::emit_set_local(&mut b, &mut stack, *slot, frame)?,
+                // `count` re-tiered as a call (ADR-811): the callee — the head's current binding,
+                // read uncached — goes beneath the operand, and an ordinary computed call runs
+                // it. Computed, not by name, because a name call keys an inline-cache site this
+                // instruction does not own.
+                Inst::Prim1 {
+                    op: PrimOp1::Count,
+                    head,
+                    ..
+                } if frame.count_calls => {
+                    let operand = stack.pop().or_bail("operand-stack-underflow")?;
+                    load::emit_global_read(&mut b, &mut stack, *head, None, &global_reads, frame);
+                    stack.push(operand);
+                    match call::emit_call(
+                        &mut b,
+                        &mut stack,
+                        &mut spill_next,
+                        1,
+                        false,
+                        NO_SITE,
+                        None,
+                        None,
+                        0,
+                        spill_base,
+                        call_spill_capacity,
+                        epoch_ptr,
+                        tailcall,
+                        unwindable.then_some(j),
+                        frame,
+                        funcs,
+                    )? {
+                        call::Flow::Break => break,
+                        call::Flow::Fall => {}
+                    }
+                }
                 Inst::Prim1 { op, .. } => {
                     prim::emit_prim1(&mut b, &mut stack, op, pair_bases, frame, funcs)?;
                 }

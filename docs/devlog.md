@@ -3016,3 +3016,12 @@ bailed `mkclo-spill-exhausted`). `MAX_CONTACTS` 16 → 64 (womanblend's room + b
 used, and a test now holds the shader's literal sizes to the constant. Run: the touched suites
 both ways (471/471, 36/36), the GPU/CPU contact tests (41/41), clippy on CI's flags.
 
+2026-11-26. **The rest of womanblend's native-code gaps (ADR-811).** `count` of a record re-tiers
+as a call after four declines instead of latching (`head-held`); `=` with a float lowers (IEEE on
+two floats, structural otherwise) instead of bailing (`asked`, `drift-of`, `wanted`); a contract
+shim declared `(int int -> int)` over `%rem`/`%quot`/bit ops is looked through (armed `math/rem`
+301 → 14 ns); and a tail call to a builtin is called in place and its value returned, not sent
+back through the caller's dispatch. Guards: `jit_count_call_test`, `jit_float_equal_test`, the
+`resolve_prim` look-through test; each run in both contract modes. Run: `make test` and the
+armed suite on the final tree.
+
