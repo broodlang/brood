@@ -8,7 +8,8 @@
 (defmodule sequence-test
   (:use test)
   (:use seq)
-  (:use math))
+  (:use math)
+  (:use suite-helpers))
 
 (describe "range"
   (test "(range hi) counts 0..hi-1"
@@ -514,7 +515,40 @@
   (test "both accept any seqable source"
     (assert= [1 2 3] (seq/mapv (range 3) inc))
     (assert= [0 2 4] (seq/filterv (range 6) even?))
-    (assert= [10 20] (seq/mapv [1 2] (fn (x) (* x 10))))))
+    (assert= [10 20] (seq/mapv [1 2] (fn (x) (* x 10)))))
+
+  ;; A vector is walked by index straight into the result (`%mapv-vector`, a self-tail loop
+  ;; that stays native); every other collection goes through `map`.
+  (test "mapv over a vector keeps order, calls f once an item, and gives []  for []"
+    (assert= [] (seq/mapv [] inc))
+    (assert= ["a!" "b!" "c!"] (seq/mapv ["a" "b" "c"] (fn (text) (str text "!"))))
+    (assert= [[0 :x] [1 :y]] (seq/mapv [[0 :x] [1 :y]] identity))
+    ;; a non-number reaching `+` raises from inside the loop, as it did through `map`
+    (check-allow :type-mismatch
+      (assert= :raised (try (seq/mapv [1 :two 3] (fn (item) (+ item 1))) (catch _ :raised)))))
+
+  (test "mapv over a vector runs natively, without the map and into round trip"
+    (when (%native-tier?)
+      (assert-settles-native %mapv-vector
+        5
+        (fn () (seq/mapv [1.0 2.0 3.0] (fn (item) (* item 2.0)))))
+      (fold (range 2000) nil (fn (_ _) (seq/mapv [1.0 2.0 3.0] (fn (item) (* item 2.0)))))
+      (assert= :native (get (%jit-arm-state %mapv-vector 5) :state)))))
+
+(describe "mapv across processes"
+  (test "workers mapping a shared vector each build the same vector, sent back whole"
+    (let (me (self)
+          source (into [] (range 64))
+          workers (map (range 8)
+                    (fn (worker)
+                      (spawn (fn ()
+                               (send me
+                                 [:mapped worker (seq/mapv source (fn (item) (* item worker)))])))))
+          replies (map workers (fn (_) (receive ([:mapped worker built] [worker built])))))
+      (assert= 8 (count replies))
+      (is (every? replies
+            (fn ([worker built])
+              (and (vector? built) (= built (into [] (map source (fn (item) (* item worker))))))))))))
 
 ;; `fold` over a VECTOR takes an indexed fast path (`fold-vec`) rather than the generic
 ;; `first`/`rest` walk, because `(rest v)` on a vector materialises a list of the tail —

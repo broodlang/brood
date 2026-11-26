@@ -3076,3 +3076,16 @@ by default; the white lit by the skin model's scattering. A skin's `:wrinkles` l
 by eight zones' masks and weights; textures that are numbers upload `:data` (raw, never
 premultiplied). Both painters alike to the pixel (the wrinkle test: 139 against 211 on the CPU and
 both adapters).
+
+2026-11-26. **`seq/mapv` over a vector, natively.** From b3d's hair and springs profiles, where
+`seq/mapv` → `map` → `into` was most of the frame: `mapv` was `(into [] (map coll f))`, six
+calls the JIT keeps on the VM (`seq/mapv`, `map`, `into`, `seq`, `reverse`,
+`%expect-collection`, each `call-mediated-boxed`) and two throwaway lists. A vector is now
+walked by index straight into the result (`%mapv-vector`, a self-tail loop that lowers, `conj`
+appending in place, ADR-511); every other collection goes through `map` as before. A 3-element
+`mapv` 3.2 → 0.95 µs, 24 elements 6.6 → 4.8 µs, 176 even (the per-element `conj` dominates);
+b3d's hair frame ~6% faster. Measured and dropped on the way: lifting the `call-mediated-boxed`
+gate for named defns (a tiny callee 200 → 15 ns, but b3d's FK +20%, springs +12%: §7.1's verdict
+stands), judging the gate on an arm's leaf derivation (no b3d arm has one that helps), and not
+counting calls to builtins (31 more arms lowered, no frame-time win). Guard: `sequence_test`'s
+native check on `%mapv-vector` (sabotaged red in both contract modes) and a cross-process mapv.
