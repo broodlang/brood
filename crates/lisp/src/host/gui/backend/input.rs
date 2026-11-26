@@ -47,6 +47,9 @@ pub(super) fn mouse_message(m: &Mouse) -> Message {
         MouseAction::Move => "move",
         MouseAction::ScrollUp => "scroll-up",
         MouseAction::ScrollDown => "scroll-down",
+        MouseAction::ScrollLeft => "scroll-left",
+        MouseAction::ScrollRight => "scroll-right",
+        MouseAction::Pinch => "pinch",
     };
     let button = match m.button {
         Some(MouseButton::Left) => Message::Keyword(value::intern("left")),
@@ -174,6 +177,46 @@ pub(super) fn deliver_scroll(w: &Win, dy: f64) {
             shift: w.mods.shift_key(),
             count: 0,
             scroll_dy: dy.abs(),
+            at: w.pointer_at(),
+            partial: w.pointer_partial(),
+        }),
+    );
+}
+
+/// Deliver a trackpad's sideways scroll: `dx > 0` is `:scroll-left` (as `dy > 0` is `:scroll-up`),
+/// its size in line units in the 7th slot. No momentum: it is rare enough sideways.
+pub(super) fn deliver_scroll_x(w: &Win, dx: f64) {
+    deliver_motion(
+        w,
+        if dx > 0.0 {
+            MouseAction::ScrollLeft
+        } else {
+            MouseAction::ScrollRight
+        },
+        dx.abs(),
+    );
+}
+
+/// Deliver a trackpad pinch: `:pinch` with its delta in the 7th slot, positive as the fingers
+/// spread (zoom in), negative as they close.
+pub(super) fn deliver_pinch(w: &Win, delta: f64) {
+    deliver_motion(w, MouseAction::Pinch, delta);
+}
+
+fn deliver_motion(w: &Win, action: MouseAction, amount: f64) {
+    let (col, row) = w.cursor;
+    deliver(
+        w.subscriber,
+        mouse_message(&Mouse {
+            action,
+            button: None,
+            row,
+            col,
+            ctrl: w.mods.control_key(),
+            alt: w.mods.alt_key(),
+            shift: w.mods.shift_key(),
+            count: 0,
+            scroll_dy: amount,
             at: w.pointer_at(),
             partial: w.pointer_partial(),
         }),
@@ -744,6 +787,39 @@ mod tests {
         match &mut mouse_message(&m) {
             Message::Vector(v) => std::mem::take(v),
             _ => panic!("a mouse message is a vector"),
+        }
+    }
+
+    #[test]
+    fn a_sideways_scroll_and_a_pinch_name_their_action_and_carry_their_amount() {
+        // `:scroll-left` / `:scroll-right` and `:pinch`, the amount in the 7th slot as a scroll's
+        for (action, name, amount) in [
+            (MouseAction::ScrollLeft, "scroll-left", 1.5),
+            (MouseAction::ScrollRight, "scroll-right", 0.5),
+            (MouseAction::Pinch, "pinch", -0.02),
+        ] {
+            let m = Mouse {
+                action,
+                button: None,
+                row: 3,
+                col: 7,
+                ctrl: false,
+                alt: false,
+                shift: false,
+                count: 0,
+                scroll_dy: amount,
+                at: None,
+                partial: false,
+            };
+            let v = match &mut mouse_message(&m) {
+                Message::Vector(v) => std::mem::take(v),
+                _ => panic!("a mouse message is a vector"),
+            };
+            assert!(
+                matches!(&v[1], Message::Keyword(k) if *k == value::intern(name)),
+                "{name}"
+            );
+            assert!(matches!(v[6], Message::Float(f) if f == amount), "{name}");
         }
     }
 

@@ -503,12 +503,15 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             WindowEvent::MouseInput { state, .. } => {
                 (*state == ElementState::Pressed).then_some(InputKind::Pointer)
             }
-            // a horizontal-only wheel event scrolls nothing here, so no frame answers it
+            // (a sideways scroll is input too: `:scroll-left`, `:scroll-right`; and a pinch)
             WindowEvent::MouseWheel { delta, .. } => match delta {
-                MouseScrollDelta::LineDelta(_, y) => *y != 0.0,
-                MouseScrollDelta::PixelDelta(position) => position.y != 0.0,
+                MouseScrollDelta::LineDelta(x, y) => *y != 0.0 || *x != 0.0,
+                MouseScrollDelta::PixelDelta(position) => position.y != 0.0 || position.x != 0.0,
             }
             .then_some(InputKind::Pointer),
+            WindowEvent::PinchGesture { delta, .. } => {
+                (*delta != 0.0).then_some(InputKind::Pointer)
+            }
             // an input method's commit is typing, whatever the keyboard did
             WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
                 (!text.is_empty()).then_some(InputKind::Key)
@@ -889,6 +892,15 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 // it fires once per event-loop cycle after the queue is drained — no
                 // flooding, no background thread.
                 let ch = w.renderer.cell_h.max(1);
+                // (its sideways part, a trackpad's two fingers across or a tilted wheel: delivered as
+                // it comes, `:scroll-left` / `:scroll-right`, before the vertical part's handling)
+                let dx = match delta {
+                    MouseScrollDelta::LineDelta(x, _) => x as f64,
+                    MouseScrollDelta::PixelDelta(p) => p.x / w.renderer.cell_w.max(1) as f64,
+                };
+                if dx != 0.0 {
+                    deliver_scroll_x(w, dx);
+                }
                 match delta {
                     MouseScrollDelta::LineDelta(_, y) => {
                         // `{:wheel :glide}`: a notch is an IMPULSE into the kinetic scroll a
@@ -992,6 +1004,13 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                             }
                         }
                     }
+                }
+            }
+            WindowEvent::PinchGesture { delta, .. } => {
+                // a trackpad pinch (`:pinch`, positive as the fingers spread): where a stack sends
+                // one; others send Ctrl+scroll, which `:mouse-mods` already carries
+                if delta != 0.0 {
+                    deliver_pinch(w, delta);
                 }
             }
             WindowEvent::RedrawRequested => {

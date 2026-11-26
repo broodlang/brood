@@ -1484,6 +1484,12 @@ pub enum MouseAction {
     Move,
     ScrollUp,
     ScrollDown,
+    /// A trackpad's sideways scroll (`:scroll-left` for a positive x, as `:scroll-up` is a
+    /// positive y), its line delta in the 7th slot as a scroll's.
+    ScrollLeft,
+    ScrollRight,
+    /// A trackpad pinch (`:pinch`), its delta in the 7th slot: positive as the fingers spread.
+    Pinch,
 }
 
 /// A mouse event at a character-cell position; the Brood side turns it into a
