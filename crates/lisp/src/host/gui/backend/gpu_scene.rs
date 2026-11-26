@@ -848,7 +848,9 @@ fn contacts_past_sixteen_press_and_drag_alike_on_both_painters() {
     alone.contact_drags = vec![drag];
     // the 21: the ball at slot 4, an `:only` (joint 0) at 17 and 20, a `:within` at 19
     let mut many = scene.clone();
-    many.contacts = (0..21).map(|slot| if slot == 4 { ball } else { far }).collect();
+    many.contacts = (0..21)
+        .map(|slot| if slot == 4 { ball } else { far })
+        .collect();
     many.contact_drags = (0..21)
         .map(|slot| if slot == 4 { drag } else { [0.0; 3] })
         .collect();
@@ -862,7 +864,13 @@ fn contacts_past_sixteen_press_and_drag_alike_on_both_painters() {
         })
         .collect();
     many.contact_withins = (0..21)
-        .map(|slot| if slot == 19 { [1.0, 0.0, 0.0, 0.0] } else { [0.0; 4] })
+        .map(|slot| {
+            if slot == 19 {
+                [1.0, 0.0, 0.0, 0.0]
+            } else {
+                [0.0; 4]
+            }
+        })
         .collect();
     let plain = scene.clone();
     let meshes = |handle: u32| (handle == 1).then(|| slab.clone());
@@ -887,7 +895,10 @@ fn contacts_past_sixteen_press_and_drag_alike_on_both_painters() {
     let dent = difference(&cpu_alone, 4, &cpu_plain, 4);
     let many_from_alone = difference(&cpu_many, 4, &cpu_alone, 4);
     eprintln!("CPU: the ball's dent {dent}; the 21 from the ball alone {many_from_alone}");
-    assert!(dent > 500, "the ball alone dents the slab on the CPU painter ({dent})");
+    assert!(
+        dent > 500,
+        "the ball alone dents the slab on the CPU painter ({dent})"
+    );
     assert_eq!(
         many_from_alone, 0,
         "the CPU painter: the 21 contacts draw as the ball alone: slot 4 pressed and dragged past slot 16's :only and :within"
