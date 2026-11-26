@@ -166,6 +166,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "name each arm the profitability gate refuses, and why — the complement of DUMP_IR; `[jit-relower]` lines say when deopt feedback re-tiers an arm (a polymorphic param boxed, or float context for floats read out of vectors, ADR-378), and a `deopt-thrash-latched` line carries its `last-deopt` reason",
     ),
     f(
+        "BROOD_PERF_MAP",
+        JIT,
+        "`=1`: append each native arm to `/tmp/perf-<pid>.map` (`address size name`), the file `perf report` reads to name JIT code — so a profile attributes native time to Brood functions by name, sampled by the kernel, with nothing in the program changed (`brood:` + the arm's name, its file for a `fn`)",
+    ),
+    f(
         "BROOD_DEOPT_TRACE",
         JIT,
         "print each type-deopt's arm and the guard that fired (`reason=<name>`, a `DeoptReason` — one per guard site) — finds an arm that lowers and then keeps falling back; needs `make perf-brood`",
@@ -727,6 +732,12 @@ const NON_FLAGS: &[&str] = &[
 pub fn jit_bail_trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     is_set(&ON, "BROOD_JIT_BAIL_TRACE")
+}
+
+/// `BROOD_PERF_MAP` is set — read once, at each native arm's install.
+pub fn perf_map() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    is_set(&ON, "BROOD_PERF_MAP")
 }
 
 /// `BROOD_TRACE_COMPILE` is set — read once. Asked on every closure compile and at each
