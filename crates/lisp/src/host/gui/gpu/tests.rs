@@ -164,8 +164,12 @@ fn the_mesh_shader_validates() {
     );
     assert_eq!(
         scenes::VERTEX_FLOATS,
-        26,
-        "a vertex carries its curvature, its centre of rotation and its second UV set"
+        27,
+        "a vertex carries its curvature, its centre of rotation, its second UV set and its lag weight"
+    );
+    assert!(
+        MESH_SRC.contains("let at = index * 27u;"),
+        "the shader reads a vertex at the stride it is packed"
     );
     assert!(MESH_SRC.contains("@location(6) curvature: f32"));
     // ADR-797: `draw_uniform` packs exactly the struct the shader declares, the detail tile's

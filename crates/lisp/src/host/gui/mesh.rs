@@ -271,6 +271,9 @@ pub struct Mesh {
     /// Its second UV set (glTF's TEXCOORD_1, `:uvs2`, ADR-817), what `:wrinkles {:uv 1}` reads its
     /// maps by; its first set where it has none.
     pub uvs2: Vec<[f32; 2]>,
+    /// How much of its draw's lag each vertex takes (`:loose-weight`, ADR-823), 0 … 1; empty: all
+    /// of it.
+    pub loose_weight: Vec<f32>,
     /// Tangents with the bitangent's sign in `w` (glTF's convention), for a normal map.
     pub tangents: Option<Vec<[f32; 4]>>,
     /// The four joints each vertex is skinned to (indices into a draw's palette) and their
@@ -498,6 +501,9 @@ pub struct MeshParts {
     pub uvs: Vec<u8>,
     /// A second UV set, 2 f32 a vertex (`:uvs2`, ADR-817); empty: the first set again.
     pub uvs2: Vec<u8>,
+    /// How much of its draw's lag (`:loose`) each vertex takes, 1 f32 a vertex, 0 … 1
+    /// (`:loose-weight`, ADR-823); empty: all of it.
+    pub loose_weight: Vec<u8>,
     pub tangents: Vec<u8>,
     /// `u8` or `u16` joint indices, four a vertex, per `joints_wide`.
     pub joints: Vec<u8>,
@@ -581,6 +587,14 @@ impl Mesh {
             uvs.clone()
         } else {
             floats::<2>("uvs2", &parts.uvs2, count)?
+        };
+        let loose_weight = if parts.loose_weight.is_empty() {
+            Vec::new()
+        } else {
+            floats::<1>("loose-weight", &parts.loose_weight, count)?
+                .into_iter()
+                .map(|[value]| value.clamp(0.0, 1.0))
+                .collect()
         };
         let tangents = if parts.tangents.is_empty() {
             // (a strand mesh's baked self-shadow in their place, ADR-813: strands never read tangents)
@@ -780,6 +794,7 @@ impl Mesh {
             normals,
             uvs,
             uvs2,
+            loose_weight,
             tangents,
             joints,
             weights,
@@ -9671,6 +9686,34 @@ mod tests {
 
     /// ADR-817: a zone's mask times its weight lays the compress map's tilt where the weight is
     /// above 0 and the stretch map's where it is below; another zone's mask does nothing for it.
+    #[test]
+    fn a_mesh_reads_how_much_of_its_lag_each_vertex_takes_clamped() {
+        // (ADR-823) given, each vertex's share kept within 0 … 1; not given, none kept (all of it)
+        let bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let base = MeshParts {
+            positions: bytes(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+            normals: bytes(&[0.0, 0.0, 1.0].repeat(3)),
+            ..MeshParts::default()
+        };
+        let weighted = Mesh::from_parts(MeshParts {
+            loose_weight: bytes(&[0.5, 1.5, -1.0]),
+            ..base.clone()
+        })
+        .expect("weighted");
+        assert_eq!(weighted.loose_weight, vec![0.5, 1.0, 0.0]);
+        assert!(
+            Mesh::from_parts(base)
+                .expect("plain")
+                .loose_weight
+                .is_empty()
+        );
+    }
+
     #[test]
     fn a_morph_target_given_sparse_is_the_one_given_dense() {
         // four vertices; one target moving vertex 2 alone, given whole (every vertex) and given

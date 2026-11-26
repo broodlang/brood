@@ -13,7 +13,7 @@ use crate::host::gui::mesh::{
 
 /// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4,
 /// curvature 1.
-pub(super) const VERTEX_FLOATS: usize = 26;
+pub(super) const VERTEX_FLOATS: usize = 27;
 
 /// A `:fibres` mesh casts its shadow from one strand in this many (its triangles ordered by each
 /// strand's random number, so the first share is an even choice), each drawn this many times as
@@ -567,7 +567,8 @@ impl MeshGpu {
                 5 => Float32x4,
                 6 => Float32,
                 7 => Float32x3,
-                8 => Float32x2
+                8 => Float32x2,
+                9 => Float32
             ],
         });
         // a colour pipeline: its faces, whether it blends, and its fragment entry, depth state and
@@ -948,6 +949,14 @@ impl MeshGpu {
             ));
             // its second UV set (ADR-817)
             vertices.extend(floats_bytes(&mesh.uvs2[index]));
+            // how much of its draw's lag it takes (ADR-823; all when the mesh gives none)
+            vertices.extend(
+                mesh.loose_weight
+                    .get(index)
+                    .copied()
+                    .unwrap_or(1.0)
+                    .to_le_bytes(),
+            );
         }
         let vertex_buffer = buffer(
             device,

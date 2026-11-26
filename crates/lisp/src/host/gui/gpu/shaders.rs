@@ -814,9 +814,9 @@ fn contact_within(slot: u32, point: vec3<f32>) -> f32 {
     return smoothstep(0.0, WITHIN_BAND, dot(within.xyz, point) - within.w);
 }
 
-// a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 26 a vertex)
+// a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 27 a vertex)
 fn vertex_at(index: u32) -> VertexIn {
-    let at = index * 26u;
+    let at = index * 27u;
     var input: VertexIn;
     input.index = index;
     input.position = vec3<f32>(mesh_vertices[at], mesh_vertices[at + 1u], mesh_vertices[at + 2u]);
@@ -828,6 +828,7 @@ fn vertex_at(index: u32) -> VertexIn {
     input.curvature = mesh_vertices[at + 20u];
     input.centre = vec3<f32>(mesh_vertices[at + 21u], mesh_vertices[at + 22u], mesh_vertices[at + 23u]);
     input.uv2 = vec2<f32>(mesh_vertices[at + 24u], mesh_vertices[at + 25u]);
+    input.loose_weight = mesh_vertices[at + 26u];
     return input;
 }
 
@@ -861,7 +862,7 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     var world = (posed.matrix * vec4<f32>(posed.position, 1.0)).xyz;
     // its soft flesh toward where its bones' followers carry it (`mesh::pose_vertices`, ADR-812)
     if (draw.loose.x > 0.0) {
-        let share = clamp(contact_softness(id.x) * draw.loose.x, 0.0, 1.0);
+        let share = clamp(contact_softness(id.x) * draw.loose.x * input.loose_weight, 0.0, 1.0);
         if (share > 0.0) {
             world = world + (loose_world(input, posed.position, world) - world) * share;
         }
@@ -990,6 +991,8 @@ struct VertexIn {
     @location(7) centre: vec3<f32>,
     // its second UV set (ADR-817)
     @location(8) uv2: vec2<f32>,
+    // how much of its draw's lag it takes (ADR-823; the contact passes, which draw the lag)
+    @location(9) loose_weight: f32,
 };
 struct VertexOut {
     // invariant: the hair's depth pass and its front pass must put a sample at the same depth
