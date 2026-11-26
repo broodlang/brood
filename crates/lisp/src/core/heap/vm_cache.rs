@@ -919,7 +919,8 @@ impl Heap {
     /// plain map always answers: the value, or `nil` on a miss (absent key, or a stored `nil`
     /// — treated alike by `get`), exactly what `%map-get` gives. A **record** answers a field
     /// it holds (non-nil); its miss declines, since only `get`'s `%lookup-miss` consults the
-    /// `Lookup` ability a custom-collection record answers through. Anything else declines.
+    /// `Lookup` ability a custom-collection record answers through. A vector answers an
+    /// integer index (the element, or `nil` out of range). Anything else declines.
     /// A plain map's miss pays no second probe (before ADR-542 every miss looked for a hidden
     /// `:__id__`).
     pub fn map_get_inline(&self, coll: Value, k: Value) -> Option<Value> {
@@ -932,6 +933,12 @@ impl Heap {
             // key. Declined, an optional `opts` left nil deopted every read of it until the
             // arm latched off the JIT (`regex-opts-pattern`, `table-read-declined`).
             Value::Nil => Some(Value::nil()),
+            // A vector at an integer index: the element, or `nil` out of range, `get`'s
+            // `(nth coll k nil)`. Declined, every `get-in` through a vector (`[:joints index
+            // :extras]`) left native code at its middle step: b3d's hair took ~50 such deopts a
+            // frame (`%get-in-walk`, `table-read-declined`). A non-integer key still declines,
+            // so the prelude `get` raises its type error.
+            Value::Vector(_) => self.nth3_inline(coll, k, Value::nil()),
             _ => None,
         }
     }
@@ -950,6 +957,8 @@ impl Heap {
             }
             // `(get nil k default)` is `default`, as `map_get_inline` answers nil for nil.
             Value::Nil => Some(default),
+            // A vector at an integer index, the default out of range, as `map_get_inline`.
+            Value::Vector(_) => self.nth3_inline(coll, k, default),
             _ => None,
         }
     }

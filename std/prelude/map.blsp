@@ -275,32 +275,38 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
 ;; A step answers the way `get` does, so a vector along the path is indexed by
 ;; position — `(get-in {:a [1 2]} [:a 1])` is 2, as `(get (get m :a) 1)` is — and
 ;; `assoc-in` keeps a vector a vector rather than turning it into `{1 …}`.
-;; A map that lacks `k` may still answer it: a record's contents are its `Lookup`, as
-;; `get`'s are (KI-298).
-(defn- %get-in-has? (m k)
-  (cond
-    (or (map? m) (%record? m)) (or (contains? m k) (not (nil? (%lookup-miss m k nil))))
-    (set? m) (%set-has? m k)
-    (int? k)
-      (if (or (vector? m) (pair? m) (string? m) (bytes? m))
-        (and (>= k 0) (< k (count m)))
-        false)
-    else false))
+;; `get-in`'s walk. A step looks `k` up in `m` only where `get` can: a map, a record or a set
+;; by any key, a vector, list, string or bytes by an integer position; any other node, or a
+;; wrong-typed key, ends the walk at the default instead of raising `get`'s type error.
+;;
+;; The step is ONE 3-arity `get` with a sentinel default, which the VM and native code answer
+;; inline for a map, a record's field, nil and a vector (`map_get3_inline`); a record's miss
+;; still reaches `get`'s `Lookup` (KI-298). A sentinel back is a miss unless the key holds
+;; that very value, which a second, different sentinel tells apart, so a stored value never
+;; passes for absence. The kind test is written out here, not in a helper: this self-tail loop
+;; lowers to native code, and a named helper it calls is kept on the VM (`call-mediated-boxed`)
+;; at ~1 µs a crossing. It was a has-then-get pair through `contains?`, two such helpers a
+;; step: a three-key path cost ~2.6 µs.
 (defn- %get-in-walk (m path default)
-  (cond
-    (empty? path) m
-    (%get-in-has? m (first path))
-      (%get-in-walk (get m (first path))
-        (rest path)
-        default)
-    else default))
-(defn map/get-in (m path & default)
-  "The value in nested collections `m` at the key sequence `path`, or `default` (else `nil`) if any key along the way is absent. Each step looks up the way `get` does — a map by key, a vector, list or string by integer position. `(map/get-in m ())` is `m`.
+  (if (empty? path)
+    m
+    (let (k (first path))
+      (if (or (map? m)
+            (%record? m)
+            (set? m)
+            (and (int? k) (or (vector? m) (pair? m) (string? m) (bytes? m))))
+        (let (found (get m k :%get-in-miss-a))
+          (if (and (= found :%get-in-miss-a) (= (get m k :%get-in-miss-b) :%get-in-miss-b))
+            default
+            (%get-in-walk found (rest path) default)))
+        default))))
+(defn map/get-in "The value in nested collections `m` at the key sequence `path`, or `default` (else `nil`) if any key along the way is absent. Each step looks up the way `get` does — a map by key, a vector, list or string by integer position. `(map/get-in m ())` is `m`.
 
     (map/get-in {:a {:b 1}} [:a :b])   ;=> 1
     (map/get-in {:a [10 20]} [:a 1])   ;=> 20
     (map/get-in {:a 1} [:z :y])        ;=> nil"
-  (%get-in-walk m path (first default)))
+  ((m path) (%get-in-walk m path nil))
+  ((m path default) (%get-in-walk m path default)))
 
 ;; check-allow: deliberately non-tail — depth = (count path) — a few keys, never data scale.
 (defn map/assoc-in (m path v)

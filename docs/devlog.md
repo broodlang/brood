@@ -3025,3 +3025,19 @@ back through the caller's dispatch. Guards: `jit_count_call_test`, `jit_float_eq
 `resolve_prim` look-through test; each run in both contract modes. Run: `make test` and the
 armed suite on the final tree.
 
+
+2026-11-26. **`get` of a vector inline; `get-in` a native walk.** From b3d's hair frame
+(`BROOD_JIT_BAIL_TRACE`: 60 674 `table-read-declined` deopts in `%get-in-walk` over 1 200
+frames). `map_get_inline` / `map_get3_inline`, the rule the VM and native code share for
+`get`, now answer a vector at an integer index (the element, or the default out of range); a
+non-integer key still declines to the prelude's type error. `get-in`'s walk was a
+has-then-get pair through `%get-in-has?` → `contains?` → `%contains-key?`, two of them named
+helpers the profitability gate keeps on the VM (`call-mediated-boxed`) at ~1 µs a native→VM
+crossing; it is now one 3-arity `get` a step with a sentinel default (a second sentinel tells
+a stored sentinel from a miss) inside the self-tail loop, which stays native. `map/get-in` has
+fixed 2/3 arities instead of `& default`. A three-key path through a vector 2 640 → 745 ns,
+`(get (get v i) :name)` 475 → 106 ns. Worth knowing: with only the vector arm, `get-in` got
+SLOWER (~5.5 µs) — the deopt had been dropping the whole walk onto the VM, where its helper
+calls were cheap; native code paid a crossing a step. Guard: `jit_get_vector_test` (arms stay
+native, zero deopts; sabotaged red in both contract modes). Run: `make test` 2711/2711, the
+touched files both ways, `nest check` and `--strict`, clippy on CI's flags.

@@ -227,6 +227,15 @@
     (assert= (map/get-in {:a [1 2]} [:a -1] :none) :none)
     (assert= (map/get-in {:a [1 2]} [:a :b] :none) :none)
     (assert= (map/get-in {:a nil} [:a] :none) nil))
+  (test "get-in answers a stored value equal to its miss sentinels, and a set by membership"
+    ;; the walk probes with a sentinel default and tells a stored sentinel apart with a second
+    (assert= (map/get-in {:k :%get-in-miss-a} [:k] :none) :%get-in-miss-a)
+    (assert= (map/get-in {:k :%get-in-miss-b} [:k] :none) :%get-in-miss-b)
+    (assert= (map/get-in {:a #{:s}} [:a :s]) :s)
+    (assert= (map/get-in {:a #{:s}} [:a :t] :none) :none)
+    (assert= (map/get-in {:a 1} [:a :b] :none) :none)
+    (assert= (map/get-in nil [:a] :none) :none)
+    (assert= (map/get-in {:a (string/->bytes "AB")} [:a 1]) 66))
   (test "assoc-in and update-in update a vector along the path by index"
     (assert= (map/assoc-in [[1]] [0 0] 9) [[9]])
     (assert= (map/assoc-in {:a [1 2]} [:a 1] :b) {:a [1 :b]})

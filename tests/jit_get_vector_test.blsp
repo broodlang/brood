@@ -1,0 +1,95 @@
+;;; `get` and `get-in` through a vector, in native code. The inline `get` (`map_get_inline`,
+;;; `map_get3_inline`, shared by the VM and native code) answered a map, a record's field and
+;;; nil, and DECLINED a vector, so every `(get v i)` in native code deopted to the VM, and
+;;; `get-in` over `[:joints index :extras]` deopted at its middle step: b3d's hair took ~50
+;;; such deopts a frame (`%get-in-walk`, `table-read-declined`), 60 000 in a 1 200-frame run.
+;;;
+;;; A vector now answers an integer index inline (the element, or the default out of range).
+;;; `get-in`'s walk is one 3-arity `get` a step, in a self-tail loop that stays native, where
+;;; it was a has-then-get pair through two helpers the JIT keeps on the VM.
+
+(defmodule jit-get-vector-test (:use test) (:use suite-helpers))
+
+(def- gv-joints
+  (into []
+    (map (range 16)
+      (fn (index)
+        {:name (str "j" index) :extras (if (= 0 (math/rem index 2)) {:stiffness 1.0} nil)}))))
+(def- gv-skeleton {:joints gv-joints})
+
+(defn gv-name (joints index) (get (get joints index) :name))
+(defn gv-name-or (joints index) (get (get joints index {}) :name :none))
+(defn- gv-drive (joints index acc)
+  (if (= index 0)
+    acc
+    (gv-drive joints (- index 1) (+ acc (count (gv-name joints (math/rem index 16)))))))
+(defn- gv-drive-or (joints index acc)
+  (if (= index 0)
+    acc
+    (gv-drive-or joints
+      (- index 1)
+      (+ acc (if (= :none (gv-name-or joints (math/rem index 20))) 1 0)))))
+(defn- gv-stiff (skeleton index total)
+  (if (= index 0)
+    total
+    (gv-stiff skeleton
+      (- index 1)
+      (if (map/get-in skeleton [:joints (math/rem index 16) :extras]) (+ total 1) total))))
+
+(describe "get through a vector, in native code"
+  (test "(get v i) stays native without deopting"
+    (when (%native-tier?)
+      (assert-settles-native gv-name 2 (fn () (gv-drive gv-joints 300 0)))
+      (gv-drive gv-joints 5000 0)
+      ;; declined, each call deopted and the arm latched `:bailed` after sixteen
+      (assert= :native (get (%jit-arm-state gv-name 2) :state))
+      (assert= 0 (get (%jit-arm-state gv-name 2) :deopts-total))))
+
+  (test "(get v i default) stays native without deopting, out of range included"
+    (when (%native-tier?)
+      (assert-settles-native gv-name-or 2 (fn () (gv-drive-or gv-joints 300 0)))
+      (gv-drive-or gv-joints 5000 0)
+      (assert= :native (get (%jit-arm-state gv-name-or 2) :state))
+      (assert= 0 (get (%jit-arm-state gv-name-or 2) :deopts-total))))
+
+  (test "get-in through a vector stays native in its walk"
+    (when (%native-tier?)
+      (gv-stiff gv-skeleton 300 0)
+      (let (before (get (%jit-arm-state %get-in-walk 3) :deopts-total))
+        (gv-stiff gv-skeleton 5000 0)
+        (assert= :native (get (%jit-arm-state %get-in-walk 3) :state))
+        ;; The walk is a self-tail loop, never deopt-watched, so a decline deopts on every
+        ;; step through a vector without latching: 5 000 here. The arm is the prelude's,
+        ;; shared with whatever else runs, so bound the growth rather than pin it at zero.
+        (is (< (- (get (%jit-arm-state %get-in-walk 3) :deopts-total) before) 100)))))
+
+  (test "the answers are get's"
+    (gv-drive gv-joints 300 0)
+    (assert= "j3" (gv-name gv-joints 3))
+    (assert= :none (gv-name-or gv-joints 17))
+    (assert= "j1" (gv-name-or gv-joints 1))
+    (assert= nil (get gv-joints 99))
+    (assert= nil (get gv-joints -1))
+    (assert= :d (get gv-joints -1 :d))
+    (assert= 8 (gv-stiff gv-skeleton 16 0))
+    ;; a keyword key on a vector is the type error the inline declines to the prelude for
+    (check-allow :type-mismatch
+      (assert= :raised (try (get gv-joints :name) (catch _ :raised)))
+      (assert= :raised (try (get gv-joints :name :d) (catch _ :raised))))))
+
+(describe "across processes"
+  (test "workers read a shared vector by index and agree"
+    (let (me (self)
+          workers (map (range 8)
+                    (fn (worker)
+                      (spawn (fn ()
+                               (send me
+                                 [:read
+                                   worker
+                                   (gv-drive gv-joints 2000 0)
+                                   (map/get-in gv-skeleton [:joints worker :name])])))))
+          replies (map workers (fn (_) (receive ([:read worker total name] [worker total name])))))
+      (assert= 8 (count replies))
+      (is (every? replies
+            (fn ([worker total name])
+              (and (= total (gv-drive gv-joints 2000 0)) (= name (str "j" worker)))))))))
