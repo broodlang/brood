@@ -45,6 +45,71 @@ to 2026-11-06 moved, unedited, to the end of
   budget (`crates/cli/tests/thread_exhaustion.rs`); `systemd-run --user --scope -p MemoryMax=…`
   gives a real container cap locally.
 
+## Next todo: open from the 2026-11-26 b3d session
+
+A day of b3d performance and the bugs it surfaced; what shipped is in `devlog.md` (2026-11-26)
+and KI-412, 414, 415 and 416. Left open, most valuable first:
+
+**Check first.** CI on the session's last pushes (`1fe2d773f` KI-416, `0bf94146c` source-map) had
+not finished when the machine went off: `make ci-wait`, and read EVERY failure in a red log
+(`gh run view <id> --log-failed | grep -E "panicked|test failed"`) before calling one a flake.
+
+**brood**
+
+1. **The checker widens unions past 4 alternatives** (`MAX_TY_TERMS`): `b3d-gltf` reports 156
+   widened unions, its internals unchecked for it. Decide whether the cap rises, or records with
+   many optional keys get a cheaper representation. KI-416 fixed the OTHER give-up (a cycling
+   return); `b3d-mass` and `b3d-hair` now check fully.
+2. **The model test that fails right after an install, then passes** (reported from womanblend,
+   b8). Not reproduced here: needs womanblend and its GLB. Suspect a project image stale across an
+   install (the image is keyed by build id: `nest::image_slots`).
+3. **bedit's served-session flake**: `remote_test` (bedit at `BEDIT_REF`) times out about 1 run in
+   10 with or without this session's changes, a different test each time. Not yet a KI: file it as
+   a watch item or hunt it (`docs/handoff.md` § Flake hunting).
+4. **Native↔VM crossings cost ~1 µs**, around every named function the `call-mediated-boxed`
+   gate keeps on the VM. Measured again this session and the gate's verdict stands: admitting the
+   refused arms made b3d's FK 20% and springs 12% slower (compute-frontier §7.1). `BROOD_PERF_MAP=1`
+   + `perf` shows only ~11% of a b3d hair frame in JIT code; the rest is `exec_chunk`, call
+   dispatch and allocation. "The JIT refuses a function holding a `fn` literal" is OUT OF DATE
+   (ADR-803 lowers them); the refusals in b3d are this gate.
+5. **A closure handed to `spawn`/`seq/pmap` copies everything it names.** b3d-hair's worker named
+   `state` and copied the whole hair state into 24 workers a frame (2.3× the frame). Fixed there
+   by hoisting; the trap itself wants a design answer, not a lint.
+6. **3D in the runtime.** The owner asked that brood not carry 3D-specific code where b3d can
+   hold it without a speed cost. Investigated: the painter runs in the VIEWER's binary
+   (`nest attach --gui`), so shading cannot leave the stock binary without every viewer needing a
+   custom build, and hosting the character features from outside needs ~11 kinds of hook (a
+   render-graph API). The workable step is an in-repo split behind a `gui-character` feature.
+   `gui/skin-centres` (`host/gui/centres.rs`) is program-side and can move to b3d's kernels as it
+   is. ADR-821 since added `host/hair.rs` (b3d-hair's sub-steps in Rust), the opposite direction:
+   confirm that is wanted.
+7. **Coverage gaps.** b3d has no CI and brood's CI does not build it (a downstream smoke like
+   bedit's would); the GPU painter is tested on no machine but the owner's (CI has no adapter, and
+   `gpu_scene.rs` skips its GPU half silently); `serve-shared` and b2d's hub relay no meshes, so a
+   shared session shows no scenes, and a viewer lacking a feature draws nothing without a word
+   (the attach identity's `:can` is where a `:scene` capability would go).
+8. **Docs behind.** ROADMAP has no entries for ADR-800..821, and the State section below is
+   2026-11-19's.
+
+**b3d** (`~/src/broodlang/b3d`; no tracker of its own, so listed here)
+
+- Frame costs on a synthetic rig, `B3D_NATIVE=0`, this machine: hair (24 locks × 6) 11.5 → ~3.2 ms,
+  springs (24) 1.23 → ~0.95 ms, stance walking 1.42 → ~1.05 ms, FK+palette (176 joints) ~0.6 ms.
+  Every change was held byte-identical on a 300-frame run. ADR-821's native hair stepper landed
+  after these numbers: re-measure before more hair work.
+- Next targets: the stance's repeated `joint-world` walks to the root on one pose (16% of a
+  walking frame in `mat4-multiply`), and springs' remaining `mapv`-over-closure loops.
+- What works: a small function made only of helper calls stays on the VM; writing it out on
+  `nth` (same sums, same order) makes it native and keeps the bits. What does not: rewriting a
+  `fold` whose cost is its helper calls (`turned-lock`, the output rebuild: under 1%).
+- Measure with instruction counts (`perf stat -e instructions:u`, second runs) or wall-clock
+  timers inside the function. `profile/run` over-charges small VM-bound functions several times
+  over (it put `math/ceil` at 10% of springs; free, it saved 1%).
+- `b3d-gltf`'s 156 widened unions (item 1 above); `nest check --strict` reports ~89 more, mostly
+  `nth`-may-be-nil and `/`-may-be-ratio; every file fails `nest format --check` (never formatted).
+- The hair's `*carried*` setting moves it almost rigidly with her body (session 39 means to
+  remove it).
+
 ## Done: the language design pass (2026-10-28 .. 2026-11-06)
 
 ROADMAP's sections A–D are finished (commit `7252319a`, merged as `490a3641`). A doctest engine
