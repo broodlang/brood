@@ -81,8 +81,8 @@ receive on the same timer heap — timed out on time every call.
 
 **Reproduction.** Not yet. Six instances of the incident's shape (a pool, six connections and a
 ticker in `receive … after`, request churn with task timeouts, kills, crashes and allocation
-spikes, `BROOD_J=2` pinned to one core, with and without a tight `BROOD_MEM_LIMIT`) ran 50 min
-each on whklat without a permanent stall.
+spikes, `BROOD_J=2` pinned to one core, with and without a tight `BROOD_MEM_LIMIT`) ran on whklat for 25 min
+(the first 15 unthrottled, which stalled and recovered under overload) without a permanent stall.
 
 **Cause.** Not known. What the evidence rules out: a dead timer thread (the health
 coordinator's deadline fired), a dead net reactor (HTTP kept serving on it), and an ordinary
