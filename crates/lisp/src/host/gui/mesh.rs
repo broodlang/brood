@@ -716,6 +716,16 @@ impl Mesh {
         } else {
             floats::<3>("centres", &parts.centres, count)?
         };
+        // a strand mesh's triangles ordered by their strand's own random number (ADR-813): each
+        // strand's together, and any leading share of them an even random choice of its strands,
+        // what the GPU's shadow pass draws (a fibre head's shadow from a share of its strands)
+        let indices = if parts.strand.is_empty() {
+            indices
+        } else {
+            let mut triangles: Vec<[u32; 3]> = indices.as_chunks::<3>().0.to_vec();
+            triangles.sort_by(|a, b| curvature[a[0] as usize].total_cmp(&curvature[b[0] as usize]));
+            triangles.into_iter().flatten().collect()
+        };
         Ok(Mesh {
             positions,
             normals,
@@ -9612,6 +9622,49 @@ mod tests {
 
     /// ADR-817: a zone's mask times its weight lays the compress map's tilt where the weight is
     /// above 0 and the stretch map's where it is below; another zone's mask does nothing for it.
+    #[test]
+    fn a_strand_mesh_orders_its_triangles_by_each_strands_own_number() {
+        // three strands of one segment (two triangles each), their numbers 0.9, 0.1, 0.5: the
+        // triangles come out strand by strand, lowest number first (ADR-813: the shadow pass draws
+        // a leading share, an even random choice)
+        let bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let mut positions = Vec::new();
+        let mut strand = Vec::new();
+        for (index, number) in [0.9f32, 0.1, 0.5].iter().enumerate() {
+            let x = index as f32;
+            positions.extend([x, 0.0, 0.0, x, 0.0, 0.0, x, 1.0, 0.0, x, 1.0, 0.0]);
+            strand.extend([*number; 4]);
+        }
+        let indices: Vec<u8> = (0..3u16)
+            .flat_map(|strand| {
+                let at = strand * 4;
+                [at, at + 1, at + 2, at + 1, at + 3, at + 2]
+            })
+            .flat_map(|index| index.to_le_bytes())
+            .collect();
+        let mesh = Mesh::from_parts(MeshParts {
+            positions: bytes(&positions),
+            normals: bytes(&[0.0, 1.0, 0.0].repeat(12)),
+            strand: bytes(&strand),
+            indices,
+            ..MeshParts::default()
+        })
+        .expect("three strands");
+        let order: Vec<u32> = mesh
+            .indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|triangle| triangle[0] / 4)
+            .collect();
+        assert_eq!(order, vec![1, 1, 2, 2, 0, 0]);
+    }
+
     #[test]
     fn wrinkles_lay_each_zones_map_by_its_mask_and_weight() {
         let flat = [DETAIL_FLAT; 4];

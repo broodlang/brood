@@ -140,6 +140,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "FAULT INJECTION — over-count STEALABLE by one at pool start, so the pool believes a process is queued that no worker can find. Proves the stranded-work watchdog (KI-88's never-scheduled signature) actually fires; nothing an ordinary program does provokes one",
     ),
     f(
+        "BROOD_FAULT_DROP_TIMER",
+        SCHED,
+        "=<ms>: FAULT INJECTION — queue no receive deadline due within <ms> of being armed, so a green `receive … (after …)` that short and parks is never woken by its timer. Proves the overdue-receive watchdog (the timer thread names a receive parked 5 s past its deadline, and which link of the wake broke) actually fires; nothing an ordinary program does provokes one",
+    ),
+    f(
         "BROOD_FAULT_CLAIM_RACE",
         SCHED,
         "=<module>: FAULT INJECTION — the runtime's first first-use miss into <module> in a frame that can park pauses 500 ms between asking whether another process holds its module's load and taking the claim itself, so a test can take the claim inside that window. Proves a waiter that loses the claim race parks rather than blocking its worker; nothing an ordinary program does provokes one",

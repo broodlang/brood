@@ -2513,6 +2513,80 @@ pub(super) fn wake_for_timeout(pid: u64, generation: u64) {
     }
 }
 
+/// How long past its deadline a green `receive … (after …)` may still be waiting before the
+/// timer thread's watchdog names it. A woken process normally runs within milliseconds;
+/// five seconds is far past any honest queueing delay.
+#[cfg(not(target_arch = "wasm32"))]
+const OVERDUE_REPORT_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The overdue-receive watchdog, run by the timer thread every few seconds: name each green
+/// process whose captured `receive` deadline passed more than [`OVERDUE_REPORT_AFTER`] ago
+/// and which has still not run its `after` clause — once per process and deadline, on
+/// stderr. `pending` is the timer heap's `(pid, gen)` entries at the time of the look.
+///
+/// The report says which link of the wake chain broke, which is what nobody could tell
+/// when the mur forge's pool stopped (2026-11-19): parked with a waiter and a live timer
+/// entry (the timer thread has not fired it), parked with no live entry (a lost timer),
+/// woken but sitting in a run queue (stranded work), or parked nowhere at all — no waiter,
+/// no blocked thread, in no run queue — which is a process the scheduler has lost.
+///
+/// Only `try_lock`s a mailbox: a contended one is looked at on the next round.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn report_overdue_receives(
+    pending: &std::collections::HashSet<(u64, u64)>,
+    reported: &mut HashMap<u64, SchedDeadline>,
+) {
+    for (pid, mailbox) in REGISTRY.entries() {
+        let (deadline, overdue, waiter, cv_waiters, queued, scanned) = {
+            let Ok(st) = mailbox.state.try_lock() else {
+                continue;
+            };
+            let Some(deadline) = st.recv_deadline else {
+                continue;
+            };
+            let overdue = deadline.overdue_by();
+            if overdue < OVERDUE_REPORT_AFTER || reported.get(&pid) == Some(&deadline) {
+                continue;
+            }
+            (
+                deadline,
+                overdue,
+                st.waiter.is_some(),
+                st.cv_waiters,
+                st.queue.len(),
+                st.scanned,
+            )
+        };
+        let status = mailbox.status.load(Ordering::Relaxed);
+        let generation = mailbox.timer_gen.load(Ordering::Relaxed);
+        let timer_entry = pending.contains(&(pid, generation));
+        let verdict = match status {
+            ST_WAITING if waiter && timer_entry => {
+                "parked, its timer entry still pending: the timer thread has not fired it"
+            }
+            ST_WAITING if waiter => "parked with NO live timer entry: a lost timer",
+            ST_WAITING if cv_waiters > 0 => "blocked on its mailbox condvar past the deadline",
+            ST_WAITING => {
+                "parked NOWHERE: no waiter, no blocked thread — the scheduler has lost this process"
+            }
+            ST_RUNNABLE => "woken but not run since: stranded in a run queue",
+            _ => "running, and has not re-entered its receive since it was woken",
+        };
+        let queue = super::scheduler::run_queue_of(pid);
+        eprintln!(
+            "[timer] OVERDUE RECEIVE: process {} is {} ms past its `after` deadline — {verdict} \
+             (timer gen {generation}, entry pending {timer_entry}, waiter {waiter}, \
+             cv waiters {cv_waiters}, {queued} queued / {scanned} scanned, \
+             kill pending {}, {queue}). Preserve this log and binary.",
+            super::scheduler::proc_descr(pid),
+            overdue.as_millis(),
+            mailbox.kill_pending.load(Ordering::Relaxed),
+        );
+        reported.insert(pid, deadline);
+    }
+    reported.retain(|pid, _| REGISTRY.contains_key(*pid));
+}
+
 /// Every currently-registered local pid (one entry per live mailbox). Backs
 /// the `(list-processes)` primitive — agents introspecting what they've
 /// spawned, and the `nest mcp` `processes` tool (`std/tool/mcp.blsp`, ADR-036).

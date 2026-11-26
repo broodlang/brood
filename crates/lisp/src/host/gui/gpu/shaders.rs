@@ -697,7 +697,7 @@ struct DrawU {
     sheen: vec4<f32>,           // a hair surface's second highlight's colour (`:sheen`), w 1 when given (ADR-799)
     deform: vec4<u32>,          // pressed by the scene's contacts (ADR-805), its first posed vertex, whether it has a softness, its vertex count
     loose: vec4<f32>,           // its flesh lagging its bones (ADR-812): the amount (0 none), its lagging palette's offset, its joint count
-    clamp_info: vec4<f32>,      // x: how many `:clamp-planes` its strands keep to (ADR-813); y: the UV set its `:wrinkles` read by (ADR-817)
+    clamp_info: vec4<f32>,      // x: how many `:clamp-planes` its strands keep to (ADR-813); y: the UV set its `:wrinkles` read by (ADR-817); z: the strands a `:fibres` shadow stands for (ADR-813)
     clamps: array<vec4<f32>, 4>,  // each plane: its unit normal toward the strands' side, `normal · point`
     wrinkles: array<vec4<f32>, 2>,  // a skin's eight wrinkle zones' weights (ADR-817; zero: none)
 };
@@ -2625,7 +2625,8 @@ fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> Shado
     if (draw.flags.x == 5u) {
         // the ribbon as the camera sees it, as the CPU painter's posed vertices are
         let clamped = clamped_strand(world, safe_normalize((posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz));
-        world = strand_vertex(clamped.centre, clamped.direction, input.uv, draw.strand.xy).world;
+        // (a `:fibres` strand standing for `clamp_info.z` of them, as many times as wide)
+        world = strand_vertex(clamped.centre, clamped.direction, input.uv, draw.strand.xy * max(draw.clamp_info.z, 1.0)).world;
     }
     out.clip = scene.shadows[view_index].view_proj * vec4<f32>(world, 1.0);
     out.uv = input.uv;
