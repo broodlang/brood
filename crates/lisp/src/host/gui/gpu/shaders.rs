@@ -1854,21 +1854,29 @@ const CONTACT_STEPS: u32 = 12u;
 const CONTACT_THICKNESS: f32 = 0.03;
 // how far along its reflected direction a surface looks for what hides the room from it
 const REFLECTION_REACH: f32 = 0.04;
-fn contact_shadow(world: vec3<f32>, to_light: vec3<f32>) -> f32 {
-    return screen_blocked(world, to_light, CONTACT_REACH);
+fn contact_shadow(world: vec3<f32>, to_light: vec3<f32>, surface_normal: vec3<f32>, to_eye: vec3<f32>) -> f32 {
+    return screen_blocked(world, to_light, CONTACT_REACH, surface_normal, to_eye);
 }
 
 // how open the way from `world` along `direction` is, over `reach` metres, as the camera's depth
 // view holds what lies there (ADR-818): 1 open, toward 0 where something within a few centimetres
 // stands in the way (the contact shadow toward a light; toward the reflected direction, the
 // room's reflection hidden by her own cheeks and lips in her mouth)
-fn screen_blocked(world: vec3<f32>, to_light: vec3<f32>, reach: f32) -> f32 {
+fn screen_blocked(world: vec3<f32>, to_light: vec3<f32>, reach: f32, surface_normal: vec3<f32>, to_eye: vec3<f32>) -> f32 {
     let at = u32(scene.occlusion.z);
     if (at == 0u) {
         return 1.0;
     }
     let view = scene.shadows[at - 1u];
     let side = u32(view.info.y);
+    // (the gap that counts: past what two of the depth view's pixels span in depth across this
+    // surface as the camera sees it, so skin seen at a grazing angle never shades itself: a fixed
+    // gap streaked her collarbone and shoulder top)
+    let own = view.view_proj * vec4<f32>(world, 1.0);
+    let row_scale = length(vec3<f32>(view.view_proj[0].x, view.view_proj[1].x, view.view_proj[2].x));
+    let pixel_world = 2.0 * max(own.w, 1e-4) / (f32(side) * max(row_scale, 1e-6));
+    let facing = clamp(abs(dot(surface_normal, to_eye)), 0.05, 1.0);
+    let gap = 0.001 + 2.0 * pixel_world * sqrt(1.0 - facing * facing) / facing;
     var shade = 0.0;
     for (var step = 0u; step < CONTACT_STEPS; step = step + 1u) {
         let share = (f32(step) + 1.0) / f32(CONTACT_STEPS);
@@ -1889,7 +1897,7 @@ fn screen_blocked(world: vec3<f32>, to_light: vec3<f32>, reach: f32) -> f32 {
         let ahead = reached - stored;
         // (the nearest step in shade counts most; the gap in front eased in from 1 to 3 mm and out
         // toward the thickness, so the shadow's edge grades with the depth, not cut at a pixel)
-        shade = max(shade, (1.0 - share * share) * smoothstep(0.001, 0.003, ahead)
+        shade = max(shade, (1.0 - share * share) * smoothstep(gap, gap + 0.002, ahead)
             * (1.0 - smoothstep(0.5 * CONTACT_THICKNESS, CONTACT_THICKNESS, ahead)));
     }
     return 1.0 - shade;
@@ -2170,7 +2178,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
                 seen = hair_shadow(light, world, turn);
             } else {
                 // (and the shadow of what is too near and small for its map, ADR-818)
-                contact = contact_shadow(world, arrival.to_light);
+                contact = contact_shadow(world, arrival.to_light, surface_normal, view);
                 seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn) * contact;
             }
         }
@@ -2274,7 +2282,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
     // (the room's reflection hidden where something of the scene stands within `REFLECTION_REACH`
     // along the reflected direction, as the depth view holds it: deep in her mouth her cheeks and
     // lips hide the room from her side teeth, which shone grey as chrome, ADR-818)
-    let reflection_open = screen_blocked(world, reflected, REFLECTION_REACH);
+    let reflection_open = screen_blocked(world, reflected, REFLECTION_REACH, surface_normal, view);
     for (var layer = 0u; layer < 3u; layer = layer + 1u) {
         let weight = weights[layer];
         if (weight <= 0.0) {
