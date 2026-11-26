@@ -798,9 +798,9 @@ fn contact_skipped(slot: u32, input: VertexIn) -> bool {
     return own > 0.5 || (only.x >= 0.0 && one <= 0.5);
 }
 
-// a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 21 a vertex)
+// a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 24 a vertex)
 fn vertex_at(index: u32) -> VertexIn {
-    let at = index * 21u;
+    let at = index * 24u;
     var input: VertexIn;
     input.index = index;
     input.position = vec3<f32>(mesh_vertices[at], mesh_vertices[at + 1u], mesh_vertices[at + 2u]);
@@ -810,6 +810,7 @@ fn vertex_at(index: u32) -> VertexIn {
     input.joints = vec4<u32>(bitcast<u32>(mesh_vertices[at + 12u]), bitcast<u32>(mesh_vertices[at + 13u]), bitcast<u32>(mesh_vertices[at + 14u]), bitcast<u32>(mesh_vertices[at + 15u]));
     input.weights = vec4<f32>(mesh_vertices[at + 16u], mesh_vertices[at + 17u], mesh_vertices[at + 18u], mesh_vertices[at + 19u]);
     input.curvature = mesh_vertices[at + 20u];
+    input.centre = vec3<f32>(mesh_vertices[at + 21u], mesh_vertices[at + 22u], mesh_vertices[at + 23u]);
     return input;
 }
 
@@ -824,19 +825,8 @@ fn contact_softness(index: u32) -> f32 {
 // `mesh::skin_matrix` over the draw's lagging palette (ADR-812): where `position` would be were
 // its bones where the game's followers carry them; `world` itself when none of them moves it
 fn loose_world(input: VertexIn, position: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
-    let start = u32(draw.loose.y + 0.5);
-    let joint_count = u32(draw.loose.z + 0.5);
-    var skin = mat4x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
-    var moved = false;
-    for (var slot = 0u; slot < 4u; slot = slot + 1u) {
-        let joint = input.joints[slot];
-        let weight = input.weights[slot];
-        if (weight > 0.0 && joint < joint_count) {
-            skin = skin + palette[start + joint] * weight;
-            moved = true;
-        }
-    }
-    if (!moved) {
+    let skin = skinning(input, u32(draw.loose.y + 0.5), u32(draw.loose.z + 0.5));
+    if (skin[3].w == 0.0) {
         return world;
     }
     return ((draw.model * skin) * vec4<f32>(position, 1.0)).xyz;
@@ -958,6 +948,8 @@ struct VertexIn {
     @location(4) joints: vec4<u32>,
     @location(5) weights: vec4<f32>,
     @location(6) curvature: f32,
+    // its centre of rotation (ADR-814): what it turns about when its draw's `flags.w` is 2
+    @location(7) centre: vec3<f32>,
 };
 struct VertexOut {
     // invariant: the hair's depth pass and its front pass must put a sample at the same depth
@@ -987,6 +979,60 @@ struct Posed {
     normal: vec3<f32>,
 };
 
+// `mesh::skin_matrix`: vertex `input`'s skinning matrix from the palette at `start` with
+// `joint_count` joints, w 0 in its last column when no joint of the palette moves it. Its
+// joints' matrices blended; or, for a draw whose vertices turn about their centres (`flags.w`
+// 2, ADR-814) and a vertex on two joints or more, its joints' rotations blended (their
+// quaternions, sign-aligned with the heaviest's, at `start + joint_count + joint`, then
+// normalised) and their stretches, the vertex turned about its centre and that centre put where
+// the blended matrices put it
+fn skinning(input: VertexIn, start: u32, joint_count: u32) -> mat4x4<f32> {
+    var skin = mat4x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
+    var moving = 0u;
+    var heaviest = 0u;
+    var most = 0.0;
+    for (var slot = 0u; slot < 4u; slot = slot + 1u) {
+        let joint = input.joints[slot];
+        let weight = input.weights[slot];
+        if (weight > 0.0 && joint < joint_count) {
+            skin = skin + palette[start + joint] * weight;
+            moving = moving + 1u;
+            if (weight > most) {
+                most = weight;
+                heaviest = joint;
+            }
+        }
+    }
+    if (draw.flags.w != 2u || moving < 2u) {
+        return skin;
+    }
+    let reference = palette[start + joint_count + heaviest][0];
+    var quaternion = vec4<f32>(0.0);
+    var stretch = mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    for (var slot = 0u; slot < 4u; slot = slot + 1u) {
+        let joint = input.joints[slot];
+        let weight = input.weights[slot];
+        if (weight > 0.0 && joint < joint_count) {
+            let entry = palette[start + joint_count + joint];
+            let q = entry[0];
+            quaternion = quaternion + q * select(weight, -weight, dot(q, reference) < 0.0);
+            stretch = stretch + mat3x3<f32>(entry[1].xyz, entry[2].xyz, entry[3].xyz) * weight;
+        }
+    }
+    let length = sqrt(dot(quaternion, quaternion));
+    if (length < 1e-8) {
+        return skin;
+    }
+    let q = quaternion / length;
+    let rotation = mat3x3<f32>(
+        vec3<f32>(1.0 - 2.0 * (q.y * q.y + q.z * q.z), 2.0 * (q.x * q.y + q.z * q.w), 2.0 * (q.x * q.z - q.y * q.w)),
+        vec3<f32>(2.0 * (q.x * q.y - q.z * q.w), 1.0 - 2.0 * (q.x * q.x + q.z * q.z), 2.0 * (q.y * q.z + q.x * q.w)),
+        vec3<f32>(2.0 * (q.x * q.z + q.y * q.w), 2.0 * (q.y * q.z - q.x * q.w), 1.0 - 2.0 * (q.x * q.x + q.y * q.y)));
+    let turned = rotation * stretch;
+    let centre = (skin * vec4<f32>(input.centre, 1.0)).xyz - turned * input.centre;
+    return mat4x4<f32>(vec4<f32>(turned[0], 0.0), vec4<f32>(turned[1], 0.0), vec4<f32>(turned[2], 0.0), vec4<f32>(centre, 1.0));
+}
+
 fn pose(input: VertexIn) -> Posed {
     var position = input.position;
     var normal = input.normal;
@@ -996,22 +1042,11 @@ fn pose(input: VertexIn) -> Posed {
         normal = normal + morphs[at + 1u].xyz;
     }
     var matrix = draw.model;
-    if (draw.flags.w == 1u) {
+    if (draw.flags.w != 0u) {
         // as `skin_matrix` skins: a joint past the palette's end is skipped, and a vertex no
         // joint of the palette moves stays rigid
-        let start = draw.flags.z;
-        let joint_count = draw.morph_info.z;
-        var skin = mat4x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
-        var moved = false;
-        for (var slot = 0u; slot < 4u; slot = slot + 1u) {
-            let joint = input.joints[slot];
-            let weight = input.weights[slot];
-            if (weight > 0.0 && joint < joint_count) {
-                skin = skin + palette[start + joint] * weight;
-                moved = true;
-            }
-        }
-        if (moved) {
+        let skin = skinning(input, draw.flags.z, draw.morph_info.z);
+        if (skin[3].w != 0.0) {
             matrix = draw.model * skin;
         }
     }

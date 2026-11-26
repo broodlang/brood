@@ -216,6 +216,20 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Keep the mesh spec describes under handle for window id, for its [:scene …] ops (ADR-786). The spec is a map of little-endian bytes as a glTF buffer holds them: :positions (3 f32 a vertex, required), :normals (3 f32), :uvs (2 f32), :tangents (4 f32), :joints (4 a vertex, :joint-type :u8 or :u16), :weights (4 f32), :indices (:index-type :u16 or :u32) and :morphs, a vector of {:positions bytes :normals bytes}. Errors when a byte count is not whole entries for every vertex or an index names no vertex. The handle is the caller's (gui/mesh allocates it); re-uploading under a live handle replaces the mesh. Returns nil.",
         gui_mesh);
     primitives.def(
+        "%gui-skin-centres",
+        Arity::exact(1),
+        Sig::new(vec![Ty::of_tags(&[Tag::Map])], Ty::of_tags(&[Tag::Bytes])),
+        &["spec"],
+        "Each vertex's centre of rotation for skinning that blends rotations (ADR-814), from a mesh spec's :positions, :indices, :joints and :weights at rest (as %gui-mesh takes them): little-endian f32 bytes, three a vertex, for the spec's :centres. Pure; worked out on every core (seconds for a body); cache it beside the model.",
+        gui_skin_centres);
+    primitives.def(
+        "%gui-posed-positions",
+        Arity::exact(2),
+        Sig::new(vec![Ty::of_tags(&[Tag::Map]), Ty::ANY], Ty::of_tags(&[Tag::Bytes])),
+        &["spec", "palette"],
+        "The vertices of the mesh spec describes (as %gui-mesh takes it, its :centres if given) posed by palette (16 numbers a joint, a vector or f32 bytes) exactly as the CPU painter skins them (ADR-814), no morphs: little-endian f32 bytes, three a vertex. For probes that measure skinning; nothing is drawn.",
+        gui_posed_positions);
+    primitives.def(
         "%gui-mesh-free",
         Arity::exact(2),
         Sig::new(vec![int, int], nil_ty),

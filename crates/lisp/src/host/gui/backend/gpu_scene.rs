@@ -1101,3 +1101,139 @@ fn a_strand_is_laid_on_its_clamp_plane_alike_on_both_painters() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// ADR-814: a tube bent 90° at its joint, seen side on, its vertices turning about their centres
+/// of rotation: drawn alike on both painters, and fuller at the bend than the same tube with its
+/// joints' matrices blended (which collapses there).
+#[test]
+fn a_bent_tube_turns_about_its_centres_alike_on_both_painters() {
+    let side = 96u32;
+    let (rings, sides) = (21usize, 16usize);
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut joints = Vec::new();
+    let mut weights = Vec::new();
+    for ring in 0..rings {
+        let y = ring as f32 / (rings - 1) as f32 * 1.2 - 0.6;
+        let upper = ((y + 0.2) / 0.4).clamp(0.0, 1.0);
+        for around in 0..sides {
+            let angle = around as f32 / sides as f32 * std::f32::consts::TAU;
+            positions.extend_from_slice(&[0.2 * angle.cos(), y, 0.2 * angle.sin()]);
+            normals.extend_from_slice(&[angle.cos(), 0.0, angle.sin()]);
+            joints.extend_from_slice(&[0u8, 1, 0, 0]);
+            weights.extend_from_slice(&[1.0 - upper, upper, 0.0, 0.0]);
+        }
+    }
+    let mut indices: Vec<u32> = Vec::new();
+    for ring in 0..rings - 1 {
+        for around in 0..sides {
+            let a = (ring * sides + around) as u32;
+            let b = (ring * sides + (around + 1) % sides) as u32;
+            let (c, d) = (a + sides as u32, b + sides as u32);
+            indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
+    let parts = || MeshParts {
+        positions: bytes_of(&positions),
+        normals: bytes_of(&normals),
+        joints: joints.clone(),
+        weights: bytes_of(&weights),
+        indices: indices
+            .iter()
+            .flat_map(|index| index.to_le_bytes())
+            .collect(),
+        indices_wide: true,
+        ..MeshParts::default()
+    };
+    let blended = Arc::new(Mesh::from_parts(parts()).expect("a tube"));
+    let found = crate::host::gui::centres::centres(
+        &blended.positions,
+        &blended.indices,
+        &blended.joints,
+        &blended.weights,
+        2,
+    );
+    let turning = Arc::new(
+        Mesh::from_parts(MeshParts {
+            centres: bytes_of(&found.concat()),
+            ..parts()
+        })
+        .expect("a tube with centres"),
+    );
+    let identity: [f32; 16] = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    // the upper bone turned 90° about z through the joint
+    let bent: [f32; 16] = [
+        0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    scene.lights = vec![Light::directional([0.3, -0.5, 0.8], [1.0, 1.0, 1.0])];
+    scene.palettes = vec![Arc::from(&[identity, bent].concat()[..])];
+    scene.draws = vec![Draw {
+        loose: None,
+        mesh: 1,
+        model: identity,
+        palette: Some(0),
+        morphs: vec![],
+        material: Material {
+            surface: Surface::Standard,
+            double_sided: true,
+            roughness: 0.6,
+            specular: 0.0,
+            color: [0.8, 0.8, 0.8, 1.0],
+            ..Material::default()
+        },
+    }];
+    let covered =
+        |pixels: &[u8], stride: usize| pixels.chunks(stride).filter(|pixel| pixel[0] > 8).count();
+    let shoot_cpu = |mesh: &Arc<Mesh>| {
+        let mesh = mesh.clone();
+        let meshes = move |handle: u32| (handle == 1).then(|| mesh.clone());
+        rasterize(&scene, &meshes, &|_| None).2
+    };
+    let cpu_blended = shoot_cpu(&blended);
+    let cpu_turning = shoot_cpu(&turning);
+    eprintln!(
+        "CPU: covered blended {}, turning {}",
+        covered(&cpu_blended, 4),
+        covered(&cpu_turning, 4)
+    );
+    assert!(
+        covered(&cpu_turning, 4) > covered(&cpu_blended, 4) + 40,
+        "turning about its centres, the bend keeps its fullness"
+    );
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &turning);
+        let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+        renderer.set_bg(Some([0, 0, 0]));
+        gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+            .expect("an offscreen frame is never skipped");
+        let pixels = gpu.read_pixels();
+        let apart = (0..(side * side) as usize)
+            .filter(|at| pixels[at * 3].abs_diff(cpu_turning[at * 4]) > 24)
+            .count();
+        eprintln!(
+            "{name}: covered {}, pixels apart from the CPU {apart} of {}",
+            covered(&pixels, 3),
+            side * side
+        );
+        if apart > (side * side / 50) as usize {
+            failures.push(format!("{name}: {apart} pixels apart from the CPU"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -2949,6 +2949,7 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         softness: mesh_bytes(heap, map, "softness")?,
         strand: mesh_bytes(heap, map, "strand")?,
         visibility: mesh_bytes(heap, map, "visibility")?,
+        centres: mesh_bytes(heap, map, "centres")?,
     };
     if let Some(Value::Vector(morphs)) = heap.map_get(map, value::kw("morphs")) {
         let targets = heap.vector(morphs).to_vec();
@@ -2970,6 +2971,131 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         .map_err(|why| LispError::runtime(format!("%gui-mesh: {why}")))?;
     crate::host::gui::mesh(id, handle, std::sync::Arc::new(mesh)).map_err(LispError::runtime)?;
     Ok(Value::nil())
+}
+
+/// `(%gui-skin-centres spec)` — each vertex's centre of rotation for skinning that blends
+/// rotations (ADR-814, `host::gui::centres`), from a `%gui-mesh` spec's `:positions`,
+/// `:indices`, `:joints` and `:weights` at rest: little-endian f32 bytes, three a vertex, the
+/// spec's `:centres`. Worked out on every core; a game caches it beside its model.
+pub(in crate::builtins) fn gui_skin_centres(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let Value::Map(map) = arg(args, 0) else {
+        return Err(LispError::wrong_type(
+            heap,
+            "%gui-skin-centres",
+            "a mesh spec map",
+            arg(args, 0),
+        ));
+    };
+    let keyword_is = |heap: &Heap, key: &str, wanted: &str| matches!(heap.map_get(map, value::kw(key)), Some(Value::Keyword(found)) if value::symbol_name_ref(found) == wanted);
+    let parts = crate::host::gui::mesh::MeshParts {
+        positions: mesh_bytes(heap, map, "positions")?,
+        joints: mesh_bytes(heap, map, "joints")?,
+        joints_wide: keyword_is(heap, "joint-type", "u16"),
+        weights: mesh_bytes(heap, map, "weights")?,
+        indices: mesh_bytes(heap, map, "indices")?,
+        indices_wide: keyword_is(heap, "index-type", "u32"),
+        ..crate::host::gui::mesh::MeshParts::default()
+    };
+    let mesh = crate::host::gui::mesh::Mesh::from_parts(parts)
+        .map_err(|why| LispError::runtime(format!("%gui-skin-centres: {why}")))?;
+    let workers = std::thread::available_parallelism().map_or(1, |count| count.get());
+    let found = crate::host::gui::centres::centres(
+        &mesh.positions,
+        &mesh.indices,
+        &mesh.joints,
+        &mesh.weights,
+        workers,
+    );
+    let bytes: Vec<u8> = found
+        .iter()
+        .flat_map(|centre| centre.iter().flat_map(|value| value.to_le_bytes()))
+        .collect();
+    Ok(heap.alloc_bytes(crate::core::blob::SharedBlob::new(&bytes)))
+}
+
+/// `(%gui-posed-positions spec palette)` — the vertices of the mesh `spec` describes (as
+/// `%gui-mesh` takes it; its `:centres` if given) posed by `palette` (16 numbers a joint, a vector
+/// or f32 bytes) exactly as the CPU painter skins them (`mesh::skin_matrix`, ADR-814), no morphs:
+/// little-endian f32 bytes, three a vertex. For probes that measure skinning; nothing is drawn.
+pub(in crate::builtins) fn gui_posed_positions(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let Value::Map(map) = arg(args, 0) else {
+        return Err(LispError::wrong_type(
+            heap,
+            "%gui-posed-positions",
+            "a mesh spec map",
+            arg(args, 0),
+        ));
+    };
+    let palette: Vec<f32> = match arg(args, 1) {
+        Value::Vector(numbers_id) => heap
+            .vector(numbers_id)
+            .iter()
+            .map(|item| match item {
+                Value::Int(n) => *n as f32,
+                Value::Float(f) => *f as f32,
+                _ => 0.0,
+            })
+            .collect(),
+        Value::Bytes(bytes_id) => heap
+            .bytes(bytes_id)
+            .as_bytes()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| f32::from_le_bytes(*word))
+            .collect(),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%gui-posed-positions",
+                "a palette (a vector of numbers or f32 bytes)",
+                other,
+            ));
+        }
+    };
+    let palette = &palette[..palette.len() / 16 * 16];
+    let keyword_is = |heap: &Heap, key: &str, wanted: &str| matches!(heap.map_get(map, value::kw(key)), Some(Value::Keyword(found)) if value::symbol_name_ref(found) == wanted);
+    let parts = crate::host::gui::mesh::MeshParts {
+        positions: mesh_bytes(heap, map, "positions")?,
+        joints: mesh_bytes(heap, map, "joints")?,
+        joints_wide: keyword_is(heap, "joint-type", "u16"),
+        weights: mesh_bytes(heap, map, "weights")?,
+        indices: mesh_bytes(heap, map, "indices")?,
+        indices_wide: keyword_is(heap, "index-type", "u32"),
+        centres: mesh_bytes(heap, map, "centres")?,
+        ..crate::host::gui::mesh::MeshParts::default()
+    };
+    let mesh = crate::host::gui::mesh::Mesh::from_parts(parts)
+        .map_err(|why| LispError::runtime(format!("%gui-posed-positions: {why}")))?;
+    let rotations =
+        (!mesh.centres.is_empty()).then(|| crate::host::gui::mesh::joint_rotations(palette));
+    let mut bytes = Vec::with_capacity(mesh.positions.len() * 12);
+    for (index, position) in mesh.positions.iter().enumerate() {
+        let posed = match crate::host::gui::mesh::skin_matrix(
+            &mesh,
+            Some(palette),
+            rotations.as_ref(),
+            index,
+        ) {
+            Some(skin) => {
+                let moved = crate::host::gui::mesh::transform(&skin, *position, 1.0);
+                [moved[0], moved[1], moved[2]]
+            }
+            None => *position,
+        };
+        for value in posed {
+            bytes.extend(value.to_le_bytes());
+        }
+    }
+    Ok(heap.alloc_bytes(crate::core::blob::SharedBlob::new(&bytes)))
 }
 
 /// `(%gui-mesh-free id handle)` — forget mesh `handle` of window `id`.

@@ -13,7 +13,7 @@ use crate::host::gui::mesh::{
 
 /// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4,
 /// curvature 1.
-pub(super) const VERTEX_FLOATS: usize = 21;
+pub(super) const VERTEX_FLOATS: usize = 24;
 /// The `SceneU` uniform (3744 bytes: each shadow view says where its map is kept, ADR-800),
 /// padded to the dynamic-offset alignment.
 pub(super) const SCENE_BYTES: u64 = 3840;
@@ -49,6 +49,8 @@ pub(super) struct GpuMesh {
     morphs: Vec<Morph>,
     has_tangents: bool,
     skinned: bool,
+    /// Its vertices turn about their centres of rotation (ADR-814): it has `:centres`.
+    turning: bool,
     /// Where its vertices can be, to fit shadow maps as the CPU painter fits them.
     bounds: MeshBounds,
     /// Its softness a vertex (ADR-805), when it has one.
@@ -543,7 +545,8 @@ impl MeshGpu {
                 3 => Float32x4,
                 4 => Uint32x4,
                 5 => Float32x4,
-                6 => Float32
+                6 => Float32,
+                7 => Float32x3
             ],
         });
         // a colour pipeline: its faces, whether it blends, and its fragment entry, depth state and
@@ -918,6 +921,10 @@ impl MeshGpu {
             vertices.extend(words_bytes(&joints.map(u32::from)));
             vertices.extend(floats_bytes(&weights));
             vertices.extend(mesh.curvature[index].to_le_bytes());
+            // its centre of rotation (ADR-814; its own place when it has none, unread then)
+            vertices.extend(floats_bytes(
+                mesh.centres.get(index).unwrap_or(&mesh.positions[index]),
+            ));
         }
         let vertex_buffer = buffer(
             device,
@@ -957,6 +964,7 @@ impl MeshGpu {
                 morphs: mesh.morphs.clone(),
                 has_tangents: mesh.tangents.is_some(),
                 skinned: !mesh.joints.is_empty(),
+                turning: !mesh.centres.is_empty(),
                 bounds: mesh.bounds.clone(),
                 softness,
             },
@@ -1145,7 +1153,11 @@ impl MeshGpu {
             let mut palette_starts = Vec::with_capacity(scene.palettes.len());
             for palette in &scene.palettes {
                 palette_starts.push((palette_floats.len() / 16) as u32);
-                palette_floats.extend_from_slice(palette);
+                // whole matrices only, so its joints' rotations below start where the shader
+                // looks for them, a palette's joint count on (ADR-814)
+                let whole = &palette[..palette.len() / 16 * 16];
+                palette_floats.extend_from_slice(whole);
+                palette_floats.extend(joint_rotation_floats(whole));
             }
             let mut plan = Vec::new();
             for draw in scene.draw_order() {
@@ -1199,13 +1211,18 @@ impl MeshGpu {
                     add_morphs_packed(&mesh.morphs, &draw.morphs, &mut morph_offsets[span..]);
                 }
                 let (palette_start, palette_joints) = palette.unwrap_or((0, 0));
-                let skinned = u32::from(mesh.skinned && palette_joints > 0);
+                // (2: its vertices turn about their centres, ADR-814)
+                let skinned = match (mesh.skinned && palette_joints > 0, mesh.turning) {
+                    (false, _) => 0u32,
+                    (true, false) => 1,
+                    (true, true) => 2,
+                };
                 // `DrawU::deform` (ADR-805): pressed by the scene's contacts, where its posed vertices
                 // start in the scene's posed buffer, whether it has a softness, how many vertices
                 // `DrawU::loose` (ADR-812): its flesh lagging its bones, where the lagging palette
                 // starts and how many joints it holds (a skinned draw only, as the CPU poses it)
                 let loose = crate::host::gui::mesh::loose_palette(scene, draw)
-                    .filter(|_| skinned == 1)
+                    .filter(|_| skinned != 0)
                     .and_then(|(joints, amount)| {
                         let start = palette_starts.get(draw.loose?.palette)?;
                         Some([amount, *start as f32, (joints.len() / 16) as f32, 0.0])
@@ -2227,4 +2244,21 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan, emitters: &EmitterPlan) -> V
         }
     }
     words
+}
+
+/// A palette's joints as rotations for the shader (ADR-814, `mesh::joint_rotations`): sixteen
+/// floats a joint, laid after the palette's own matrices so a joint's are at `start + joint
+/// count + joint` — its unit quaternion `[x y z w]`, then its stretch's three columns, each
+/// padded to four.
+pub(super) fn joint_rotation_floats(palette: &[f32]) -> Vec<f32> {
+    let rotations = crate::host::gui::mesh::joint_rotations(palette);
+    let mut floats = Vec::with_capacity(rotations.quaternions.len() * 16);
+    for (quaternion, stretch) in rotations.quaternions.iter().zip(&rotations.stretches) {
+        floats.extend_from_slice(quaternion);
+        for column in 0..3 {
+            floats.extend_from_slice(&stretch[column * 3..column * 3 + 3]);
+            floats.push(0.0);
+        }
+    }
+    floats
 }

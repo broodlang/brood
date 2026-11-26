@@ -162,7 +162,11 @@ fn the_mesh_shader_validates() {
         scenes::skin_table_bytes().len(),
         SKIN_TABLE_WIDTH * SKIN_TABLE_HEIGHT * 16
     );
-    assert_eq!(scenes::VERTEX_FLOATS, 21, "a vertex carries its curvature");
+    assert_eq!(
+        scenes::VERTEX_FLOATS,
+        24,
+        "a vertex carries its curvature and its centre of rotation"
+    );
     assert!(MESH_SRC.contains("@location(6) curvature: f32"));
     // ADR-797: `draw_uniform` packs exactly the struct the shader declares, the detail tile's
     // settings four floats before an eye's optics; the shader's flat texel is the CPU painter's

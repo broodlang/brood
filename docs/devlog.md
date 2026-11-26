@@ -3041,3 +3041,9 @@ through hair only from a light whose shadow map knows what is in the way (the sh
 the back of her hair white through her head), and `:clamp-planes` laying strands on glass. The
 trial's env knobs became the material's `:density`. Run: the GUI suites, the fibre and clamp
 parity tests on both adapters.
+
+2026-11-26. **Skinning that blends rotations (ADR-814).** Le & Hodgins 2016's optimized centres of
+rotation: `host::gui::centres` (walked over the surface's points, so seams do not crack),
+`gui/skin-centres`, a mesh's `:centres`, both painters blending quaternions and stretches about
+each vertex's centre, `gui/posed-positions` for probes. On womanblend: arms-up armpit squeezed
+92% → 67%, collarbones 37% → 20%, the mat squat's bottom 40% → 29%.

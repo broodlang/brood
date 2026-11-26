@@ -954,12 +954,24 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
   (table/incr *meshes* :next))
 
 (defn mesh (id spec)
-  "Upload a mesh to window id for its [:scene …] ops and return its handle (an int). The spec is a map of little-endian bytes, the way a glTF buffer holds a mesh's attributes, so a loader slices them straight out of the file: :positions (3 f32 a vertex — required), :normals (3 f32), :uvs (2 f32), :tangents (4 f32, for a normal map), :joints (4 a vertex, with :joint-type :u8 or :u16) and :weights (4 f32) to skin it, :indices (with :index-type :u16 or :u32) and :morphs, a vector of {:positions bytes :normals bytes} targets; :softness (1 f32, ADR-805), and for strands :strand (1 f32, constant along a strand, varying its look) and :visibility (4 f32 [a bx by bz], its baked self-shadow: max(0, a + b·L) hairs toward L, ADR-813). Errors when a byte count is not whole entries for every vertex or an index names no vertex. Pair with gui/free-mesh.
+  "Upload a mesh to window id for its [:scene …] ops and return its handle (an int). The spec is a map of little-endian bytes, the way a glTF buffer holds a mesh's attributes, so a loader slices them straight out of the file: :positions (3 f32 a vertex — required), :normals (3 f32), :uvs (2 f32), :tangents (4 f32, for a normal map), :joints (4 a vertex, with :joint-type :u8 or :u16) and :weights (4 f32) to skin it, :indices (with :index-type :u16 or :u32) and :morphs, a vector of {:positions bytes :normals bytes} targets; :softness (1 f32, ADR-805), and for strands :strand (1 f32, constant along a strand, varying its look) and :visibility (4 f32 [a bx by bz], its baked self-shadow: max(0, a + b·L) hairs toward L, ADR-813), and :centres (3 f32, each vertex's centre of rotation from gui/skin-centres: a skinned vertex then turns about it by its joints' blended rotation, ADR-814). Errors when a byte count is not whole entries for every vertex or an index names no vertex. Pair with gui/free-mesh.
 
     (try (gui/mesh 0 {:positions [1 2 3]}) (catch e :refused))   ;=> :refused   ; not a whole vertex (and no window 0)"
   (let (handle (alloc-mesh))
     (%gui-mesh id handle spec)
     handle))
+
+(defn skin-centres (spec)
+  "Each vertex's centre of rotation for skinning that blends rotations (ADR-814), from a mesh spec's :positions, :indices, :joints and :weights at rest (as gui/mesh takes them): little-endian f32 bytes, three a vertex, for the spec's :centres. A vertex on one joint is its own centre. Pure, and worked out on every core: seconds for a body, so a game keeps it beside its model.
+
+    (try (gui/skin-centres {:positions [1 2 3]}) (catch e :refused))   ;=> :refused   ; not a whole vertex"
+  (%gui-skin-centres spec))
+
+(defn posed-positions (spec palette)
+  "The vertices of the mesh spec describes (as gui/mesh takes it, its :centres if given) posed by palette (16 numbers a joint) exactly as the CPU painter skins them, no morphs: little-endian f32 bytes, three a vertex. For probes that measure skinning (ADR-814).
+
+    (try (gui/posed-positions {:positions [1 2 3]} []) (catch e :refused))   ;=> :refused"
+  (%gui-posed-positions spec palette))
 
 (defn free-mesh (id handle)
   "Forget mesh handle of window id; a later draw naming it in a [:scene …] draws nothing. Idempotent. Returns nil.

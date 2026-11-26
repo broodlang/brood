@@ -282,6 +282,10 @@ pub struct Mesh {
     /// How soft its flesh is at each vertex, 0 (bone) … 1 (soft), for the ring a contact raises
     /// (ADR-805); empty: none (a contact still lays its skin flat, with no ring).
     pub softness: Vec<f32>,
+    /// Each vertex's centre of rotation (ADR-814, [`crate::host::gui::centres`]): a skinned vertex
+    /// turns about it by its joints' blended rotation ([`skin_matrix`]); empty: its joints'
+    /// matrices blended.
+    pub centres: Vec<[f32; 3]>,
     /// Where its vertices can be, for fitting a shadow map to a scene without posing them.
     pub bounds: MeshBounds,
 }
@@ -507,6 +511,9 @@ pub struct MeshParts {
     /// A strand mesh's baked self-shadow a vertex (ADR-813): four f32, `[a bx by bz]`, the hairs
     /// crossed toward a unit direction L being max(0, a + b·L); carried in the tangent slot.
     pub visibility: Vec<u8>,
+    /// Each vertex's centre of rotation (ADR-814): three f32, `gui/skin-centres`; empty: skinned
+    /// by blending its joints' matrices, as before.
+    pub centres: Vec<u8>,
 }
 
 fn floats<const N: usize>(name: &str, bytes: &[u8], count: usize) -> Result<Vec<[f32; N]>, String> {
@@ -694,6 +701,11 @@ impl Mesh {
                 .map(|[value]| value)
                 .collect()
         };
+        let centres = if parts.centres.is_empty() || joints.is_empty() {
+            Vec::new()
+        } else {
+            floats::<3>("centres", &parts.centres, count)?
+        };
         Ok(Mesh {
             positions,
             normals,
@@ -705,6 +717,7 @@ impl Mesh {
             morphs,
             curvature,
             softness,
+            centres,
             bounds,
         })
     }
@@ -3770,7 +3783,7 @@ fn triangle_lod(
     (0.5 * (texels / screen).log2()).max(0.0)
 }
 
-fn transform(matrix: &[f32; 16], point: [f32; 3], w: f32) -> [f32; 4] {
+pub(crate) fn transform(matrix: &[f32; 16], point: [f32; 3], w: f32) -> [f32; 4] {
     [
         matrix[0] * point[0] + matrix[4] * point[1] + matrix[8] * point[2] + matrix[12] * w,
         matrix[1] * point[0] + matrix[5] * point[1] + matrix[9] * point[2] + matrix[13] * w,
@@ -3791,10 +3804,135 @@ fn multiply(left: &[f32; 16], right: &[f32; 16]) -> [f32; 16] {
     out
 }
 
+/// A palette's joints split for skinning that blends rotations (ADR-814): each joint matrix's
+/// 3×3 `A` as its rotation `R` (a unit quaternion `[x y z w]`, by polar decomposition) and what
+/// is left of it, `S = Rᵀ·A` (its scale and shear; the identity for a rigid joint), nine floats
+/// column by column. The GPU reads the same, packed four vec4 a joint (`scenes::joint_rotations`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct JointRotations {
+    pub quaternions: Vec<[f32; 4]>,
+    pub stretches: Vec<[f32; 9]>,
+}
+
+/// The rotation in `A`'s polar decomposition (`A = R·S`), by averaging with its inverse
+/// transpose until it settles (Higham's iteration: a rigid or mildly scaled joint in two or three
+/// steps); a singular `A` gives the identity.
+fn polar_rotation(a: [f32; 9]) -> [f32; 9] {
+    let mut rotation = a;
+    for _ in 0..12 {
+        let [m00, m10, m20, m01, m11, m21, m02, m12, m22] = rotation;
+        let c00 = m11 * m22 - m12 * m21;
+        let c01 = m12 * m20 - m10 * m22;
+        let c02 = m10 * m21 - m11 * m20;
+        let determinant = m00 * c00 + m01 * c01 + m02 * c02;
+        if determinant.abs() < 1e-12 {
+            return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        }
+        // the inverse transpose: the cofactor matrix over the determinant, listed column by
+        // column (C00 C10 C20, C01 C11 C21, C02 C12 C22)
+        let inverse_transpose = [
+            c00,
+            m02 * m21 - m01 * m22,
+            m01 * m12 - m02 * m11,
+            c01,
+            m00 * m22 - m02 * m20,
+            m02 * m10 - m00 * m12,
+            c02,
+            m01 * m20 - m00 * m21,
+            m00 * m11 - m01 * m10,
+        ]
+        .map(|value| value / determinant);
+        let next: [f32; 9] = std::array::from_fn(|at| 0.5 * (rotation[at] + inverse_transpose[at]));
+        let change: f32 = next.iter().zip(&rotation).map(|(a, b)| (a - b).abs()).sum();
+        rotation = next;
+        if change < 1e-7 {
+            break;
+        }
+    }
+    rotation
+}
+
+/// A rotation matrix (column by column) as a unit quaternion `[x y z w]`.
+fn quaternion_of(rotation: [f32; 9]) -> [f32; 4] {
+    let [m00, m10, m20, m01, m11, m21, m02, m12, m22] = rotation;
+    let trace = m00 + m11 + m22;
+    let quaternion = if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        [(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25 * s]
+    } else if m00 > m11 && m00 > m22 {
+        let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
+        [0.25 * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s]
+    } else if m11 > m22 {
+        let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
+        [(m01 + m10) / s, 0.25 * s, (m12 + m21) / s, (m02 - m20) / s]
+    } else {
+        let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
+        [(m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s]
+    };
+    let length = quaternion
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt();
+    quaternion.map(|value| value / length.max(1e-12))
+}
+
+/// A unit quaternion `[x y z w]` as a rotation matrix, column by column.
+fn rotation_of(quaternion: [f32; 4]) -> [f32; 9] {
+    let [x, y, z, w] = quaternion;
+    [
+        1.0 - 2.0 * (y * y + z * z),
+        2.0 * (x * y + z * w),
+        2.0 * (x * z - y * w),
+        2.0 * (x * y - z * w),
+        1.0 - 2.0 * (x * x + z * z),
+        2.0 * (y * z + x * w),
+        2.0 * (x * z + y * w),
+        2.0 * (y * z - x * w),
+        1.0 - 2.0 * (x * x + y * y),
+    ]
+}
+
+/// Every joint of `palette` (16 floats a joint, column-major) split into its rotation and the
+/// rest ([`JointRotations`], ADR-814).
+pub fn joint_rotations(palette: &[f32]) -> JointRotations {
+    let joints = palette.len() / 16;
+    let mut quaternions = Vec::with_capacity(joints);
+    let mut stretches = Vec::with_capacity(joints);
+    for joint in 0..joints {
+        let m = &palette[joint * 16..joint * 16 + 16];
+        let a = [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]];
+        let rotation = polar_rotation(a);
+        // S = Rᵀ·A, column by column
+        let stretch: [f32; 9] = std::array::from_fn(|at| {
+            let (column, row) = (at / 3, at % 3);
+            (0..3)
+                .map(|term| rotation[row * 3 + term] * a[column * 3 + term])
+                .sum()
+        });
+        quaternions.push(quaternion_of(rotation));
+        stretches.push(stretch);
+    }
+    JointRotations {
+        quaternions,
+        stretches,
+    }
+}
+
 /// The skinning matrix of vertex `index` — the weighted sum of its joints' palette matrices,
 /// a joint past the palette's end skipped — or `None` for a rigid draw or a vertex no joint
-/// of the palette moves. The shader skins the same way (`vs_mesh`).
-pub fn skin_matrix(mesh: &Mesh, palette: Option<&[f32]>, index: usize) -> Option<[f32; 16]> {
+/// of the palette moves. A mesh with `centres`, given its palette's `rotations`, skins a vertex
+/// on more than one joint by blending ROTATIONS instead (ADR-814, Le & Hodgins 2016): the joints'
+/// quaternions summed sign-aligned with the heaviest's and normalised, `R`; their stretches summed
+/// by weight, `S̄`; the matrix `[R·S̄ | L·p* − R·S̄·p*]`, which turns the vertex rigidly about its
+/// centre `p*` and puts that centre where the blended matrices `L` put it. The shader skins the
+/// same way (`vs_mesh`).
+pub fn skin_matrix(
+    mesh: &Mesh,
+    palette: Option<&[f32]>,
+    rotations: Option<&JointRotations>,
+    index: usize,
+) -> Option<[f32; 16]> {
     let palette = palette?;
     if mesh.joints.is_empty() {
         return None;
@@ -3802,18 +3940,91 @@ pub fn skin_matrix(mesh: &Mesh, palette: Option<&[f32]>, index: usize) -> Option
     let joints = mesh.joints[index];
     let weights = mesh.weights[index];
     let mut out = [0.0f32; 16];
-    let mut any = false;
+    let mut moving = 0;
+    let mut heaviest: Option<(usize, f32)> = None;
     for (joint, weight) in joints.iter().zip(weights) {
         let start = *joint as usize * 16;
         if weight <= 0.0 || start + 16 > palette.len() {
             continue;
         }
-        any = true;
+        moving += 1;
+        if heaviest.is_none_or(|(_, most)| weight > most) {
+            heaviest = Some((*joint as usize, weight));
+        }
         for (slot, value) in out.iter_mut().zip(&palette[start..start + 16]) {
             *slot += weight * value;
         }
     }
-    any.then_some(out)
+    let (Some(rotations), Some(centre), Some((first, _))) =
+        (rotations, mesh.centres.get(index), heaviest)
+    else {
+        return (moving > 0).then_some(out);
+    };
+    if moving < 2 || first >= rotations.quaternions.len() {
+        return Some(out);
+    }
+    let reference = rotations.quaternions[first];
+    let mut quaternion = [0.0f32; 4];
+    let mut stretch = [0.0f32; 9];
+    for (joint, weight) in joints.iter().zip(weights) {
+        let joint = *joint as usize;
+        if weight <= 0.0 || joint * 16 + 16 > palette.len() || joint >= rotations.quaternions.len()
+        {
+            continue;
+        }
+        let q = rotations.quaternions[joint];
+        let aligned = if q.iter().zip(&reference).map(|(a, b)| a * b).sum::<f32>() < 0.0 {
+            -weight
+        } else {
+            weight
+        };
+        for (slot, value) in quaternion.iter_mut().zip(q) {
+            *slot += aligned * value;
+        }
+        for (slot, value) in stretch.iter_mut().zip(rotations.stretches[joint]) {
+            *slot += weight * value;
+        }
+    }
+    let length = quaternion
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt();
+    if length < 1e-8 {
+        return Some(out);
+    }
+    let rotation = rotation_of(quaternion.map(|value| value / length));
+    // R·S̄, column by column
+    let turned: [f32; 9] = std::array::from_fn(|at| {
+        let (column, row) = (at / 3, at % 3);
+        (0..3)
+            .map(|term| rotation[term * 3 + row] * stretch[column * 3 + term])
+            .sum()
+    });
+    let lbs_centre = transform(&out, *centre, 1.0);
+    let moved_centre: [f32; 3] = std::array::from_fn(|row| {
+        (0..3)
+            .map(|column| turned[column * 3 + row] * centre[column])
+            .sum()
+    });
+    Some([
+        turned[0],
+        turned[1],
+        turned[2],
+        0.0,
+        turned[3],
+        turned[4],
+        turned[5],
+        0.0,
+        turned[6],
+        turned[7],
+        turned[8],
+        0.0,
+        lbs_centre[0] - moved_centre[0],
+        lbs_centre[1] - moved_centre[1],
+        lbs_centre[2] - moved_centre[2],
+        1.0,
+    ])
 }
 
 /// A vertex ready to rasterise: its clip position and what the fragment interpolates.
@@ -4434,6 +4645,14 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
     add_morphs(&mesh.morphs, &draw.morphs, &mut positions, &mut normals);
     let eye = draw.material.eye_optics();
     let loose = loose_palette(scene, draw);
+    // each palette's joints as rotations, once a draw, for a mesh that turns its vertices about
+    // their centres (ADR-814)
+    let rotations = palette
+        .filter(|_| !mesh.centres.is_empty())
+        .map(joint_rotations);
+    let loose_rotations = loose
+        .filter(|_| !mesh.centres.is_empty())
+        .map(|(lagging, _)| joint_rotations(lagging));
     (0..mesh.positions.len())
         .map(|index| {
             let position = positions[index];
@@ -4442,7 +4661,7 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
                 .tangents
                 .as_ref()
                 .map_or([1.0, 0.0, 0.0, 1.0], |tangents| tangents[index]);
-            let matrix = match skin_matrix(mesh, palette, index) {
+            let matrix = match skin_matrix(mesh, palette, rotations.as_ref(), index) {
                 Some(skin) => multiply(&draw.model, &skin),
                 None => draw.model,
             };
@@ -4451,7 +4670,8 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
             if let Some((palette, amount)) = loose {
                 let share = loose_share(mesh, index, amount);
                 if share > 0.0
-                    && let Some(skin) = skin_matrix(mesh, Some(palette), index)
+                    && let Some(skin) =
+                        skin_matrix(mesh, Some(palette), loose_rotations.as_ref(), index)
                 {
                     let lagged = transform(&multiply(&draw.model, &skin), position, 1.0);
                     for axis in 0..3 {
