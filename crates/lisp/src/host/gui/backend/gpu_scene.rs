@@ -1817,7 +1817,7 @@ fn a_normal_maps_green_tilts_toward_the_images_up_whatever_the_tangents_w_on_the
     for adapter in &adapters {
         let info = adapter.get_info();
         let name = format!("{} ({:?})", info.name, info.backend);
-        let mut shoot = |w: f32, map: &[u8]| -> Option<i32> {
+        let shoot = |w: f32, map: &[u8]| -> Option<i32> {
             let mut gpu = GpuWindow::offscreen(adapter, side, side).ok()?;
             gpu.upload_mesh(1, &quad(w));
             gpu.upload_texture(11, map, 4, 4, crate::host::gui::TextureFilter::Data);
