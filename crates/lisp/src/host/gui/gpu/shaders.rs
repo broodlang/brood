@@ -1847,6 +1847,54 @@ fn ambient_occlusion(world: vec3<f32>, normal: vec3<f32>) -> f32 {
     return clamp(1.0 - scene.occlusion.y * occluded / 16.0, 0.0, 1.0);
 }
 
+// contact shadows (ADR-818, the GPU painter only): how much of a shadowed light reaches `world` past what lies
+// within `CONTACT_REACH` of it toward the light, as the camera's depth view holds it
+const CONTACT_REACH: f32 = 0.03;
+const CONTACT_STEPS: u32 = 12u;
+const CONTACT_THICKNESS: f32 = 0.03;
+// how far along its reflected direction a surface looks for what hides the room from it
+const REFLECTION_REACH: f32 = 0.04;
+fn contact_shadow(world: vec3<f32>, to_light: vec3<f32>) -> f32 {
+    return screen_blocked(world, to_light, CONTACT_REACH);
+}
+
+// how open the way from `world` along `direction` is, over `reach` metres, as the camera's depth
+// view holds what lies there (ADR-818): 1 open, toward 0 where something within a few centimetres
+// stands in the way (the contact shadow toward a light; toward the reflected direction, the
+// room's reflection hidden by her own cheeks and lips in her mouth)
+fn screen_blocked(world: vec3<f32>, to_light: vec3<f32>, reach: f32) -> f32 {
+    let at = u32(scene.occlusion.z);
+    if (at == 0u) {
+        return 1.0;
+    }
+    let view = scene.shadows[at - 1u];
+    let side = u32(view.info.y);
+    var shade = 0.0;
+    for (var step = 0u; step < CONTACT_STEPS; step = step + 1u) {
+        let share = (f32(step) + 1.0) / f32(CONTACT_STEPS);
+        let point = world + to_light * reach * share;
+        let clip = view.view_proj * vec4<f32>(point, 1.0);
+        if (clip.w <= 1e-6) {
+            continue;
+        }
+        let across_unit = clip.x / clip.w * 0.5 + 0.5;
+        let down_unit = 0.5 - clip.y / clip.w * 0.5;
+        if (across_unit < 0.0 || across_unit >= 1.0 || down_unit < 0.0 || down_unit >= 1.0) {
+            continue;
+        }
+        let column = min(u32(across_unit * f32(side)), side - 1u);
+        let row = min(u32(down_unit * f32(side)), side - 1u);
+        let stored = camera_distance(view.view_proj, map_load(view.map, vec2<i32>(i32(column), i32(row))));
+        let reached = camera_distance(view.view_proj, clip.z / clip.w);
+        let ahead = reached - stored;
+        // (the nearest step in shade counts most; the gap in front eased in from 1 to 3 mm and out
+        // toward the thickness, so the shadow's edge grades with the depth, not cut at a pixel)
+        shade = max(shade, (1.0 - share * share) * smoothstep(0.001, 0.003, ahead)
+            * (1.0 - smoothstep(0.5 * CONTACT_THICKNESS, CONTACT_THICKNESS, ahead)));
+    }
+    return 1.0 - shade;
+}
+
 // a `:hair` highlight (`mesh::shade`): across the strand shifted along the normal, sharpened
 fn hair_highlight(strand: vec3<f32>, normal: vec3<f32>, half_vector: vec3<f32>, shift: f32, sharpness: f32) -> f32 {
     let along = dot(safe_normalize(strand + normal * shift), half_vector);
@@ -2115,12 +2163,15 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         let arrival = light_arrival(light, world);
         let arriving = arrival.amount;
         var seen = 1.0;
+        var contact = 1.0;
         if (light.shadow.z > 0u) {
             if (draw.flags.x == 4u || draw.flags.x == 5u) {
                 // hair shades hair by how much of it the light crossed, not in or out
                 seen = hair_shadow(light, world, turn);
             } else {
-                seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn);
+                // (and the shadow of what is too near and small for its map, ADR-818)
+                contact = contact_shadow(world, arrival.to_light);
+                seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn) * contact;
             }
         }
         let to_light = arrival.to_light;
@@ -2199,7 +2250,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             // an arm's (ADR-815: unshadowed, the red wrap shone in a cast shadow)
             var lifted = seen;
             if (light.shadow.z > 0u && facing < 0.3) {
-                lifted = shadow_visibility(light, world + surface_normal * (SCATTER_LIFT * 1000.0 * draw.skin.x), surface_normal, arrival.to_light, turn);
+                lifted = contact * shadow_visibility(light, world + surface_normal * (SCATTER_LIFT * 1000.0 * draw.skin.x), surface_normal, arrival.to_light, turn);
             }
             let scattered_seen = mix(lifted, seen, smoothstep(0.0, 0.3, facing));
             let scattered = skin_diffuse(facing, curvature * draw.skin.x);
@@ -2220,6 +2271,10 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
     let roughnesses = vec3<f32>(draw.material.x * draw.lobes.x, draw.material.x * draw.lobes.y, coat.y);
     let reflectances = vec3<f32>(f0, f0, 0.02);
     let emitter_count = u32(scene.picture.z);
+    // (the room's reflection hidden where something of the scene stands within `REFLECTION_REACH`
+    // along the reflected direction, as the depth view holds it: deep in her mouth her cheeks and
+    // lips hide the room from her side teeth, which shone grey as chrome, ADR-818)
+    let reflection_open = screen_blocked(world, reflected, REFLECTION_REACH);
     for (var layer = 0u; layer < 3u; layer = layer + 1u) {
         let weight = weights[layer];
         if (weight <= 0.0) {
@@ -2228,7 +2283,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         let roughness = roughnesses[layer];
         let reflectance = reflectances[layer];
         let lobe = lobe_exponent(roughness);
-        let open = weight * kept * specular_occlusion(normal_dot_view, occlusion, roughness);
+        let open = weight * kept * reflection_open * specular_occlusion(normal_dot_view, occlusion, roughness);
         let fit = environment_brdf(roughness, normal_dot_view);
         let surrounding = open * (reflectance * fit.x + min(50.0 * reflectance, 1.0) * fit.y);
         out = out + ambient_radiance(reflected, lobe) * surrounding;

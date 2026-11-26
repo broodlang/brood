@@ -3089,3 +3089,8 @@ gate for named defns (a tiny callee 200 → 15 ns, but b3d's FK +20%, springs +1
 stands), judging the gate on an arm's leaf derivation (no b3d arm has one that helps), and not
 counting calls to builtins (31 more arms lowered, no frame-time win). Guard: `sequence_test`'s
 native check on `%mapv-vector` (sabotaged red in both contract modes) and a cross-process mapv.
+2026-11-26. **Contact shadows (ADR-818), GPU only; the CPU painter frozen as the fallback.** A
+shadowed light marches 2 cm toward itself through the camera's depth view, so a lip shades the
+teeth under it and a crease its floor where the shadow map cannot. New scene features go in for
+the GPU painter alone from here. Also: the CPU painter's contact skip mask held 16 of the 64
+contacts; it holds all of them now.
