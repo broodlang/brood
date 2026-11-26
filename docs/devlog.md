@@ -3133,3 +3133,11 @@ but not the call chain into the runtime. `math/max`/`math/min` gained a three-ar
 as `%max`/`%min` fold (the rest list and `apply` cost ~20× two calls: 467 → 119 ns). Guards:
 `cli::perf_map` (red with the writer disabled), and `math_test`'s three-argument agreement over ties
 and NaN in every position (red with the fold order swapped), both contract modes.
+
+2026-11-26. **KI-414: an imaged project module's errors named the wrong file.** womanblend's hair
+crash read `std/seq.blsp:1270:69` for a line of `b3d-hair.blsp`. `%image-load-section` stamped a
+section's forms with a file only for an embedded std module (KI-184); a project module's section
+came back fileless, and whatever caught one of its errors (`try`, `seq/pmap`'s re-raise, the crash
+reporter) filled in its own file through `or_file`. The project loader now passes the module's
+path from `*module-files*`. Found by bisecting the shape until it flipped between runs: right from
+source, wrong from the image. Guard: `nest::image_error_file` (sabotaged: `FILE nil`).

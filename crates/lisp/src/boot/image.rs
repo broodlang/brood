@@ -89,7 +89,7 @@ pub(crate) fn register(primitives: &mut crate::builtins::Primitives) {
         Arity::range(3, 5),
         Sig::new(vec![any, any, any, any, any], any),
         &["path", "offset", "len", "reserve?", "module"],
-        "Materialise one section of a startup image: define its globals (rebuilding macros as macros) and register its declared sigs. Returns how many entries were defined, or nil if the bytes could not be read or decoded. Seeks straight to the section, so loading one module never reads the rest of the image (ADR-218). With `reserve?` truthy, function-valued globals join the reserved set as an embedded module's own defs do when it loads from source (ADR-166). `module` names the std module this section holds, so the positions its forms carry are stamped with THAT module's source file rather than whatever the process is loading (KI-184).",
+        "Materialise one section of a startup image: define its globals (rebuilding macros as macros) and register its declared sigs. Returns how many entries were defined, or nil if the bytes could not be read or decoded. Seeks straight to the section, so loading one module never reads the rest of the image (ADR-218). With `reserve?` truthy, function-valued globals join the reserved set as an embedded module's own defs do when it loads from source (ADR-166). `module` names the std module this section holds (or, for a project's module, is its source path, ending `.blsp`), so the positions its forms carry are stamped with THAT module's source file rather than whatever the process is loading (KI-184, KI-414).",
         image_load_section);
 }
 
@@ -1072,15 +1072,24 @@ pub(crate) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
     // file under another file's name. That is not a cosmetic mismatch: it is how a contract
     // shim's line 135 was reported against the user's own script (KI-184), and the same
     // trap `set_form_pos_in_file` documents for the expander. Restored below.
-    let section_file = match arg(args, 4) {
+    // A std module is named by its key; a project's module by its source path (`*module-files*`),
+    // which no table here knows. Without that path a project section came back with no file on
+    // any form, and the first `try`, loader or crash reporter to see one of its errors filled in
+    // its OWN file beside the module's line: womanblend's hair crash was reported at
+    // `std/seq.blsp:1270`, `seq/pmap`'s worker, a line of `b3d-hair.blsp` (KI-414).
+    let section_file: Option<String> = match arg(args, 4) {
         Value::Nil => None,
         v => expect_string(heap, "%image-load-section", v)
             .ok()
-            .and_then(|key| crate::builtins::modules::embedded_module_path(&key)),
+            .and_then(|key| {
+                crate::builtins::modules::embedded_module_path(&key)
+                    .map(str::to_string)
+                    .or_else(|| key.ends_with(".blsp").then_some(key))
+            }),
     };
     // Restored on EVERY exit — the decode-failure nils and an error from a define alike —
     // because every exit of the body passes back through here.
-    let prior_file = heap.set_current_file(section_file.map(str::to_string));
+    let prior_file = heap.set_current_file(section_file);
     let loaded = load_section_entries(heap, &mut r, count, reserve);
     heap.set_current_file(prior_file);
     if trace() {

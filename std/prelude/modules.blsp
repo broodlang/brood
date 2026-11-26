@@ -1171,11 +1171,14 @@ not a header, or does not read: the load itself reports a malformed one."
           ;; providing then published a module with names missing, and its callers died of
           ;; `unbound symbol` — the silent half of KI-127. It raises instead, as a broken
           ;; source module does, and `require-one` releases the claim and its waiters.
+          ;; The section's source file, for its forms' positions: a std module's by its key, a
+          ;; named project's module by its path in `*module-files*` (KI-414: without it an
+          ;; imaged project module's error named whatever file caught it)
           (when (not (%image-load-section img-path
                        (first sec)
                        (second sec)
                        (not (nil? embedded))
-                       (->string key)))
+                       (if embedded (->string key) (or (get *module-files* key) (->string key)))))
             (error "require: module '"
               (->string key)
               "' did not decode from the image "

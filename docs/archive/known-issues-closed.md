@@ -5,6 +5,33 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-414 — an error raised in an imaged project module named the wrong file ✅ fixed 2026-11-26
+
+**Symptom.** womanblend's viewer crashed in the hair (`b3d-hair/moved-with`) and the crash report
+read `at std/seq.blsp:1270:69` — `std/seq.blsp` has no line 1270; line 1270, column 69 was the
+`-` in `b3d-hair.blsp`'s `shapes-between`. A caught error showed the same split: its `:line` and
+`:col` the raise site's, its `:file` that of the frame whose `try` caught it.
+
+**Cause.** `%image-load-section` re-stamps a section's forms with a file only when the caller
+names an embedded std module (`embedded_module_path`, the KI-184 fix). The project loader
+passes the module's KEY, which no table maps to a file for a project module, so every form of an
+imaged project module came back with no file. An error raised there carried a position and no
+file, and `or_file` — the first `try`, `load` or crash reporter it met — supplied its own. From
+source the same module named its file correctly, so it showed only once the image was warm,
+which is every run but the first after an edit.
+
+**Why it survived.** The uncaught-error printer names the file from the trace, not from the error
+map, so a top-level failure looked right; only a caught error, a re-raise (`seq/pmap`) or the
+crash report read the map's `:file`. The KI-184 guard covers std modules only.
+
+**Fix.** The project loader passes the module's source path from `*module-files*` (a named
+project's), and `%image-load-section` takes a string ending `.blsp` as the section's file. A std
+module is still named by its key; a nameless project has no paths and keeps the old behaviour.
+
+**Guard.** `nest::image_error_file` — two runs of a project whose module raises two closures deep:
+from source and from the image, both name `raiser.blsp` line 2. Without the fix the second reads
+`FILE nil`.
+
 ## KI-412 — a preempt through a `count` re-tiered as a call panicked the driver ✅ fixed 2026-11-26
 
 **Symptom.** CI's downstream bedit smoke red on `533a49199` and `129598bbb`: two worker threads
