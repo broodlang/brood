@@ -24,9 +24,12 @@ answer with the old one.
 not have the shape, and the cap makes it terminate, so it read as a budget that a big file ran
 out of rather than as a loop.
 
-**Fix.** `ascend_return` joins: an answer that is not a supertype of the current one becomes
-their union. Sound (the function may give either) and monotone, so each return climbs a finite
-chain. No verdict over std/, tests/ or the checker's 816 tests moved.
+**Fix.** The joint loop remembers every value each return has held. A return that goes back to
+one of them is cycling, and joins the current value instead (sound: the function may give
+either), which ends the cycle. A first version joined EVERY answer not above the current one; a
+return legitimately sharpens between rounds (a parameter read as `any` is derived a round later),
+and pinning those at `any` raised a false `nil?: this can never be true` in
+`std/tool/property.blsp` — caught by the pre-push gate, which checks the file list CI does.
 
 **Guard.** `types::check::tests::robustness::a_return_that_does_not_retype_monotonically_still_settles`
 — the three-line file; without the join it reports the give-up.

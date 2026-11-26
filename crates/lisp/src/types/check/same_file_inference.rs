@@ -470,16 +470,6 @@ fn ascend_return(mut ret: Ty, current: Option<&Ty>, older: Option<&Ty>, round: u
     if round >= sigs::WIDEN_AFTER_ROUND {
         ret = ret.widened_below(sigs::WIDEN_DEPTH);
     }
-    // The ascent only RISES. A re-typing is not always monotone in what it reads: a return
-    // came back as `vector` one round and `vector<(tuple any)>` the next, for good, and the
-    // fixpoint it never reached left every parameter of the file unknown (KI-416, b3d-mass).
-    // An answer that is not above the current one joins it — sound, a union of two answers
-    // either of which the function may give — so each return climbs a finite chain.
-    if let Some(previous) = current
-        && !previous.is_subtype(&ret)
-    {
-        ret = ret.union(previous.clone());
-    }
     ret
 }
 
@@ -550,6 +540,8 @@ pub(super) fn derive_caller_params(
     // Each return's value from the round before last, for the fold (a value that recurses
     // through another function grows every other round).
     let mut older_returns: HashMap<Symbol, Ty> = HashMap::new();
+    // Every value each return has held, to tell a cycle from a move (see the loop).
+    let mut returns_held: HashMap<Symbol, Vec<Ty>> = HashMap::new();
     // The site walks, memoised per form across every round, with the names whose return or
     // derived parameters moved since the last derivation — `None` walks everything.
     let mut site_cache = sigs::SiteCache::new(heap, expanded, &candidates);
@@ -625,7 +617,26 @@ pub(super) fn derive_caller_params(
             typed.insert(name);
             let current = ctx.inferred_fn_sig(name).map(|s| s.ret);
             let ret = ascend_return(ret, current.as_ref(), older_returns.get(&name), round);
+            // A return may move either way between rounds (a parameter read as `any` one
+            // round is derived the next, and the return sharpens), so nothing here is a
+            // monotone ascent, and a re-typing can CYCLE: one came back as `vector`, then
+            // `vector<(tuple any)>`, then `vector` again, for good, and the fixpoint it never
+            // reached left every parameter of the file unknown (KI-416, b3d-mass). A return
+            // that goes back to a value it has already held is in such a cycle: it joins the
+            // current one instead (sound: the function may give either), which ends it.
+            let ret = match &current {
+                Some(held)
+                    if ret != *held
+                        && returns_held
+                            .get(&name)
+                            .is_some_and(|before| before.contains(&ret)) =>
+                {
+                    ret.union(held.clone())
+                }
+                _ => ret,
+            };
             if let Some(current) = current.clone() {
+                returns_held.entry(name).or_default().push(current.clone());
                 older_returns.insert(name, current);
             }
             if current != Some(ret.clone()) {
