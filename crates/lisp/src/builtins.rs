@@ -56,6 +56,7 @@ mod filesystem;
 mod fuzzy;
 mod gui;
 mod gui_fonts;
+mod hair;
 mod image;
 mod io;
 mod json;
@@ -252,6 +253,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     treesit::register_open_tokens(&mut primitives);
     // And again: the signed-distance scenes, probed and baked natively (ADR-787).
     sdf::register(&mut primitives);
+    hair::register(&mut primitives);
 }
 
 #[cfg(test)]
