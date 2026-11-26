@@ -1669,3 +1669,94 @@ fn a_contact_shadow_darkens_what_lies_just_under_a_near_edge_on_the_gpu() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn of_two_fibres_over_a_pixel_the_nearer_counts_more_on_the_gpu() {
+    // seen from above: a red strand 0.2 m over a blue one, both along z through the middle and
+    // each ~0.6 of a pixel wide. Composited front to back (ADR-813, amended), the red one's colour
+    // weighs its coverage c and the blue one's c(1 − c): the pixel is redder than blue.
+    // Averaged alike (as they once were), the two came out even and hair read over-blended.
+    let side = 128u32;
+    let strand_at = |height: f32| {
+        Arc::new(
+            Mesh::from_parts(MeshParts {
+                positions: bytes_of(&[
+                    0.0, height, -2.0, 0.0, height, -2.0, 0.0, height, 2.0, 0.0, height, 2.0,
+                ]),
+                normals: bytes_of(&[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
+                uvs: bytes_of(&[-0.5, 1.0, 0.5, 1.0, -0.5, 0.0, 0.5, 0.0]),
+                indices: [0u16, 1, 2, 1, 3, 2]
+                    .iter()
+                    .flat_map(|index| index.to_le_bytes())
+                    .collect(),
+                ..MeshParts::default()
+            })
+            .expect("a strand"),
+        )
+    };
+    let near = strand_at(0.2);
+    let far = strand_at(0.0);
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    scene.view_proj = [
+        0.25, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1, 0.0, 0.0, -0.25, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0,
+    ];
+    scene.eye = [0.0, 10.0, 0.0];
+    scene.lights = vec![Light::directional([0.0, -1.0, 0.0], [1.0, 1.0, 1.0])];
+    let fibre = |mesh: u32, color: [f32; 4]| Draw {
+        loose: None,
+        mesh,
+        model: [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+        palette: None,
+        morphs: vec![],
+        material: Material {
+            surface: Surface::Strands,
+            fibres: true,
+            double_sided: true,
+            strand_width: [0.04, 0.04],
+            roughness: 0.6,
+            specular: 0.0,
+            color,
+            ..Material::default()
+        },
+    };
+    scene.draws = vec![
+        fibre(2, [0.0, 0.0, 1.0, 1.0]),
+        fibre(1, [1.0, 0.0, 0.0, 1.0]),
+    ];
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &near);
+        gpu.upload_mesh(2, &far);
+        let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+        renderer.set_bg(Some([0, 0, 0]));
+        gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+            .expect("an offscreen frame is never skipped");
+        let pixels = gpu.read_pixels();
+        let channel = |x: u32, c: u32| i32::from(pixels[((64 * side + x) * 3 + c) as usize]);
+        let red = channel(63, 0) + channel(64, 0);
+        let blue = channel(63, 2) + channel(64, 2);
+        eprintln!("{name}: over the two fibres red {red} blue {blue}");
+        // (each fibre lies over two pixels, ~0.32 of each: front to back gives red ~1/(1 − 0.32) of
+        // blue, averaged alike they were even)
+        if !(red * 4 > blue * 5 && blue > 0) {
+            failures.push(format!(
+                "{name}: the nearer fibre does not count more: red {red} blue {blue}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -2554,7 +2554,10 @@ fn fs_fibre_layers(fragment: VertexOut) -> @location(0) vec4<f32> {
     }
     let pixel = vec2<u32>(floor(fragment.clip.xy));
     let base = (pixel.y * u32(scene.picture.x) + pixel.x) * 3u;
-    var kept = 0xFFFFFFFFu - bitcast<u32>(fragment.clip.z);
+    // (its depth, nearer larger, in the top 24 bits and its coverage in the low 8: what the front
+    // pass composites the three nearest by, front to back)
+    let coverage_byte = u32(clamp(coverage, 0.0, 1.0) * 255.0 + 0.5);
+    var kept = ((0xFFFFFFFFu - bitcast<u32>(fragment.clip.z)) & 0xFFFFFF00u) | max(coverage_byte, 1u);
     for (var slot = 0u; slot < 3u; slot = slot + 1u) {
         let before = atomicMax(&fibre_layers[base + slot], kept);
         if (before == 0u) {
@@ -2578,7 +2581,24 @@ fn fs_fibre_front(fragment: VertexOut, @builtin(front_facing) front: bool) -> @l
     let uv_dy = dpdy(fragment.uv);
     let coverage = fibre_coverage(fragment);
     let lit = mesh_lit(fragment, front, texel, normal_texel, occlusion_texel, detail_texel, uv_dx, uv_dy, 1.0);
-    return vec4<f32>(lit.rgb * coverage, coverage);
+    // composited front to back among the pixel's three nearest: weighed by its coverage and by
+    // what the nearer of them let through (averaged alike, the front strand counted no more than
+    // those behind it, and hair read over-blended)
+    let pixel = vec2<u32>(floor(fragment.clip.xy));
+    let base = (pixel.y * u32(scene.picture.x) + pixel.x) * 3u;
+    let own = (0xFFFFFFFFu - bitcast<u32>(fragment.clip.z)) & 0xFFFFFF00u;
+    var through = 1.0;
+    for (var slot = 0u; slot < 3u; slot = slot + 1u) {
+        let stored = atomicLoad(&fibre_layers[base + slot]);
+        if (stored == 0u) {
+            break;
+        }
+        if ((stored & 0xFFFFFF00u) > own) {
+            through = through * (1.0 - f32(stored & 0xFFu) / 255.0);
+        }
+    }
+    let weight = coverage * through;
+    return vec4<f32>(lit.rgb * weight, weight);
 }
 
 struct ShadowOut {
