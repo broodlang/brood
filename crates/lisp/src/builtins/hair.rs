@@ -179,6 +179,7 @@ fn constants_of(heap: &Heap, map: Value) -> Result<Constants, String> {
         pressed: get("pressed")?,
         shove: get("shove")?,
         unfold_give: get("unfold-give")?,
+        past: get("past")?,
         ground: get("ground")?,
         clearance: get("clearance")?,
         passes: get("passes")? as usize,

@@ -19,6 +19,9 @@ pub struct Constants {
     pub pressed: f64,
     pub shove: f64,
     pub unfold_give: f64,
+    /// how far past its bend limit (in its cosine) a joint must be before a step for that step to
+    /// open it gently (`*past*`)
+    pub past: f64,
     pub ground: f64,
     /// `*clearance*`'s furthest: how near a pane is looked for by default
     pub clearance: f64,
@@ -229,15 +232,34 @@ fn unfolded_fully(above: Vector, p: Vector, q: Vector, limit: f64) -> Vector {
     }
 }
 
-/// `unfolded`
-fn unfolded(above: Vector, p: Vector, q: Vector, limit: f64, constants: &Constants) -> Vector {
+/// `bent-past?`: whether the joint at `p` bends further than `limit` (a cosine)
+fn bent_past(above: Vector, p: Vector, q: Vector, limit: f64) -> bool {
+    let ax = p[0] - above[0];
+    let ay = p[1] - above[1];
+    let az = p[2] - above[2];
+    let dx = q[0] - p[0];
+    let dy = q[1] - p[1];
+    let dz = q[2] - p[2];
+    let lengths = (ax * ax + ay * ay + az * az).sqrt() * (dx * dx + dy * dy + dz * dz).sqrt();
+    lengths > 1.0e-18 && (ax * dx + ay * dy + az * dz) / lengths < limit
+}
+
+/// `unfolded`: at once, or `*unfold-give*` a step when `eased`
+fn unfolded(
+    above: Vector,
+    p: Vector,
+    q: Vector,
+    limit: f64,
+    eased: bool,
+    constants: &Constants,
+) -> Vector {
     let wanted = unfolded_fully(above, p, q, limit);
     let [qx, qy, qz] = q;
     let wx = wanted[0] - qx;
     let wy = wanted[1] - qy;
     let wz = wanted[2] - qz;
     let far = (wx * wx + wy * wy + wz * wz).sqrt();
-    if far <= constants.unfold_give {
+    if !eased || far <= constants.unfold_give {
         wanted
     } else {
         let factor = constants.unfold_give / far;
@@ -480,10 +502,25 @@ fn constrained_with(
         let before = points[index - 1];
         let length = lengths[index - 1];
         let placed = at_length(before, points[index], length);
+        // (eased only where the joint was past its limit before the step by more than `*past*`)
+        let eased = index >= 2
+            && bent_past(
+                olds[index - 2],
+                olds[index - 1],
+                olds[index],
+                limits[index] - constants.past,
+            );
         let placed = if index < 2 {
             placed
         } else {
-            unfolded(points[index - 2], before, placed, limits[index], constants)
+            unfolded(
+                points[index - 2],
+                before,
+                placed,
+                limits[index],
+                eased,
+                constants,
+            )
         };
         let thickness = lock
             .thickness
@@ -515,7 +552,14 @@ fn constrained_with(
         let end = if index < 2 {
             pushed
         } else {
-            let opened = unfolded(points[index - 2], base, pushed, limits[index], constants);
+            let opened = unfolded(
+                points[index - 2],
+                base,
+                pushed,
+                limits[index],
+                eased,
+                constants,
+            );
             if opened == pushed {
                 pushed
             } else {
@@ -737,6 +781,7 @@ mod tests {
             pressed: 0.4,
             shove: 0.018,
             unfold_give: 0.003,
+            past: 0.03,
             ground: 0.015,
             clearance: 0.03,
             passes: 1,
