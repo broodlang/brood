@@ -32,6 +32,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `builtins/fuzzy.rs` — `%fuzzy-top` — the ranking pass under `std/fuzzy`'s `top` / `filter`, native.
   - `builtins/gui.rs` — The windowed frontend's primitives (ADR-046): `%gui-*`, the same seam as `term-*`, painting the render-op protocol to a native window (`std/gui.blsp` is the policy).
   - `builtins/gui_fonts.rs` — The GUI font natives added by ADR-442, registered last for the intern-order reason `editor_native` gives: `%gui-font-info` (where a family's faces came from — the file an installed name resolved to, or that it was not found — and the fallback fonts loaded so far) and `%gui-ligatures!` (shape punctuation runs together, so a programming font's ligatures form).
+  - `builtins/hair.rs` — A hair lock's sub-steps, natively (ADR-821): b3d-hair's locks read from Brood values into `host::hair`, stepped, and handed back.
   - `builtins/image.rs` — The image primitives: bytes nobody vouches for decoded into a bounded RGBA buffer, and such a buffer written back as a PNG.
   - `builtins/io.rs` — Console I/O: print/render/write to stdout and stderr, TTY probes, the stdout capture `nest test` and the MCP server use, and the non-blocking stdin reader behind `read-line`.
   - `builtins/json.rs` — `%json-encode-plain`: `json/encode` natively, for the values its built-in rules cover.
@@ -115,6 +116,7 @@ groups modules under `proc/`, `net/` and `tool/`, but their names stay bare (`ge
   - `host/dial.rs` — Dialling a TCP peer by name with every wait bounded — the one policy both the node links (`dist`) and the socket primitives (`host::net`) dial through.
   - `host/file_watch.rs` — File change notification (ADR-782): a process watches a file or a directory and gets a `[:file-watch handle path kind]` message when it changes, instead of polling `file/size`.
   - `host/gui.rs` — The windowed (GUI) frontend for the M3 display/input seam — ADR-046's second frontend, alongside the terminal (crossterm) one in `builtins.rs`.
+  - `host/hair.rs` — A hair lock's sub-steps, natively (ADR-821): b3d-hair's `moved-with` loop over sub-steps (`sub-step`: the Verlet step with its pull to the groom's shape, the roots' hold, the distance-constraint passes keeping each bone off her body's shapes with friction, and the ground), done for every lock in one call.
   - `host/native.rs` — Native numeric kernels through one narrow C ABI (ADR-807, feature `native-kernels`).
   - `host/net.rs` — TCP sockets (ADR-062) — and UDP sockets (ADR-449) — on one **reactor thread** (ADR-143), delivering to process mailboxes (ADR-059).
   - `host/net_wasm.rs` — WASM stub for the TCP/TLS socket mechanism (`crate::host::net`).
