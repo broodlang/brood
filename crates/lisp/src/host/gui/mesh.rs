@@ -183,8 +183,9 @@ pub const MAX_VERTICES: usize = 3 << 20;
 /// vertex a frame. The cap bounds what one `gui/mesh` call may make the host unpack: a guard
 /// against a bad file, not a cost kept (the dense input lives only while the call sorts it into
 /// sparse targets). 256 MiB: a figure of 70,000 vertices has room for some 150 targets (at 128
-/// MiB its 79 were all spoken for). Sparse input (indices and offsets a target) is the real
-/// cure and would make the cap count what is kept.
+/// MiB its 79 were all spoken for). A target may also be given sparse (`:vertices`, u32 a
+/// vertex, with its offsets one a listed vertex, as a glTF sparse accessor holds it): the cap
+/// then counts what is given, 28 bytes a listed vertex.
 pub const MAX_MORPH_BYTES: usize = 256 << 20;
 /// The most indices one mesh may have (4 bytes each on the GPU target, under 256 MiB).
 pub const MAX_INDICES: usize = 63 << 20;
@@ -490,7 +491,7 @@ impl MeshBounds {
 
 /// A mesh's attributes as raw little-endian bytes, the way a glTF buffer holds them, before
 /// [`Mesh::from_parts`] checks and unpacks them.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct MeshParts {
     pub positions: Vec<u8>,
     pub normals: Vec<u8>,
@@ -507,6 +508,10 @@ pub struct MeshParts {
     pub indices: Vec<u8>,
     pub indices_wide: bool,
     pub morphs: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Each target's vertices, u32 a vertex, when it is given sparse (its positions and normals
+    /// then one a listed vertex, as a glTF sparse accessor holds them); empty or missing: dense,
+    /// every vertex.
+    pub morph_vertices: Vec<Vec<u8>>,
     /// How soft its flesh is a vertex, f32 0 (bone) … 1 (soft), for the ring round a contact
     /// (ADR-805); empty: none.
     pub softness: Vec<u8>,
@@ -662,7 +667,13 @@ impl Mesh {
         if let Some(bad) = indices.iter().find(|&&index| index as usize >= count) {
             return Err(format!("indices: {bad} names no vertex of {count}"));
         }
-        let morph_bytes = parts.morphs.len() * count * 24;
+        // (what is given: a sparse target its listed vertices, a dense one every vertex)
+        let morph_bytes: usize = (0..parts.morphs.len())
+            .map(|target| match parts.morph_vertices.get(target) {
+                Some(listed) if !listed.is_empty() => listed.len() / 4 * 28,
+                _ => count * 24,
+            })
+            .sum();
         if morph_bytes > MAX_MORPH_BYTES {
             return Err(format!(
                 "{} morph targets of {count} vertices need {morph_bytes} bytes, more than {MAX_MORPH_BYTES}",
@@ -671,6 +682,44 @@ impl Mesh {
         }
         let mut morphs = Vec::with_capacity(parts.morphs.len());
         for (target, (morph_positions, morph_normals)) in parts.morphs.iter().enumerate() {
+            // (a sparse target: its listed vertices and their offsets, kept as given)
+            if let Some(listed) = parts
+                .morph_vertices
+                .get(target)
+                .filter(|listed| !listed.is_empty())
+            {
+                let vertices: Vec<u32> = listed
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|word| u32::from_le_bytes(*word))
+                    .collect();
+                if let Some(bad) = vertices.iter().find(|&&vertex| vertex as usize >= count) {
+                    return Err(format!(
+                        "morph {target}: vertex {bad} names no vertex of {count}"
+                    ));
+                }
+                let positions = floats::<3>(
+                    &format!("morph {target} positions"),
+                    morph_positions,
+                    vertices.len(),
+                )?;
+                let normals = if morph_normals.is_empty() {
+                    vec![[0.0; 3]; vertices.len()]
+                } else {
+                    floats::<3>(
+                        &format!("morph {target} normals"),
+                        morph_normals,
+                        vertices.len(),
+                    )?
+                };
+                morphs.push(Morph {
+                    vertices,
+                    positions,
+                    normals,
+                });
+                continue;
+            }
             let positions =
                 floats::<3>(&format!("morph {target} positions"), morph_positions, count)?;
             let normals = if morph_normals.is_empty() {
@@ -9622,6 +9671,44 @@ mod tests {
 
     /// ADR-817: a zone's mask times its weight lays the compress map's tilt where the weight is
     /// above 0 and the stretch map's where it is below; another zone's mask does nothing for it.
+    #[test]
+    fn a_morph_target_given_sparse_is_the_one_given_dense() {
+        // four vertices; one target moving vertex 2 alone, given whole (every vertex) and given
+        // sparse (vertex 2 and its offset): the same target, kept alike
+        let bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let base = MeshParts {
+            positions: bytes(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0]),
+            normals: bytes(&[0.0, 0.0, 1.0].repeat(4)),
+            indices: [0u16, 1, 2, 0, 2, 3]
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect(),
+            ..MeshParts::default()
+        };
+        let dense = Mesh::from_parts(MeshParts {
+            morphs: vec![(
+                bytes(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0]),
+                Vec::new(),
+            )],
+            ..base.clone()
+        })
+        .expect("dense");
+        let sparse = Mesh::from_parts(MeshParts {
+            morphs: vec![(bytes(&[0.0, 0.0, 0.2]), Vec::new())],
+            morph_vertices: vec![2u32.to_le_bytes().to_vec()],
+            ..base
+        })
+        .expect("sparse");
+        assert_eq!(dense.morphs[0].vertices, sparse.morphs[0].vertices);
+        assert_eq!(dense.morphs[0].positions, sparse.morphs[0].positions);
+        assert_eq!(sparse.morphs[0].vertices, vec![2]);
+    }
+
     #[test]
     fn a_strand_mesh_orders_its_triangles_by_each_strands_own_number() {
         // three strands of one segment (two triangles each), their numbers 0.9, 0.1, 0.5: the

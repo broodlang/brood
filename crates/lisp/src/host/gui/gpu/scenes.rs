@@ -2064,10 +2064,6 @@ impl MeshGpu {
 /// (a smooth texture is) — a bit that it is there and a bit that it is premultiplied (1 and 2,
 /// 4 and 8, 16 and 32, 64 and 128); then 256 when the detail tile's normal tilts the
 /// surface's, which takes the mesh's tangents (ADR-797; its cavity does not).
-/// How finely the posed face normals are summed (ADR-819): a face normal's length is twice its
-/// triangle's area in square metres, so a 4 mm triangle's is ~3e-5, here ~3e4.
-pub(super) const FACE_SUM_SCALE: f32 = 1.0e9;
-
 /// What the contact passes recompute `mesh`'s normals from (ADR-819): its vertices welded by
 /// place (a UV seam's split vertices are one point, so the sum never breaks along a seam), each
 /// point's area-weighted face normal at rest, and room for the frame's sums.

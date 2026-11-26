@@ -3044,6 +3044,7 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         indices: mesh_bytes(heap, map, "indices")?,
         indices_wide,
         morphs: Vec::new(),
+        morph_vertices: Vec::new(),
         softness: mesh_bytes(heap, map, "softness")?,
         strand: mesh_bytes(heap, map, "strand")?,
         visibility: mesh_bytes(heap, map, "visibility")?,
@@ -3062,6 +3063,10 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
             };
             let positions = mesh_bytes(heap, target, "positions")?;
             let normals = mesh_bytes(heap, target, "normals")?;
+            // (sparse: its vertices, u32 bytes, the offsets one a listed vertex)
+            parts
+                .morph_vertices
+                .push(mesh_bytes(heap, target, "vertices")?);
             parts.morphs.push((positions, normals));
         }
     }
