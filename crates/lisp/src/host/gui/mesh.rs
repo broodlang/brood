@@ -174,6 +174,10 @@ pub const HAIR_COVERAGE_STEPS: [[[f32; 2]; 2]; 2] = [
 /// The reach of the ambient occlusion, in metres, when `:ambient-occlusion` names none: the
 /// size of the folds it darkens (a mouth's corner, a crease beside the nose).
 pub const DEFAULT_OCCLUSION_RADIUS: f32 = 0.03;
+/// The share of the light a `:fibres` strand blocks when its material names none (`:shadow-keep`,
+/// ADR-813 d): womanblend's hair at the user's pick, 2026-11-26 (0.2 from six strengths side by
+/// side, then 0.15 seen live).
+pub const DEFAULT_FIBRE_SHADOW_KEEP: f32 = 0.15;
 /// The most vertices one mesh may have: 84 bytes each on the GPU target stays under the
 /// smallest buffer every device allows (256 MiB).
 pub const MAX_VERTICES: usize = 3 << 20;
@@ -1010,6 +1014,11 @@ pub struct Material {
     /// A `:fibres` surface's `:density`: how much of its baked hair count (`_VISIBILITY`) tints
     /// and dims the light reaching a strand, 0 none; 0.4 by default (ADR-813).
     pub fibre_density: f32,
+    /// A `:fibres` surface's `:shadow-keep`: the share of the light one of its strands blocks where it
+    /// crosses a shadow map's texel, 0 … 1; each shadow fragment is kept that often (stochastic
+    /// transparent shadows), so thin hair casts a faint shadow and only overlapping layers a full one
+    /// ([`DEFAULT_FIBRE_SHADOW_KEEP`] without one; ADR-813 d).
+    pub fibre_shadow_keep: f32,
     /// A skin's expression wrinkles (`:wrinkles`, ADR-817): normal maps laid over its own by eight
     /// zones' masks and weights ([`Wrinkles`]), or none.
     pub wrinkles: Option<Wrinkles>,
@@ -1043,6 +1052,7 @@ impl Default for Material {
             fibres: false,
             clamp_planes: Vec::new(),
             fibre_density: 0.4,
+            fibre_shadow_keep: DEFAULT_FIBRE_SHADOW_KEEP,
             wrinkles: None,
         }
     }

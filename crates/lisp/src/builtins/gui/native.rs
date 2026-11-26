@@ -1826,6 +1826,18 @@ fn scene_spec(
                 ));
             }
         };
+        // a `:fibres` surface's `:shadow-keep`: the share of the light a strand blocks in its shadow, 0 … 1
+        // (ADR-813 d); the default without one, refused when not a share
+        material.fibre_shadow_keep = match get(material_map, "shadow-keep") {
+            None => crate::host::gui::mesh::DEFAULT_FIBRE_SHADOW_KEEP,
+            Some(item) if is_number(item) && (0.0..=1.0).contains(&num(item)) => num(item),
+            Some(other) => {
+                return Err(format!(
+                    "a material's :shadow-keep is a share from 0 to 1, not {}",
+                    crate::syntax::printer::print(heap, other)
+                ));
+            }
+        };
         // planes its strands never pass (ADR-813): `[[px py pz nx ny nz] …]`, a point on
         // each and its normal toward the side the strands keep to; refused when malformed, so
         // hair is never left passing glass without a word
@@ -4301,6 +4313,18 @@ mod gui_scene_light_tests {
         );
         let error = scene_with("[]", "{:surface :fibres :density -1}").expect_err("density");
         assert!(error.contains(":density is a number from 0"), "{error}");
+        // (ADR-813 d) its strands' share of the light their shadow blocks: read, the default without
+        // one, refused outside 0 … 1
+        let keep = |text: &str| {
+            scene_with("[]", text).map(|scene| scene.draws[0].material.fibre_shadow_keep)
+        };
+        assert!((keep("{:surface :fibres :shadow-keep 0.3}").expect("reads") - 0.3).abs() < 1e-6);
+        assert_eq!(
+            keep("{:surface :fibres}").expect("reads"),
+            crate::host::gui::mesh::DEFAULT_FIBRE_SHADOW_KEEP
+        );
+        let error = keep("{:surface :fibres :shadow-keep 1.5}").expect_err("past whole");
+        assert!(error.contains(":shadow-keep is a share"), "{error}");
         let error = scene_with("[]", "{:surface :fibres :clamp-planes [[0 0 0 0 0 0]]}")
             .expect_err("no normal");
         assert!(error.contains(":clamp-planes are each"), "{error}");
