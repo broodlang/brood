@@ -2623,7 +2623,20 @@ fn fs_fibre_front(fragment: VertexOut, @builtin(front_facing) front: bool) -> @l
 struct ShadowOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    // (a `:fibres` strand's own number, `_STRAND`: which strand a shadow fragment is of)
+    @location(1) @interpolate(flat) strand: f32,
 };
+
+// lowbias32, for the fibres' stochastic shadow
+fn shadow_hash(x: u32) -> u32 {
+    var v = x;
+    v = v ^ (v >> 16u);
+    v = v * 0x7feb352du;
+    v = v ^ (v >> 15u);
+    v = v * 0x846ca68bu;
+    v = v ^ (v >> 16u);
+    return v;
+}
 
 @vertex
 fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> ShadowOut {
@@ -2632,6 +2645,7 @@ fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> Shado
         var pressed: ShadowOut;
         pressed.clip = scene.shadows[view_index].view_proj * vec4<f32>(posed_vertices[(draw.deform.y + input.index) * 3u].xyz, 1.0);
         pressed.uv = input.uv;
+        pressed.strand = input.curvature;
         return pressed;
     }
     let posed = pose(input);
@@ -2645,6 +2659,7 @@ fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> Shado
     }
     out.clip = scene.shadows[view_index].view_proj * vec4<f32>(world, 1.0);
     out.uv = input.uv;
+    out.strand = input.curvature;
     return out;
 }
 
@@ -2656,6 +2671,18 @@ fn fs_shadow(fragment: ShadowOut) {
     let alpha = select(1.0, base_texel.a, (draw.flags.y & 1u) != 0u) * draw.color.a;
     if ((draw.flags.x == 2u || draw.flags.x == 3u || draw.flags.x == 4u || draw.flags.x == 5u || draw.flags.x == 6u) && alpha < draw.material.w) {
         discard;
+    }
+    // a `:fibres` strand blocks only part of the light it crosses: each of its shadow fragments is
+    // kept with that share (`clamp_info.w`), drawn by strand and texel, so the shadow map's filter
+    // averages a thin layer of hair into a faint shadow and only many layers into a full one
+    // (stochastic transparent shadows, Enderton et al. 2010). Whole, a strand drawn wide for the
+    // strands it stands for stamped full shadow: dark blotches on her forehead under thin hair
+    if (draw.flags.x == 5u) {
+        let texel = vec2<u32>(fragment.clip.xy);
+        let drawn = shadow_hash(bitcast<u32>(fragment.strand) ^ shadow_hash(texel.x + texel.y * 7919u));
+        if (f32(drawn & 0xffffu) / 65535.0 >= draw.clamp_info.w) {
+            discard;
+        }
     }
 }
 "#;

@@ -19,6 +19,11 @@ pub(super) const VERTEX_FLOATS: usize = 26;
 /// strand's random number, so the first share is an even choice), each drawn this many times as
 /// wide, so the shadow covers as much (ADR-813): the shadow pass was most of a head's cost.
 pub(super) const FIBRE_SHADOW_SHARE: u32 = 8;
+/// The share of the light a `:fibres` strand blocks where it crosses a shadow map's texel: each
+/// of its shadow fragments is kept that often (stochastic transparent shadows), so thin hair casts
+/// a faint shadow and only overlapping layers a full one. 0.2: the user chose it from six strengths
+/// (womanblend docs/film/hair-shadow-b8/temple-strengths-2026-11-26.webp), 2026-11-26.
+pub(super) const FIBRE_SHADOW_KEEP: f32 = 0.2;
 /// The `SceneU` uniform (3744 bytes: each shadow view says where its map is kept, ADR-800),
 /// padded to the dynamic-offset alignment.
 pub(super) const SCENE_BYTES: u64 = 3840;
@@ -2064,11 +2069,17 @@ pub(super) fn draw_uniform(
     } else {
         1.0
     };
+    // (and the share of the light a `:fibres` strand blocks: its shadow fragments kept so often)
+    let shadow_keep = if material.fibres {
+        FIBRE_SHADOW_KEEP
+    } else {
+        1.0
+    };
     bytes.extend(floats_bytes(&[
         planes.len() as f32,
         wrinkle_uv,
         shadow_share,
-        0.0,
+        shadow_keep,
     ]));
     let mut clamps = [0.0f32; crate::host::gui::mesh::MAX_CLAMP_PLANES * 4];
     for (slot, plane) in planes.iter().enumerate() {
