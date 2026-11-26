@@ -1960,6 +1960,18 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
 // facing the viewer, tinted deeper the more it was shadowed. `tangent` the strand's direction,
 // `seen` how much of the light its shadow lets through. Brood's lights put no 1/π on diffuse,
 // so the whole is π times UE's.
+// one hair fibre's transmittance, crossed once through its middle (two radii), from its colour:
+// the absorption Chiang & Bitterli 2016 ("A practical and controllable hair and fur model") give
+// for a hair of that albedo at its roughness β, σa = (ln A / (5.969 − 0.215β + 2.532β² − 10.73β³
+// + 5.574β⁴ + 0.245β⁵))², so a light hair passes much and a dark one little, each its own hue
+fn fibre_transmittance(colour: vec3<f32>) -> vec3<f32> {
+    let b = clamp(draw.material.x, 0.0, 1.0);
+    let b2 = b * b;
+    let denominator = 5.969 - 0.215 * b + 2.532 * b2 - 10.73 * b2 * b + 5.574 * b2 * b2 + 0.245 * b2 * b2 * b;
+    let ratio = log(clamp(colour, vec3<f32>(1e-4), vec3<f32>(1.0))) / denominator;
+    return exp(-2.0 * ratio * ratio);
+}
+
 fn hair_gaussian(width: f32, angle: f32) -> f32 {
     return exp(-0.5 * angle * angle / (width * width)) / (2.50662827 * width);
 }
@@ -2080,12 +2092,13 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         // under the hair's own shadow
         if ((draw.flags.y & 512u) != 0u) {
             // its baked self-shadow where it has one (ADR-813): the hairs crossed toward this light, each
-            // passing some of it and tinting it (her ginger's one fibre (0.98, 0.86, 0.63), 39's
-            // starting numbers) and scattering a little away; the shadow maps' estimate otherwise
+            // passing some of it as ITS OWN colour lets it through (`fibre_transmittance`) and scattering
+            // a little away; the shadow maps' estimate otherwise. (A fixed ginger fibre once tinted
+            // every hair colour the same orange by the lamp and from behind: 39, 2026-11-26)
             var through = vec3<f32>(seen);
             if (dot(fibre_visibility, fibre_visibility) > 0.0) {
                 let crossed = draw.material.z * max(0.0, fibre_visibility.x + dot(fibre_visibility.yzw, to_light));
-                through = pow(vec3<f32>(0.98, 0.86, 0.63), vec3<f32>(crossed)) * exp(-0.03 * crossed);
+                through = pow(fibre_transmittance(base), vec3<f32>(crossed)) * exp(-0.03 * crossed);
             }
             let shadowed = dot(through, vec3<f32>(0.2126, 0.7152, 0.0722));
             out = out + light.color.rgb * arriving * through * karis_hair(base, strand, view, to_light, shadowed, select(0.0, 1.0, light.shadow.z > 0u));
