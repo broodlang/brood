@@ -1005,7 +1005,7 @@ impl MeshGpu {
             softness
         });
         // and, for a mesh that can be pressed, what its normals are recomputed from (ADR-819)
-        let faces = (!mesh.softness.is_empty()).then(|| mesh_faces(device, queue, mesh));
+        let faces = (!mesh.softness.is_empty()).then(|| mesh_faces(device, queue, &mesh));
         self.meshes.insert(
             handle,
             GpuMesh {
@@ -2065,9 +2065,7 @@ impl MeshGpu {
 /// 4 and 8, 16 and 32, 64 and 128); then 256 when the detail tile's normal tilts the
 /// surface's, which takes the mesh's tangents (ADR-797; its cavity does not).
 /// How finely the posed face normals are summed (ADR-819): a face normal's length is twice its
-/// triangle's area in square metres, so a 4 mm triangle's is ~3e-5, here ~3e4. The shader both
-/// scales and reads the sums, so only the test holding its literal to this value reads it here.
-#[cfg(test)]
+/// triangle's area in square metres, so a 4 mm triangle's is ~3e-5, here ~3e4.
 pub(super) const FACE_SUM_SCALE: f32 = 1.0e9;
 
 /// What the contact passes recompute `mesh`'s normals from (ADR-819): its vertices welded by
