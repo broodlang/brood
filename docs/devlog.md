@@ -3110,3 +3110,14 @@ a stance frame, where making them free saved 1% and under (so trig stays a call)
 stability tests in `sequence_test` (ties whose items run down, sabotaged red by dropping the
 position) and the native check on `%sort-by-vector` (sabotaged red by routing vectors away), both
 contract modes; a cross-process sort.
+
+2026-11-26. **KI-412: a preempt through a re-tiered `count` call panicked the driver.** CI's bedit
+smoke went red twice (`533a49199`, `129598bbb`) with `an unwound caller left no in-call journal
+(ADR-401)`; the first time I read only its `remote_test` timeouts and filed it as the known flake.
+A temporary dump of the unwound chain named it: `editor/buffer/buffer-length` → `count`, the caller
+without a journal. ADR-811 lowers `count` of a record as a call after four declines, but
+`unwindable` counted only bytecode `Call`s, so the arm journalled nothing for that call while the
+`count` it called could still start an unwind. Fixed in the predicate. Reproduced ~1 run in 6
+(`BROOD_J=2`, bedit `file_save_test` at `BEDIT_REF`), 0 in 40 after; the new
+`preemption_shapes::an_unwound_count_call_returns_the_same_value` panics exactly so with the old
+predicate. Run: `preemption_shapes` + `preemption`, `jit_count_call_test` both ways, clippy.

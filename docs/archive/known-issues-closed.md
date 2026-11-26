@@ -5,6 +5,33 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-412 — a preempt through a `count` re-tiered as a call panicked the driver ✅ fixed 2026-11-26
+
+**Symptom.** CI's downstream bedit smoke red on `533a49199` and `129598bbb`: two worker threads
+panicked at `vm_run_bc.rs:794` with `an unwound caller left no in-call journal (ADR-401)`, and
+bedit's "a save is written off the loop" tests failed. Locally ~1 run in 6 of bedit's
+`file_save_test` at `BEDIT_REF` under `BROOD_J=2`, rarer with all workers.
+
+**Cause.** ADR-811 lowers `count` of a record as a real call once the inline has declined four
+times (`jit_count_calls`). ADR-401 marks an arm `unwindable` — its non-tail calls write an in-call
+journal on the way out of a preempt — by scanning its bytecode for `Call`s, and the re-tiered
+`count` is a `Prim1` there. So an arm whose one call was that `count` journalled nothing for it,
+while the `count` it called was still told it may unwind (the bit only asks whether the caller was
+entered unwindable). A preempt at `count`'s entry poll unwound through a frame nobody could
+rebuild: the chain was `editor/buffer/buffer-length` → `count`, a text buffer counting its rope.
+
+**Why it survived.** The window is a preempt landing exactly on `count`'s entry while another
+process waits for a worker, so it showed only under load; the first red run's `remote_test`
+timeouts were read as the known flake and the panic beside them was missed. `jit_count_call_test`
+checks the re-tier stays native, not that it can be unwound through.
+
+**Fix.** The re-tiered `count` makes its arm unwindable like any non-tail call
+(`jit_lower.rs`, the `unwindable` predicate), so the call site journals.
+
+**Guard.** `preemption_shapes::an_unwound_count_call_returns_the_same_value` — a native loop over a
+function whose only call is a re-tiered `count`, unwound and rebuilt over ~1 500 quanta; with the
+old predicate it panics with exactly this message.
+
 ## KI-411 — a loop running native never ran a collection its builtin calls made due ✅ fixed 2026-11-25
 
 **Symptom.** `make test-eager` (every arm tiering after 2 calls, ADR-809) failed

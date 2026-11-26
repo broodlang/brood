@@ -710,10 +710,27 @@ fn jit_lower_arm_inner(
     // natively) and whose layout the driver can rebuild mid-call — every one but the
     // self-spliced upgrade. Its calls' error paths write the in-call journal, so the
     // activations it calls may preempt by unwinding; it polls reductions at entry.
+    //
+    // A `count` re-tiered as a call (ADR-811, `jit_count_calls`) is a non-tail call here too,
+    // though its bytecode is a `Prim1`: counted only by its `Call`s, an arm whose one call was
+    // that `count` wrote no journal for it, while the `count` it called was still told it may
+    // unwind — a preempt there unwound through a frame nobody could rebuild, and the driver
+    // panicked (`an unwound caller left no in-call journal`, bedit's file saves in the smoke).
+    let count_calls = arm
+        .jit_count_calls
+        .load(std::sync::atomic::Ordering::Relaxed);
     let unwindable = !self_spliced
-        && code
-            .iter()
-            .any(|i| matches!(i, Inst::Call { tail: false, .. }));
+        && code.iter().any(|i| {
+            matches!(i, Inst::Call { tail: false, .. })
+                || (count_calls
+                    && matches!(
+                        i,
+                        Inst::Prim1 {
+                            op: PrimOp1::Count,
+                            ..
+                        }
+                    ))
+        });
     // The activations this one calls may preempt by unwinding only if this one may, and
     // only if it can be rebuilt mid-call. Only the self-spliced layout makes calls and
     // cannot: it says so, for the runtime's call paths (its own native call sites pass 0).
