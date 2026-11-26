@@ -1288,12 +1288,16 @@ fn wrinkles_turn_the_skins_normal_alike_on_both_painters() {
     ];
     let normals = [0.0f32, 0.0, -1.0].repeat(4);
     let uvs = [0.0f32, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0];
+    // the second set mirrored in u: read by it (`:uv 1`), the wrinkles are where the head's own
+    // layout says
+    let uvs2 = [1.0f32, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0];
     let tangents = [1.0f32, 0.0, 0.0, 1.0].repeat(4);
     let quad = Arc::new(
         Mesh::from_parts(MeshParts {
             positions: bytes_of(&positions),
             normals: bytes_of(&normals),
             uvs: bytes_of(&uvs),
+            uvs2: bytes_of(&uvs2),
             tangents: bytes_of(&tangents),
             indices: [0u16, 1, 2, 0, 2, 3]
                 .iter()
@@ -1336,6 +1340,7 @@ fn wrinkles_turn_the_skins_normal_alike_on_both_painters() {
                     stretch: 12,
                     masks: [13, 14],
                     weights,
+                    uv: 1,
                 }),
                 ..Material::default()
             },

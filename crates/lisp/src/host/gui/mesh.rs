@@ -267,6 +267,9 @@ pub struct Mesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
+    /// Its second UV set (glTF's TEXCOORD_1, `:uvs2`, ADR-817), what `:wrinkles {:uv 1}` reads its
+    /// maps by; its first set where it has none.
+    pub uvs2: Vec<[f32; 2]>,
     /// Tangents with the bitangent's sign in `w` (glTF's convention), for a normal map.
     pub tangents: Option<Vec<[f32; 4]>>,
     /// The four joints each vertex is skinned to (indices into a draw's palette) and their
@@ -492,6 +495,8 @@ pub struct MeshParts {
     pub positions: Vec<u8>,
     pub normals: Vec<u8>,
     pub uvs: Vec<u8>,
+    /// A second UV set, 2 f32 a vertex (`:uvs2`, ADR-817); empty: the first set again.
+    pub uvs2: Vec<u8>,
     pub tangents: Vec<u8>,
     /// `u8` or `u16` joint indices, four a vertex, per `joints_wide`.
     pub joints: Vec<u8>,
@@ -566,6 +571,11 @@ impl Mesh {
             vec![[0.0, 0.0]; count]
         } else {
             floats::<2>("uvs", &parts.uvs, count)?
+        };
+        let uvs2 = if parts.uvs2.is_empty() {
+            uvs.clone()
+        } else {
+            floats::<2>("uvs2", &parts.uvs2, count)?
         };
         let tangents = if parts.tangents.is_empty() {
             // (a strand mesh's baked self-shadow in their place, ADR-813: strands never read tangents)
@@ -710,6 +720,7 @@ impl Mesh {
             positions,
             normals,
             uvs,
+            uvs2,
             tangents,
             joints,
             weights,
@@ -2236,6 +2247,9 @@ pub struct Wrinkles {
     pub stretch: u32,
     pub masks: [u32; 2],
     pub weights: [f32; 8],
+    /// Which UV set its four textures are read by: 0 the mesh's first, 1 its second (`:uvs2`, a
+    /// head's own layout, finer than a whole body's).
+    pub uv: u32,
 }
 
 /// The tilt the wrinkle maps lay over a skin's normal at one texel ([`Wrinkles`], ADR-817): each
@@ -4229,6 +4243,8 @@ struct ClipVertex {
     normal: [f32; 3],
     tangent: [f32; 4],
     uv: [f32; 2],
+    /// Its second UV set's ([`Mesh::uvs2`]).
+    uv2: [f32; 2],
     /// How sharply the mesh curves here ([`Mesh::curvature`]).
     curvature: f32,
     /// Its eye's frame, on an `:eye` surface ([`eye_frame`]); zeros on any other.
@@ -4252,6 +4268,7 @@ fn lerp_vertex(from: &ClipVertex, to: &ClipVertex, amount: f32) -> ClipVertex {
         &mut vertex.tangent[..3],
     );
     mix_n(&from.uv, &to.uv, &mut vertex.uv);
+    mix_n(&from.uv2, &to.uv2, &mut vertex.uv2);
     vertex.curvature = mix(from.curvature, to.curvature);
     mix_n(&from.eye.centre, &to.eye.centre, &mut vertex.eye.centre);
     mix_n(&from.eye.axis, &to.eye.axis, &mut vertex.eye.axis);
@@ -4619,7 +4636,17 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
             ) {
                 (Some([compress, stretch, first, second]), Some(wrinkles)) => {
                     // (`:data` textures, read raw at their own size)
-                    let read = |texture: &TextureRef| sample_raw(texture, uv[0], uv[1]);
+                    // (by the UV set it names: a head's own, finer than the body's, at `:uv 1`)
+                    let at = if wrinkles.uv == 1 {
+                        [0, 1].map(|axis| {
+                            corners[0].uv2[axis] * weights[0]
+                                + corners[1].uv2[axis] * weights[1]
+                                + corners[2].uv2[axis] * weights[2]
+                        })
+                    } else {
+                        uv
+                    };
+                    let read = |texture: &TextureRef| sample_raw(texture, at[0], at[1]);
                     let tilt = wrinkle_tilt(
                         read(compress),
                         read(stretch),
@@ -4942,6 +4969,7 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
                     normal: ribbon_normal,
                     tangent: [direction[0], direction[1], direction[2], coverage],
                     uv,
+                    uv2: uv,
                     curvature: 0.0,
                     eye: EyeFrame::default(),
                 };
@@ -4955,6 +4983,7 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
                     [unit[0], unit[1], unit[2], tangent[3]]
                 },
                 uv: mesh.uvs[index],
+                uv2: mesh.uvs2[index],
                 curvature: mesh.curvature[index],
                 // an eye's frame goes with its vertices, moved as they are (ADR-796)
                 eye: eye.map_or_else(EyeFrame::default, |eye| eye_frame(eye, &matrix, position)),
@@ -7773,6 +7802,7 @@ mod tests {
             normal: [0.0, 0.0, -1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
             uv: [u, v],
+            uv2: [u, v],
             curvature: 0.0,
             eye: EyeFrame::default(),
         };

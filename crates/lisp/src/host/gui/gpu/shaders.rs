@@ -697,7 +697,7 @@ struct DrawU {
     sheen: vec4<f32>,           // a hair surface's second highlight's colour (`:sheen`), w 1 when given (ADR-799)
     deform: vec4<u32>,          // pressed by the scene's contacts (ADR-805), its first posed vertex, whether it has a softness, its vertex count
     loose: vec4<f32>,           // its flesh lagging its bones (ADR-812): the amount (0 none), its lagging palette's offset, its joint count
-    clamp_info: vec4<f32>,      // x: how many `:clamp-planes` its strands keep to (ADR-813)
+    clamp_info: vec4<f32>,      // x: how many `:clamp-planes` its strands keep to (ADR-813); y: the UV set its `:wrinkles` read by (ADR-817)
     clamps: array<vec4<f32>, 4>,  // each plane: its unit normal toward the strands' side, `normal · point`
     wrinkles: array<vec4<f32>, 2>,  // a skin's eight wrinkle zones' weights (ADR-817; zero: none)
 };
@@ -814,9 +814,9 @@ fn contact_within(slot: u32, point: vec3<f32>) -> f32 {
     return smoothstep(0.0, WITHIN_BAND, dot(within.xyz, point) - within.w);
 }
 
-// a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 24 a vertex)
+// a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 26 a vertex)
 fn vertex_at(index: u32) -> VertexIn {
-    let at = index * 24u;
+    let at = index * 26u;
     var input: VertexIn;
     input.index = index;
     input.position = vec3<f32>(mesh_vertices[at], mesh_vertices[at + 1u], mesh_vertices[at + 2u]);
@@ -827,6 +827,7 @@ fn vertex_at(index: u32) -> VertexIn {
     input.weights = vec4<f32>(mesh_vertices[at + 16u], mesh_vertices[at + 17u], mesh_vertices[at + 18u], mesh_vertices[at + 19u]);
     input.curvature = mesh_vertices[at + 20u];
     input.centre = vec3<f32>(mesh_vertices[at + 21u], mesh_vertices[at + 22u], mesh_vertices[at + 23u]);
+    input.uv2 = vec2<f32>(mesh_vertices[at + 24u], mesh_vertices[at + 25u]);
     return input;
 }
 
@@ -987,6 +988,8 @@ struct VertexIn {
     @location(6) curvature: f32,
     // its centre of rotation (ADR-814): what it turns about when its draw's `flags.w` is 2
     @location(7) centre: vec3<f32>,
+    // its second UV set (ADR-817)
+    @location(8) uv2: vec2<f32>,
 };
 struct VertexOut {
     // invariant: the hair's depth pass and its front pass must put a sample at the same depth
@@ -1007,6 +1010,8 @@ struct VertexOut {
     // a `:fibres` strand's baked self-shadow (ADR-813): the hairs crossed toward L are max(0, x + yzw·L),
     // yzw turned into the world
     @location(9) visibility: vec4<f32>,
+    // its second UV set (`mesh::Mesh::uvs2`, ADR-817): what `:wrinkles {:uv 1}` reads by
+    @location(10) uv2: vec2<f32>,
 };
 
 // a vertex morphed, and the matrix that skins and places it
@@ -1100,6 +1105,7 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
         pressed.clip = scene.view_proj * vec4<f32>(pressed.world, 1.0);
         pressed.normal = posed_vertices[at + 1u].xyz;
         pressed.uv = input.uv;
+        pressed.uv2 = input.uv2;
         pressed.tangent = posed_vertices[at + 2u];
         pressed.curvature = input.curvature;
         pressed.eye_centre = vec4<f32>(0.0);
@@ -1114,6 +1120,7 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
     out.world = world.xyz;
     out.normal = (posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz;
     out.uv = input.uv;
+    out.uv2 = input.uv2;
     out.tangent = vec4<f32>((posed.matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz, input.tangent.w);
     out.curvature = input.curvature;
     out.eye_centre = vec4<f32>(0.0);
@@ -2360,11 +2367,13 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
     // her expression's wrinkles (ADR-817, the CPU's `fill_triangle`): the compress and stretch
     // maps' tilts by the zones' masks and weights, laid over the rest
     if ((draw.flags.y & 1024u) != 0u) {
+        // (read at their own size, `:data`, by the UV set they name: `clamp_info.y` 1 the second)
+        let at = select(fragment.uv, fragment.uv2, draw.clamp_info.y > 0.5);
         let tilt = wrinkle_tilt(
-            textureSampleGrad(wrinkle_compress, texture_sampler, fragment.uv, uv_dx, uv_dy),
-            textureSampleGrad(wrinkle_stretch, texture_sampler, fragment.uv, uv_dx, uv_dy),
-            textureSampleGrad(wrinkle_mask_first, texture_sampler, fragment.uv, uv_dx, uv_dy),
-            textureSampleGrad(wrinkle_mask_second, texture_sampler, fragment.uv, uv_dx, uv_dy));
+            textureSampleLevel(wrinkle_compress, texture_sampler, at, 0.0),
+            textureSampleLevel(wrinkle_stretch, texture_sampler, at, 0.0),
+            textureSampleLevel(wrinkle_mask_first, texture_sampler, at, 0.0),
+            textureSampleLevel(wrinkle_mask_second, texture_sampler, at, 0.0));
         if (tilt.x != 0.0 || tilt.y != 0.0) {
             local = detail_normal(local, tilt, 1.0);
             framed = true;

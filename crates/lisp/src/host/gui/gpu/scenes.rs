@@ -13,7 +13,7 @@ use crate::host::gui::mesh::{
 
 /// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4,
 /// curvature 1.
-pub(super) const VERTEX_FLOATS: usize = 24;
+pub(super) const VERTEX_FLOATS: usize = 26;
 /// The `SceneU` uniform (3744 bytes: each shadow view says where its map is kept, ADR-800),
 /// padded to the dynamic-offset alignment.
 pub(super) const SCENE_BYTES: u64 = 3840;
@@ -556,7 +556,8 @@ impl MeshGpu {
                 4 => Uint32x4,
                 5 => Float32x4,
                 6 => Float32,
-                7 => Float32x3
+                7 => Float32x3,
+                8 => Float32x2
             ],
         });
         // a colour pipeline: its faces, whether it blends, and its fragment entry, depth state and
@@ -935,6 +936,8 @@ impl MeshGpu {
             vertices.extend(floats_bytes(
                 mesh.centres.get(index).unwrap_or(&mesh.positions[index]),
             ));
+            // its second UV set (ADR-817)
+            vertices.extend(floats_bytes(&mesh.uvs2[index]));
         }
         let vertex_buffer = buffer(
             device,
@@ -2038,7 +2041,12 @@ pub(super) fn draw_uniform(
         .clamp_planes
         .len()
         .min(crate::host::gui::mesh::MAX_CLAMP_PLANES)];
-    bytes.extend(floats_bytes(&[planes.len() as f32, 0.0, 0.0, 0.0]));
+    // (and the UV set its `:wrinkles` read by, ADR-817)
+    let wrinkle_uv = material
+        .wrinkles
+        .as_ref()
+        .map_or(0.0, |wrinkles| wrinkles.uv as f32);
+    bytes.extend(floats_bytes(&[planes.len() as f32, wrinkle_uv, 0.0, 0.0]));
     let mut clamps = [0.0f32; crate::host::gui::mesh::MAX_CLAMP_PLANES * 4];
     for (slot, plane) in planes.iter().enumerate() {
         clamps[slot * 4..slot * 4 + 4].copy_from_slice(plane);

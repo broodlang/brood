@@ -1662,18 +1662,24 @@ fn scene_spec(
                 };
                 let weights = numbers(get(wrinkles, "weights"), 8)
                     .filter(|weights| weights.iter().all(|weight| (-1.0..=1.0).contains(weight)));
-                match (texture("compress"), texture("stretch"), masks, weights) {
-                    (Some(compress), Some(stretch), Some(masks), Some(weights)) => {
+                let uv = match get(wrinkles, "uv") {
+                    None | Some(Value::Nil) => Some(0u32),
+                    Some(Value::Int(set @ (0 | 1))) => Some(set as u32),
+                    _ => None,
+                };
+                match (texture("compress"), texture("stretch"), masks, weights, uv) {
+                    (Some(compress), Some(stretch), Some(masks), Some(weights), Some(uv)) => {
                         Some(crate::host::gui::mesh::Wrinkles {
                             compress,
                             stretch,
                             masks: [masks[0], masks[1]],
                             weights: std::array::from_fn(|zone| weights[zone]),
+                            uv,
                         })
                     }
                     _ => {
                         return Err(format!(
-                            "a material's :wrinkles is {{:compress h :stretch h :masks [h h] :weights [8 numbers from -1 to 1]}} (texture handles), not {}",
+                            "a material's :wrinkles is {{:compress h :stretch h :masks [h h] :weights [8 numbers from -1 to 1] :uv 0 or 1}} (texture handles; :uv the UV set, 0 by default), not {}",
                             crate::syntax::printer::print(heap, Value::Map(wrinkles))
                         ));
                     }
@@ -3030,6 +3036,7 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         positions: mesh_bytes(heap, map, "positions")?,
         normals: mesh_bytes(heap, map, "normals")?,
         uvs: mesh_bytes(heap, map, "uvs")?,
+        uvs2: mesh_bytes(heap, map, "uvs2")?,
         tangents: mesh_bytes(heap, map, "tangents")?,
         joints: mesh_bytes(heap, map, "joints")?,
         joints_wide,
