@@ -3141,3 +3141,9 @@ came back fileless, and whatever caught one of its errors (`try`, `seq/pmap`'s r
 reporter) filled in its own file through `or_file`. The project loader now passes the module's
 path from `*module-files*`. Found by bisecting the shape until it flipped between runs: right from
 source, wrong from the image. Guard: `nest::image_error_file` (sabotaged: `FILE nil`).
+
+2026-11-26. **KI-415: a bare `require` re-evaluated a loaded project module.** `(require 'util)`
+of a module registered rooted (`app/util`) fell through to the load-path filename probe, found the
+module's own file and loaded it again, undoing live redefinitions (womanblend's film preludes).
+The probe now resolves the file to its module through `*module-files*` and requires that. Guard:
+`nest::require_bare_keeps_redefinition` (sabotaged red).

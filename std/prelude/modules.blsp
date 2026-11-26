@@ -1257,11 +1257,26 @@ not a header, or does not read: the load itself reports a malformed one."
       ;; declared beside others in a file whose name it does not share, in a nameless
       ;; project or a bare run. Only the miss pays for the scan.
         (let (path (or (%require-find (str key ".blsp") *load-path*)
-                     (%require-find-colocated key)))
-          (if path
-            (do (%with-header-deps-of path (fn () (reflect/load path))) (provide key))
-            (error "require: cannot find module '" key "'"))))
+                     (%require-find-colocated key))
+              ;; The file may be a named project's module, registered ROOTED (`app/util`,
+              ;; ADR-070) and perhaps loaded already under that name: a bare `(require 'util)`
+              ;; then evaluated the file a second time, rebinding every definition over
+              ;; whatever a REPL, a reload or a tool had redefined since (KI-415). Loaded
+              ;; already, it is that module and there is nothing to load; not yet loaded, the
+              ;; file loads as it always has (a dependency's module named by its short name).
+              owner (when path (%module-of-file path))
+              loaded (and owner (contains? *features* owner)))
+          (cond
+            loaded (provide key)
+            path (do (%with-header-deps-of path (fn () (reflect/load path))) (provide key))
+            else (error "require: cannot find module '" key "'"))))
     key))
+
+(defn- %module-of-file (path)
+  "The rooted name of the project module `*module-files*` registers at `path`, or nil."
+  (fold (seq *module-files*)
+    nil
+    (fn (found entry) (if found found (if (= (second entry) path) (first entry) nil)))))
 
 (defn- %module-findable? (mod beside)
   "Could `require-one` find module `mod` — WITHOUT loading it? Every place

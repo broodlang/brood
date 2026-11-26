@@ -5,6 +5,30 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-415 — a bare `require` of a loaded project module evaluated its file again ✅ fixed 2026-11-26
+
+**Symptom.** In womanblend's film tools a late module load undid live redefinitions: definitions a
+prelude had rebound came back as the file's. Reduced: `(def helper/base …)` then
+`(require-one 'helper)` in a named project answers the file's `base` again.
+
+**Cause.** A named project's module is registered under its rooted name (`app/helper`, ADR-070),
+and `require-one` takes registered names as given. The bare `helper` was in no table, so
+`%require-force` fell to its last branch, the `<name>.blsp` probe on the load path — which found
+`src/helper.blsp`, the loaded module's own file, and evaluated it again under the package
+context, rebinding everything it defines.
+
+**Why it survived.** Reloading a module is invisible unless something was redefined in between;
+header clauses root their names first (`%root-module-name`), so only a direct `require` by the
+bare name reached the probe.
+
+**Fix.** The probe asks `*module-files*` which module the file it found belongs to
+(`%module-of-file`); when that module is already loaded there is nothing to load, and the bare
+name is provided as its alias. A module not yet loaded loads as before (a dependency's module
+named by its short name, `startup_image`'s case, which a first version of this fix broke).
+
+**Guard.** `nest::require_bare_keeps_redefinition`: redefine, require bare, read back; from source
+and from the image. Without the owner lookup both print `AFTER 40`.
+
 ## KI-414 — an error raised in an imaged project module named the wrong file ✅ fixed 2026-11-26
 
 **Symptom.** womanblend's viewer crashed in the hair (`b3d-hair/moved-with`) and the crash report
