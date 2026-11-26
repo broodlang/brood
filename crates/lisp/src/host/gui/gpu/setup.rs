@@ -577,9 +577,6 @@ pub(super) fn request_device(
         required_limits: wgpu::Limits {
             max_buffer_size: adapter.limits().max_buffer_size,
             max_storage_buffer_binding_size: adapter.limits().max_storage_buffer_binding_size,
-            // (and the contact passes' storage buffers: ten with a pressed mesh's normals, ADR-819)
-            max_storage_buffers_per_shader_stage:
-                adapter.limits().max_storage_buffers_per_shader_stage,
             ..wgpu::Limits::default()
         },
         experimental_features: wgpu::ExperimentalFeatures::disabled(),

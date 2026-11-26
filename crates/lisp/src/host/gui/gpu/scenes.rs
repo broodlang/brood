@@ -60,22 +60,6 @@ pub(super) struct GpuMesh {
     bounds: MeshBounds,
     /// Its softness a vertex (ADR-805), when it has one.
     softness: Option<wgpu::Buffer>,
-    /// For a mesh that can be pressed (it has a softness): its normals from its posed surface
-    /// (ADR-819), each vertex's welded point, each point's face normal at rest, and the
-    /// frame's face normals summed by point.
-    faces: Option<MeshFaces>,
-}
-
-/// What the contact passes recompute a pressed mesh's normals from its posed surface by
-/// (ADR-819).
-pub(super) struct MeshFaces {
-    /// Each vertex's welded point (vertices at one place share one), a u32 a vertex.
-    welds: wgpu::Buffer,
-    /// Each point's area-weighted face normal at rest, a vec4 a point.
-    rest: wgpu::Buffer,
-    /// The frame's face normals summed by point, three i32 a point (fixed point).
-    sums: wgpu::Buffer,
-    triangle_count: u32,
 }
 
 /// What one scene renders into, at one size.
@@ -205,9 +189,6 @@ pub(super) struct MeshGpu {
     contact_layout: wgpu::BindGroupLayout,
     contact_depth_pipeline: wgpu::ComputePipeline,
     contact_deform_pipeline: wgpu::ComputePipeline,
-    contact_faces_pipeline: wgpu::ComputePipeline,
-    contact_normals_pipeline: wgpu::ComputePipeline,
-    no_sums: wgpu::Buffer,
     no_posed: wgpu::Buffer,
     /// The scene group without the shadow maps, for the passes that render them.
     shadow_scene_layout: wgpu::BindGroupLayout,
@@ -534,12 +515,6 @@ impl MeshGpu {
                 compute_storage(10, false),
                 compute_storage(11, false),
                 compute_storage(12, true),
-                // (a pressed mesh's normals from its posed surface, ADR-819: its triangles, its
-                // welded points, their faces at rest, the frame's sums)
-                compute_storage(17, true),
-                compute_storage(18, true),
-                compute_storage(19, true),
-                compute_storage(20, false),
             ],
         });
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -853,10 +828,6 @@ impl MeshGpu {
         };
         let contact_depth_pipeline = contact_pipeline("cs_contact_depth");
         let contact_deform_pipeline = contact_pipeline("cs_contact_deform");
-        let contact_faces_pipeline = contact_pipeline("cs_contact_faces");
-        let contact_normals_pipeline = contact_pipeline("cs_contact_normals");
-        // (bound for the frame's face sums of a pressed mesh that has none, ADR-819)
-        let no_sums = buffer(device, "no face sums", 16, storage_usage);
         // bound where a scene presses nothing: a posed vertex's worth of zeros
         let no_posed = buffer(device, "no posed vertices", 48, storage_usage);
         MeshGpu {
@@ -865,9 +836,6 @@ impl MeshGpu {
             contact_layout,
             contact_depth_pipeline,
             contact_deform_pipeline,
-            contact_faces_pipeline,
-            contact_normals_pipeline,
-            no_sums,
             no_posed,
             pipelines,
             hair_depth_pipelines,
@@ -989,7 +957,7 @@ impl MeshGpu {
             device,
             "mesh indices",
             indices.len() as u64,
-            wgpu::BufferUsages::INDEX | wgpu::BufferUsages::STORAGE,
+            wgpu::BufferUsages::INDEX,
         );
         queue.write_buffer(&index_buffer, 0, &indices);
         // its softness a vertex, for the ring round a contact (ADR-805)
@@ -1004,8 +972,6 @@ impl MeshGpu {
             queue.write_buffer(&softness, 0, &bytes);
             softness
         });
-        // and, for a mesh that can be pressed, what its normals are recomputed from (ADR-819)
-        let faces = (!mesh.softness.is_empty()).then(|| mesh_faces(device, queue, &mesh));
         self.meshes.insert(
             handle,
             GpuMesh {
@@ -1019,7 +985,6 @@ impl MeshGpu {
                 turning: !mesh.centres.is_empty(),
                 bounds: mesh.bounds.clone(),
                 softness,
-                faces,
             },
         );
     }
@@ -1629,74 +1594,23 @@ impl MeshGpu {
                                         .unwrap_or(&self.no_posed)
                                         .as_entire_binding(),
                                 },
-                                // (its normals from its posed surface, ADR-819: its triangles, its
-                                // welded points, their faces at rest and the frame's sums; a mesh
-                                // without them binds stand-ins and skips those passes)
-                                wgpu::BindGroupEntry {
-                                    binding: 17,
-                                    resource: mesh.indices.as_entire_binding(),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 18,
-                                    resource: mesh
-                                        .faces
-                                        .as_ref()
-                                        .map_or(&mesh.vertices, |faces| &faces.welds)
-                                        .as_entire_binding(),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 19,
-                                    resource: mesh
-                                        .faces
-                                        .as_ref()
-                                        .map_or(&mesh.vertices, |faces| &faces.rest)
-                                        .as_entire_binding(),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 20,
-                                    resource: mesh
-                                        .faces
-                                        .as_ref()
-                                        .map_or(&self.no_sums, |faces| &faces.sums)
-                                        .as_entire_binding(),
-                                },
                             ],
                         });
-                        if let Some(faces) = &mesh.faces {
-                            encoder.clear_buffer(&faces.sums, 0, None);
-                        }
-                        let triangles = mesh.faces.as_ref().map_or(0, |faces| faces.triangle_count);
-                        Some((draw.at, mesh.vertex_count, triangles, group))
+                        Some((draw.at, mesh.vertex_count, group))
                     })
                     .collect();
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("scene contacts"),
                     timestamp_writes: None,
                 });
-                // (posed and each contact's depth found; the posed surface's face normals summed by
-                // point, then each vertex's normal set from them, ADR-819; then pressed)
-                let passes = [
-                    (&self.contact_depth_pipeline, false, false),
-                    (&self.contact_faces_pipeline, true, true),
-                    (&self.contact_normals_pipeline, false, true),
-                    (&self.contact_deform_pipeline, false, false),
-                ];
-                for (pipeline, by_triangle, needs_faces) in passes {
+                for pipeline in [&self.contact_depth_pipeline, &self.contact_deform_pipeline] {
                     pass.set_pipeline(pipeline);
                     pass.set_bind_group(0, &shadow_scene_group, &[scene_offset]);
                     pass.set_bind_group(2, &contact_morph_group, &[]);
-                    for (at, vertex_count, triangles, group) in &pressed {
-                        if needs_faces && *triangles == 0 {
-                            continue;
-                        }
+                    for (at, vertex_count, group) in &pressed {
                         pass.set_bind_group(1, &draw_group, &[(*at as u64 * DRAW_BYTES) as u32]);
                         pass.set_bind_group(3, group, &[]);
-                        let count = if by_triangle {
-                            *triangles
-                        } else {
-                            *vertex_count
-                        };
-                        pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
+                        pass.dispatch_workgroups(vertex_count.div_ceil(64), 1, 1);
                     }
                 }
             }
@@ -2064,74 +1978,6 @@ impl MeshGpu {
 /// (a smooth texture is) — a bit that it is there and a bit that it is premultiplied (1 and 2,
 /// 4 and 8, 16 and 32, 64 and 128); then 256 when the detail tile's normal tilts the
 /// surface's, which takes the mesh's tangents (ADR-797; its cavity does not).
-/// How finely the posed face normals are summed (ADR-819): a face normal's length is twice its
-/// triangle's area in square metres, so a 4 mm triangle's is ~3e-5, here ~3e4.
-pub(super) const FACE_SUM_SCALE: f32 = 1.0e9;
-
-/// What the contact passes recompute `mesh`'s normals from (ADR-819): its vertices welded by
-/// place (a UV seam's split vertices are one point, so the sum never breaks along a seam), each
-/// point's area-weighted face normal at rest, and room for the frame's sums.
-fn mesh_faces(device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Mesh) -> MeshFaces {
-    let mut points: std::collections::HashMap<[i64; 3], u32> = std::collections::HashMap::new();
-    let welds: Vec<u32> = mesh
-        .positions
-        .iter()
-        .map(|position| {
-            let key = position.map(|axis| (axis as f64 * 1.0e6).round() as i64);
-            let next = points.len() as u32;
-            *points.entry(key).or_insert(next)
-        })
-        .collect();
-    let count = points.len();
-    let mut rest = vec![[0.0f32; 3]; count];
-    for triangle in mesh.indices.as_chunks::<3>().0 {
-        let [a, b, c] = triangle.map(|index| mesh.positions[index as usize]);
-        let across = [0, 1, 2].map(|axis| b[axis] - a[axis]);
-        let along = [0, 1, 2].map(|axis| c[axis] - a[axis]);
-        let face = [
-            across[1] * along[2] - across[2] * along[1],
-            across[2] * along[0] - across[0] * along[2],
-            across[0] * along[1] - across[1] * along[0],
-        ];
-        for &index in triangle {
-            let point = &mut rest[welds[index as usize] as usize];
-            for axis in 0..3 {
-                point[axis] += face[axis];
-            }
-        }
-    }
-    let rest_floats: Vec<f32> = rest
-        .iter()
-        .flat_map(|face| {
-            let length = (face[0] * face[0] + face[1] * face[1] + face[2] * face[2])
-                .sqrt()
-                .max(1.0e-20);
-            [face[0] / length, face[1] / length, face[2] / length, 0.0]
-        })
-        .collect();
-    let store = |label: &str, bytes: &[u8], usage: wgpu::BufferUsages| {
-        let made = buffer(device, label, bytes.len().max(16) as u64, usage);
-        queue.write_buffer(&made, 0, bytes);
-        made
-    };
-    let welds_bytes: Vec<u8> = welds.iter().flat_map(|weld| weld.to_le_bytes()).collect();
-    MeshFaces {
-        welds: store("mesh welds", &welds_bytes, wgpu::BufferUsages::STORAGE),
-        rest: store(
-            "mesh rest faces",
-            &floats_bytes(&rest_floats),
-            wgpu::BufferUsages::STORAGE,
-        ),
-        sums: buffer(
-            device,
-            "mesh face sums",
-            (count * 12).max(16) as u64,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        ),
-        triangle_count: (mesh.indices.len() / 3) as u32,
-    }
-}
-
 pub(super) fn texture_bits(textures: [Option<bool>; 4], has_tangents: bool) -> u32 {
     let mut bits = 0;
     for (slot, texture) in textures.iter().enumerate() {
