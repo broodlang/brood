@@ -359,14 +359,21 @@ pub(super) fn bytes_scatter(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     }
     let element = values.len() / amount;
     let mut out = dense.to_vec();
-    for (narrow, value) in indices.chunks_exact(width).zip(values.chunks_exact(element)) {
+    for (narrow, value) in indices
+        .chunks_exact(width)
+        .zip(values.chunks_exact(element))
+    {
         let mut word = [0u8; 8];
         word[..width].copy_from_slice(narrow);
         let index = u64::from_le_bytes(word);
         let place = usize::try_from(index)
             .ok()
             .and_then(|index| index.checked_mul(element))
-            .filter(|start| start.checked_add(element).is_some_and(|end| end <= out.len()));
+            .filter(|start| {
+                start
+                    .checked_add(element)
+                    .is_some_and(|end| end <= out.len())
+            });
         let Some(start) = place else {
             return Err(LispError::runtime(format!(
                 "bytes/scatter: index {index} names no element of {} ({element} bytes each)",
