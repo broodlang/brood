@@ -2178,7 +2178,11 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
                 seen = hair_shadow(light, world, turn);
             } else {
                 // (and the shadow of what is too near and small for its map, ADR-818)
-                contact = contact_shadow(world, arrival.to_light, surface_normal, view);
+                // (never on skin: light travels millimetres under it, so its own creases never show
+                // shadows this sharp: on her neck and collarbones they drew hard dark lines)
+                if (draw.flags.x != 0u) {
+                    contact = contact_shadow(world, arrival.to_light, surface_normal, view);
+                }
                 seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn) * contact;
             }
         }
@@ -2282,7 +2286,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
     // (the room's reflection hidden where something of the scene stands within `REFLECTION_REACH`
     // along the reflected direction, as the depth view holds it: deep in her mouth her cheeks and
     // lips hide the room from her side teeth, which shone grey as chrome, ADR-818)
-    let reflection_open = screen_blocked(world, reflected, REFLECTION_REACH, surface_normal, view);
+    let reflection_open = select(screen_blocked(world, reflected, REFLECTION_REACH, surface_normal, view), 1.0, draw.flags.x == 0u);
     for (var layer = 0u; layer < 3u; layer = layer + 1u) {
         let weight = weights[layer];
         if (weight <= 0.0) {
