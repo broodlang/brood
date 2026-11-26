@@ -159,11 +159,11 @@
 
   ;; the filter (ADR-783) is parsed with the rest, before the backend: an unknown one is
   ;; refused by name, never drawn as a silent nearest; both known ones pass the parse
-  (test "a filter other than :nearest, :smooth or :coverage is a clean error naming them"
+  (test "a filter other than :nearest, :smooth, :coverage or :data is a clean error naming them"
     (let (msg (try
                 (%gui-texture 999999 1 [1 2 3 4] 1 1 :linear)
                 :no-error (catch e (error-message e))))
-      (is (includes? msg ":nearest, :smooth or :coverage"))))
+      (is (includes? msg ":nearest, :smooth, :coverage or :data"))))
 
   (test ":smooth passes the parse and reaches the backend"
     (let (msg (try
