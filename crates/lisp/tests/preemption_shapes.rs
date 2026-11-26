@@ -404,6 +404,61 @@ fn an_unwound_native_recursion_returns_the_same_value() {
     );
 }
 
+/// ADR-401 × ADR-811: a `count` the JIT re-tiered as a call is a non-tail call like any other,
+/// so its caller writes an in-call journal on the way out of a preempt. Counted only by its
+/// bytecode `Call`s, an arm whose one call was that `count` wrote none, while the `count` it
+/// called was still told it may unwind: a preempt inside the record's `->count` unwound through
+/// a frame nobody could rebuild, and the driver panicked (`an unwound caller left no in-call
+/// journal`). bedit's file saves hit it, a text buffer counting itself through its rope.
+#[test]
+fn an_unwound_count_call_returns_the_same_value() {
+    process::set_max_parallel(1);
+    process::set_test_no_workers(true);
+    let mut interp = Interp::new();
+    interp
+        .eval_str(
+            "(defn n-spin (k j acc) (if (>= j k) acc (n-spin k (+ j 1) (+ acc j))))
+             (defrecord n-tally (n))
+             (impl Counted n-tally (->count (tally) (get tally :n)))
+             ;; its only call is the `count`, once it re-tiers as one (after four declines)
+             (defn n-held (tally) (+ 7 (count tally)))
+             ;; a native loop over it, so preempts land on `count`'s entry poll beneath `n-held`
+             (defn n-loop (tally i acc) (if (= i 0) acc (n-loop tally (- i 1) (+ acc (n-held tally)))))",
+        )
+        .expect("prelude errored");
+    settle_native(
+        &mut interp,
+        "(doseq (i (range 50)) (n-loop (n-tally 3) 20 0))",
+        &[("n-held", 1), ("n-loop", 3)],
+    );
+    // The companion keeps a process waiting, so spent budgets unwind (see above).
+    interp
+        .eval_str(
+            "(do (def me (self))
+                 (spawn (send me (n-loop (n-tally 3) 300000 0)))
+                 (spawn (n-spin 30000000 0 0))
+                 :ok)",
+        )
+        .expect("spawn errored");
+    let ran = std::thread::spawn(|| process::test_drive_quanta(100_000))
+        .join()
+        .unwrap();
+    let got = interp
+        .eval_str("(receive (v v) (after 0 :nothing))")
+        .expect("poll errored");
+    let got = interp.print(got);
+    process::set_test_no_workers(false);
+    assert!(
+        ran > 3,
+        "the loop should have taken many quanta, took {ran}"
+    );
+    // 300000 × (3 + 7).
+    assert_eq!(
+        got, "3000000",
+        "the unwound count call returned a different value"
+    );
+}
+
 /// ADR-402: a `receive` inside a `binding` body parks, and resumes with the binding still in
 /// force; it used to block the worker like a `try`-wrapped one.
 #[test]
