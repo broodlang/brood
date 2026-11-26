@@ -2185,12 +2185,6 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
                 }
                 seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn) * contact;
             }
-        } else if (draw.flags.x != 0u && draw.flags.x != 4u && draw.flags.x != 5u) {
-            // a light without a shadow stands in for light bounced round the room, so what hides
-            // the ambient light from a surface hides it too (its occlusion map and the screen's):
-            // unshadowed, the fill lit the side teeth deep in her mouth to chrome (ADR-818; not on
-            // skin, which keeps its creases soft, nor on hair, which has its own)
-            seen = occlusion;
         }
         let to_light = arrival.to_light;
         // `mesh::light_under_cornea`: under a cornea the light is bent toward the eye's axis on
