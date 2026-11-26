@@ -3147,3 +3147,10 @@ of a module registered rooted (`app/util`) fell through to the load-path filenam
 module's own file and loaded it again, undoing live redefinitions (womanblend's film preludes).
 The probe now resolves the file to its module through `*module-files*` and requires that. Guard:
 `nest::require_bare_keeps_redefinition` (sabotaged red).
+
+2026-11-26. **KI-416: the checker's joint fixpoint could cycle.** b3d-mass and b3d-hair read
+"did not settle in 32 joint rounds"; 256 rounds did not help mass, so it was a loop, not a budget.
+Reduced by deleting functions, then expressions, to three lines; a temporary trace of each round's
+movers showed one return alternating `vector` / `vector<(tuple any)>`. `ascend_return` now joins an
+answer that is not above the current one. b3d checks with one give-up left (gltf's widened
+unions); no verdict over std/ and tests/ moved (check, strict, the 816 checker tests).

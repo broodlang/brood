@@ -384,3 +384,22 @@ fn a_caller_derived_recursive_parameter_does_not_hang_the_check() {
         "the unrolling budget cut {exhausted} relations short"
     );
 }
+
+/// KI-416: the joint ascent of returns and caller-derived parameters must only rise. This
+/// file's `jv` re-typed as `vector` one round and `vector<(tuple any)>` the next, for good:
+/// no fixpoint in `MAX_JOINT_ROUNDS`, and the checker gave up on the whole file (b3d-mass,
+/// where the same shape is a `mapv` of `mapv`s read back with `nth` of `nth`).
+#[test]
+fn a_return_that_does_not_retype_monotonically_still_settles() {
+    let ws = file_warnings(
+        r#"
+(defn- jv (data) (seq/mapv [7 8] (fn (index) [index])))
+(defn- influences (joints vertex) (nth (nth joints vertex) 0))
+(defn top (primitive) (influences (jv (get primitive :joints)) 0))
+"#,
+    );
+    assert!(
+        ws.iter().all(|w| !w.starts_with("checker gave up:")),
+        "{ws:?}"
+    );
+}

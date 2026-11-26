@@ -5,6 +5,32 @@ guard. The index, the filing rules and any open entry live in [known-issues.md](
 
 ---
 
+## KI-416 — the checker gave up on a file whose return re-typed non-monotonically ✅ fixed 2026-11-26
+
+**Symptom.** `nest check` on b3d: `b3d-mass.blsp` and `b3d-hair.blsp` each answered `checker gave
+up: the caller-derived parameters and returns did not settle in 32 joint rounds — every parameter
+is read as unknown in this file`. Raising the cap to 256 changed nothing for `b3d-mass`.
+
+**Cause.** The joint fixpoint (ADR-341/349) starts every live return at ⊥ and re-types it each
+round, taking the new answer as it comes: it assumes a re-typing is monotone in what it reads.
+It is not always. Reduced to three lines — `(defn- jv (data) (seq/mapv [7 8] (fn (index)
+[index])))`, a helper reading `(nth (nth joints vertex) 0)`, and a caller passing
+`(jv (get primitive :joints))` — `jv`'s return read `vector<(tuple any)>`, then `vector`, then
+`vector<(tuple any)>` again, a cycle of three rounds, and the helper's derived parameter
+followed it. `ascend_return` widened intervals and folded recursion but never compared the new
+answer with the old one.
+
+**Why it survived.** The note is advisory (`gave-up`, not gating), brood's own std and tests do
+not have the shape, and the cap makes it terminate, so it read as a budget that a big file ran
+out of rather than as a loop.
+
+**Fix.** `ascend_return` joins: an answer that is not a supertype of the current one becomes
+their union. Sound (the function may give either) and monotone, so each return climbs a finite
+chain. No verdict over std/, tests/ or the checker's 816 tests moved.
+
+**Guard.** `types::check::tests::robustness::a_return_that_does_not_retype_monotonically_still_settles`
+— the three-line file; without the join it reports the give-up.
+
 ## KI-415 — a bare `require` of a loaded project module evaluated its file again ✅ fixed 2026-11-26
 
 **Symptom.** In womanblend's film tools a late module load undid live redefinitions: definitions a

@@ -470,6 +470,16 @@ fn ascend_return(mut ret: Ty, current: Option<&Ty>, older: Option<&Ty>, round: u
     if round >= sigs::WIDEN_AFTER_ROUND {
         ret = ret.widened_below(sigs::WIDEN_DEPTH);
     }
+    // The ascent only RISES. A re-typing is not always monotone in what it reads: a return
+    // came back as `vector` one round and `vector<(tuple any)>` the next, for good, and the
+    // fixpoint it never reached left every parameter of the file unknown (KI-416, b3d-mass).
+    // An answer that is not above the current one joins it — sound, a union of two answers
+    // either of which the function may give — so each return climbs a finite chain.
+    if let Some(previous) = current
+        && !previous.is_subtype(&ret)
+    {
+        ret = ret.union(previous.clone());
+    }
     ret
 }
 
