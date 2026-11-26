@@ -522,6 +522,12 @@ pub struct MeshParts {
     /// then one a listed vertex, as a glTF sparse accessor holds them); empty or missing: dense,
     /// every vertex.
     pub morph_vertices: Vec<Vec<u8>>,
+    /// Each sparse target's vertices for its normals, u32 a vertex, when they are not the ones
+    /// its positions list (a glTF file holds a target's POSITION and NORMAL as two sparse
+    /// accessors, each with its own vertices): its normals are then one a vertex listed here,
+    /// both lists ascending, and the target moves every vertex either lists. Empty or missing:
+    /// `morph_vertices` for both.
+    pub morph_normal_vertices: Vec<Vec<u8>>,
     /// How soft its flesh is a vertex, f32 0 (bone) … 1 (soft), for the ring round a contact
     /// (ADR-805); empty: none.
     pub softness: Vec<u8>,
@@ -534,6 +540,70 @@ pub struct MeshParts {
     /// Each vertex's centre of rotation (ADR-814): three f32, `gui/skin-centres`; empty: skinned
     /// by blending its joints' matrices, as before.
     pub centres: Vec<u8>,
+}
+
+/// A sparse morph target's listed vertices (`name` says which list, for an error): u32 a vertex,
+/// each naming one of the mesh's `count`.
+fn listed_vertices(name: &str, bytes: &[u8], count: usize) -> Result<Vec<u32>, String> {
+    let (words, rest) = bytes.as_chunks::<4>();
+    if !rest.is_empty() {
+        return Err(format!(
+            "{name}: {} bytes is not whole u32 vertices",
+            bytes.len()
+        ));
+    }
+    let vertices: Vec<u32> = words.iter().map(|word| u32::from_le_bytes(*word)).collect();
+    if let Some(bad) = vertices.iter().find(|&&vertex| vertex as usize >= count) {
+        return Err(format!("{name}: vertex {bad} names no vertex of {count}"));
+    }
+    Ok(vertices)
+}
+
+impl Morph {
+    /// The target whose positions move `vertices` and whose normals turn `normal_vertices`, two
+    /// lists of their own as a glTF file holds them: every vertex either lists, ascending, with
+    /// no offset where a list leaves it out. Both lists must ascend (glTF's sparse indices do),
+    /// which is what lets them be merged in one pass.
+    fn merged(
+        target: usize,
+        vertices: &[u32],
+        positions: &[[f32; 3]],
+        normal_vertices: &[u32],
+        normals: &[[f32; 3]],
+    ) -> Result<Morph, String> {
+        for (name, list) in [("vertices", vertices), ("normal vertices", normal_vertices)] {
+            if list.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(format!(
+                    "morph {target} {name}: must ascend when its normals list their own"
+                ));
+            }
+        }
+        let mut morph = Morph {
+            vertices: Vec::with_capacity(vertices.len().max(normal_vertices.len())),
+            positions: Vec::with_capacity(vertices.len().max(normal_vertices.len())),
+            normals: Vec::with_capacity(vertices.len().max(normal_vertices.len())),
+        };
+        let (mut moved, mut turned) = (0, 0);
+        while moved < vertices.len() || turned < normal_vertices.len() {
+            let position_vertex = vertices.get(moved).copied().unwrap_or(u32::MAX);
+            let normal_vertex = normal_vertices.get(turned).copied().unwrap_or(u32::MAX);
+            let vertex = position_vertex.min(normal_vertex);
+            morph.vertices.push(vertex);
+            if position_vertex == vertex && moved < vertices.len() {
+                morph.positions.push(positions[moved]);
+                moved += 1;
+            } else {
+                morph.positions.push([0.0; 3]);
+            }
+            if normal_vertex == vertex && turned < normal_vertices.len() {
+                morph.normals.push(normals[turned]);
+                turned += 1;
+            } else {
+                morph.normals.push([0.0; 3]);
+            }
+        }
+        Ok(morph)
+    }
 }
 
 fn floats<const N: usize>(name: &str, bytes: &[u8], count: usize) -> Result<Vec<[f32; N]>, String> {
@@ -688,7 +758,13 @@ impl Mesh {
         // (what is given: a sparse target its listed vertices, a dense one every vertex)
         let morph_bytes: usize = (0..parts.morphs.len())
             .map(|target| match parts.morph_vertices.get(target) {
-                Some(listed) if !listed.is_empty() => listed.len() / 4 * 28,
+                Some(listed) if !listed.is_empty() => {
+                    let normals_listed = parts
+                        .morph_normal_vertices
+                        .get(target)
+                        .map_or(0, |listed| listed.len());
+                    (listed.len() + normals_listed) / 4 * 28
+                }
                 _ => count * 24,
             })
             .sum();
@@ -706,22 +782,37 @@ impl Mesh {
                 .get(target)
                 .filter(|listed| !listed.is_empty())
             {
-                let vertices: Vec<u32> = listed
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|word| u32::from_le_bytes(*word))
-                    .collect();
-                if let Some(bad) = vertices.iter().find(|&&vertex| vertex as usize >= count) {
-                    return Err(format!(
-                        "morph {target}: vertex {bad} names no vertex of {count}"
-                    ));
-                }
+                let vertices = listed_vertices(&format!("morph {target}"), listed, count)?;
                 let positions = floats::<3>(
                     &format!("morph {target} positions"),
                     morph_positions,
                     vertices.len(),
                 )?;
+                // (its normals on vertices of their own: the two lists as one)
+                if let Some(normals_listed) = parts
+                    .morph_normal_vertices
+                    .get(target)
+                    .filter(|listed| !listed.is_empty())
+                {
+                    let normal_vertices = listed_vertices(
+                        &format!("morph {target} normal vertices"),
+                        normals_listed,
+                        count,
+                    )?;
+                    let normals = floats::<3>(
+                        &format!("morph {target} normals"),
+                        morph_normals,
+                        normal_vertices.len(),
+                    )?;
+                    morphs.push(Morph::merged(
+                        target,
+                        &vertices,
+                        &positions,
+                        &normal_vertices,
+                        &normals,
+                    )?);
+                    continue;
+                }
                 let normals = if morph_normals.is_empty() {
                     vec![[0.0; 3]; vertices.len()]
                 } else {
@@ -9760,6 +9851,72 @@ mod tests {
         assert_eq!(dense.morphs[0].vertices, sparse.morphs[0].vertices);
         assert_eq!(dense.morphs[0].positions, sparse.morphs[0].positions);
         assert_eq!(sparse.morphs[0].vertices, vec![2]);
+    }
+
+    #[test]
+    fn a_sparse_targets_normals_on_vertices_of_their_own_are_the_target_given_dense() {
+        // four vertices; a target moving vertices 1 and 2 and turning the normals of 0 and 2, as
+        // a glTF file holds it (two sparse lists), and given whole: the same target
+        let bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let words = |vertices: &[u32]| {
+            vertices
+                .iter()
+                .flat_map(|vertex| vertex.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let base = MeshParts {
+            positions: bytes(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0]),
+            normals: bytes(&[0.0, 0.0, 1.0].repeat(4)),
+            indices: [0u16, 1, 2, 0, 2, 3]
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect(),
+            ..MeshParts::default()
+        };
+        let dense = Mesh::from_parts(MeshParts {
+            morphs: vec![(
+                bytes(&[0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0]),
+                bytes(&[0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4, 0.0, 0.0, 0.0, 0.0]),
+            )],
+            ..base.clone()
+        })
+        .expect("dense");
+        let sparse = Mesh::from_parts(MeshParts {
+            morphs: vec![(
+                bytes(&[0.1, 0.0, 0.0, 0.0, 0.0, 0.2]),
+                bytes(&[0.3, 0.0, 0.0, 0.0, 0.4, 0.0]),
+            )],
+            morph_vertices: vec![words(&[1, 2])],
+            morph_normal_vertices: vec![words(&[0, 2])],
+            ..base.clone()
+        })
+        .expect("sparse");
+        assert_eq!(sparse.morphs[0].vertices, vec![0, 1, 2]);
+        assert_eq!(dense.morphs[0], sparse.morphs[0]);
+        // a list that does not ascend cannot be merged in a pass: refused, not drawn wrong
+        let unordered = Mesh::from_parts(MeshParts {
+            morphs: vec![(
+                bytes(&[0.1, 0.0, 0.0, 0.0, 0.0, 0.2]),
+                bytes(&[0.3, 0.0, 0.0, 0.0, 0.4, 0.0]),
+            )],
+            morph_vertices: vec![words(&[2, 1])],
+            morph_normal_vertices: vec![words(&[0, 2])],
+            ..base.clone()
+        });
+        assert!(unordered.is_err_and(|why| why.contains("must ascend")));
+        // and a normal list naming no vertex of the mesh is refused
+        let past = Mesh::from_parts(MeshParts {
+            morphs: vec![(bytes(&[0.1, 0.0, 0.0]), bytes(&[0.3, 0.0, 0.0]))],
+            morph_vertices: vec![words(&[1])],
+            morph_normal_vertices: vec![words(&[4])],
+            ..base
+        });
+        assert!(past.is_err_and(|why| why.contains("names no vertex")));
     }
 
     #[test]

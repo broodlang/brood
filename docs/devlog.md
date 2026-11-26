@@ -3154,3 +3154,13 @@ Reduced by deleting functions, then expressions, to three lines; a temporary tra
 movers showed one return alternating `vector` / `vector<(tuple any)>`. `ascend_return` now joins an
 answer that is not above the current one. b3d checks with one give-up left (gltf's widened
 unions); no verdict over std/ and tests/ moved (check, strict, the 816 checker tests).
+
+2026-11-26. **A sparse morph target's normals on vertices of their own.** `gui/mesh` took a sparse
+target as one `:vertices` list for its positions and normals, but a glTF file holds a target's
+POSITION and NORMAL as two sparse accessors with a list each: on womanblend's model none of 728
+targets had the same two (3,455 vertices moved, 16,481 normals turned), so b3d's sparse read fell
+back to filling every one (13 s). A target may now carry `:normal-vertices`, merged with
+`:vertices` in one pass (both must ascend, as glTF's do), and `:vertex-type` /
+`:normal-vertex-type` (`:u8`, `:u16`, `:u32`) so a loader hands the lists on at the width the
+file holds them: 1,149 of her 1,302 sparse accessors are narrow. Guard:
+`a_sparse_targets_normals_on_vertices_of_their_own_are_the_target_given_dense`.

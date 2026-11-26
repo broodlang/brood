@@ -3017,12 +3017,65 @@ fn mesh_bytes(
     }
 }
 
+/// A sparse morph target's vertex list under `key` as u32 bytes, whatever width the spec says
+/// it holds them at (`type_key`: `:u8`, `:u16` or `:u32`, the default), as a glTF sparse
+/// accessor's indices come: a loader hands them on as the file has them and they are widened
+/// here, not a value at a time in the language. Empty without the key.
+fn mesh_vertex_list(
+    heap: &mut Heap,
+    map: crate::core::value::MapId,
+    key: &str,
+    type_key: &str,
+) -> Result<Vec<u8>, LispError> {
+    let given = mesh_bytes(heap, map, key)?;
+    let width = match heap.map_get(map, value::kw(type_key)) {
+        None | Some(Value::Nil) => 4,
+        Some(Value::Keyword(name)) => match value::symbol_name_ref(name) {
+            "u8" => 1,
+            "u16" => 2,
+            "u32" => 4,
+            other => {
+                return Err(LispError::runtime(format!(
+                    "%gui-mesh: :{type_key} must be :u8, :u16 or :u32, got :{other}"
+                )));
+            }
+        },
+        Some(other) => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%gui-mesh",
+                "a vertex type keyword (:u8, :u16 or :u32)",
+                other,
+            ));
+        }
+    };
+    if width == 4 {
+        return Ok(given);
+    }
+    if !given.len().is_multiple_of(width) {
+        return Err(LispError::runtime(format!(
+            "%gui-mesh: :{key} of {} bytes is not whole :{type_key} vertices",
+            given.len()
+        )));
+    }
+    Ok(given
+        .chunks_exact(width)
+        .flat_map(|narrow| {
+            let mut word = [0u8; 4];
+            word[..width].copy_from_slice(narrow);
+            word
+        })
+        .collect())
+}
+
 /// `(%gui-mesh id handle spec)` — keep the mesh `spec` describes under `handle` for window
 /// `id`'s `[:scene …]` ops (ADR-786). Its attributes are little-endian bytes as a glTF buffer
 /// holds them: `:positions` (3 f32 a vertex, required), `:normals` (3 f32), `:uvs` (2 f32),
 /// `:tangents` (4 f32), `:joints` (4 a vertex, `:joint-type :u8` or `:u16`), `:weights`
 /// (4 f32), `:indices` (`:index-type :u16` or `:u32`) and `:morphs`, a vector of
-/// `{:positions bytes :normals bytes}`. Validated here, so a mesh that lies about its counts
+/// `{:positions bytes :normals bytes}`, each every vertex or sparse (`:vertices`, and
+/// `:normal-vertices` when its normals list their own; `:vertex-type` and `:normal-vertex-type`
+/// `:u8`, `:u16` or `:u32`, the default). Validated here, so a mesh that lies about its counts
 /// is a clean error, never a draw that reads past its data. The handle is the caller's
 /// (`gui/mesh` allocates it). Returns nil.
 pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -3058,6 +3111,7 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         indices_wide,
         morphs: Vec::new(),
         morph_vertices: Vec::new(),
+        morph_normal_vertices: Vec::new(),
         softness: mesh_bytes(heap, map, "softness")?,
         strand: mesh_bytes(heap, map, "strand")?,
         visibility: mesh_bytes(heap, map, "visibility")?,
@@ -3076,10 +3130,19 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
             };
             let positions = mesh_bytes(heap, target, "positions")?;
             let normals = mesh_bytes(heap, target, "normals")?;
-            // (sparse: its vertices, u32 bytes, the offsets one a listed vertex)
-            parts
-                .morph_vertices
-                .push(mesh_bytes(heap, target, "vertices")?);
+            // (sparse: its vertices, the offsets one a listed vertex; its normals' own
+            // vertices when the file lists them apart: each list at the width it is held)
+            let vertices = mesh_vertex_list(heap, target, "vertices", "vertex-type")?;
+            let normal_vertices =
+                mesh_vertex_list(heap, target, "normal-vertices", "normal-vertex-type")?;
+            if vertices.is_empty() && !normal_vertices.is_empty() {
+                return Err(LispError::runtime(
+                    "%gui-mesh: a morph target with :normal-vertices needs :vertices too"
+                        .to_string(),
+                ));
+            }
+            parts.morph_vertices.push(vertices);
+            parts.morph_normal_vertices.push(normal_vertices);
             parts.morphs.push((positions, normals));
         }
     }
