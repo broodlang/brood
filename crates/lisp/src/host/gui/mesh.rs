@@ -976,6 +976,13 @@ impl Material {
             / SKIN_MILLIMETRES_PER_UNIT
     }
 
+    /// How far off its skin, in the mesh's units, the light under it near the terminator looks up
+    /// a light's shadow ([`SCATTER_LIFT`] times its `:scatter`, ADR-815). The GPU's is the same
+    /// from `DrawU::skin.x`.
+    pub fn scatter_lift(&self) -> f32 {
+        SCATTER_LIFT * self.scatter_scale() * SKIN_MILLIMETRES_PER_UNIT
+    }
+
     /// The detail tile it is drawn with (ADR-797): its `:detail`, but none for a `:hair` or
     /// `:strands` surface, whose tangents are its strands and whose light is not this model's.
     /// Both painters ask here, so neither reads a tile the other does not.
@@ -1267,6 +1274,12 @@ pub const FIRM_SOFTNESS: f32 = 0.5;
 /// in proportion. Pressed further (a pose that pushes a face deep through glass), skin passes the
 /// surface rather than being flattened away from what lies under it (an eye, the mouth) (ADR-805).
 pub const MAX_SQUASH: f32 = 0.02;
+
+/// How far off the skin a light's shadow is looked up for the light under the skin near the
+/// terminator, in the skin's own metres (times its `:scatter`, which scales how far the light
+/// travels under it: [`Material::scatter_lift`]), along the surface's normal (ADR-815): past the
+/// body's own shadow over the band the scattering lights, within a cast shadow's reach.
+pub const SCATTER_LIFT: f32 = 0.008;
 
 /// The most planes a strand material's `:clamp-planes` holds (ADR-813).
 pub const MAX_CLAMP_PLANES: usize = 4;
@@ -2416,9 +2429,13 @@ pub fn eye_seen(
 /// scaled by [`specular_occlusion`] and [`horizon`].
 ///
 /// A `:skin` surface's diffuse light is [`skin_diffuse`]'s in place of Lambert's (ADR-794).
-/// A shadow multiplies the Lambert part of it and fades out of the rest — the light the
-/// scattering moved — toward the terminator, where a closed body always shadows itself and the
-/// light there came under the skin from the lit side (ADR-793).
+/// A shadow multiplies the Lambert part of it; the rest — the light the scattering moved — is
+/// shadowed toward the terminator by `scattered_visibility`, the light's shadow looked up from the
+/// point lifted [`SCATTER_LIFT`] off the skin: a closed body shadows itself at its terminator in
+/// the maps (the light there came under the skin from the lit side), which the lift clears, while
+/// a hand's or an arm's shadow is still seen (ADR-793; ADR-815: unshadowed there, the red wrap
+/// shone in a cast shadow at grazing light, a red blotch at its edge). [`shade`] is the same with
+/// the two visibilities alike.
 ///
 /// A light's `:color` is the irradiance it brings, π times its radiance, so the diffuse term
 /// is the albedo itself (Lambert's `albedo / π` times π) and the specular's normalised
@@ -2433,6 +2450,47 @@ pub fn shade(
     world: [f32; 3],
     occlusion: f32,
     visibility: &[f32],
+    strand: [f32; 3],
+    curvature: f32,
+    specular_kept: f32,
+    surface_normal: [f32; 3],
+    emitters: &EmitterPlan,
+    diffuse_normal: [f32; 3],
+    under_cornea: Option<&UnderCornea>,
+) -> [f32; 3] {
+    shade_scattered(
+        scene,
+        material,
+        base,
+        normal,
+        view,
+        world,
+        occlusion,
+        visibility,
+        visibility,
+        strand,
+        curvature,
+        specular_kept,
+        surface_normal,
+        emitters,
+        diffuse_normal,
+        under_cornea,
+    )
+}
+
+/// [`shade`] with the scattering's own visibility a light (`scattered_visibility`, the shadow
+/// looked up [`SCATTER_LIFT`] off the skin, ADR-815).
+#[allow(clippy::too_many_arguments)]
+pub fn shade_scattered(
+    scene: &Scene,
+    material: &Material,
+    base: [f32; 3],
+    normal: [f32; 3],
+    view: [f32; 3],
+    world: [f32; 3],
+    occlusion: f32,
+    visibility: &[f32],
+    scattered_visibility: &[f32],
     strand: [f32; 3],
     curvature: f32,
     specular_kept: f32,
@@ -2468,9 +2526,11 @@ pub fn shade(
         };
         let facing = dot(diffuse_normal, falling);
         // the light past the terminator is light under the skin, which the body's own shadow
-        // there would cut off in a hard line: the shadow fades out of what the scattering
-        // moved toward the terminator (ADR-793)
-        let scattered_seen = 1.0 + (seen - 1.0) * smoothstep(0.0, 0.3, facing);
+        // there would cut off in a hard line: toward the terminator what the scattering moved
+        // takes the shadow seen from just off the skin, clear of that self-shadow but not of a
+        // hand's or an arm's (ADR-793, ADR-815)
+        let lifted = scattered_visibility.get(index).copied().unwrap_or(seen);
+        let scattered_seen = lifted + (seen - lifted) * smoothstep(0.0, 0.3, facing);
         // (under a cornea, the share of the light that got in)
         let lambert = match under_cornea {
             Some(_) => facing.max(0.0) * let_in,
@@ -4486,6 +4546,8 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     (row / context.supersample) as f32,
                 );
             let mut visibility = [1.0f32; MAX_LIGHTS];
+            // (and for the light under the skin, the shadow looked up just off it, ADR-815)
+            let mut scattered_visibility = [1.0f32; MAX_LIGHTS];
             for (index, seen) in visibility.iter_mut().enumerate().take(lights) {
                 if context.shadows.lights[index].1 == 0 {
                     continue;
@@ -4510,6 +4572,19 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                         surface_normal,
                         turn,
                     );
+                    if material.surface == Surface::Skin {
+                        scattered_visibility[index] = shadow_visibility(
+                            scene,
+                            context.shadows,
+                            context.shadow_maps,
+                            index,
+                            [0, 1, 2].map(|axis| {
+                                world[axis] + surface_normal[axis] * material.scatter_lift()
+                            }),
+                            surface_normal,
+                            turn,
+                        );
+                    }
                 }
             }
             // a hair's strand: the bitangent, as its UV v runs, or a strand's own direction
@@ -4540,7 +4615,7 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     surface_normal,
                 );
             let lit = tone(
-                shade(
+                shade_scattered(
                     scene,
                     material,
                     base,
@@ -4549,6 +4624,7 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     world,
                     occlusion,
                     &visibility,
+                    &scattered_visibility,
                     strand,
                     curvature,
                     specular_kept,
@@ -7035,6 +7111,58 @@ mod tests {
             ..MeshParts::default()
         })
         .expect("a sphere")
+    }
+
+    /// ADR-815: at a grazing point (its normal a little past square to the light) the light the
+    /// skin's scattering moved follows the light's shadow looked up just off the skin: where
+    /// that is lit (the body's own shadow, which the lift clears) the wrap shows; where a hand's
+    /// shadow covers it there too, it does not, as it once did whatever lay between.
+    #[test]
+    fn a_cast_shadow_darkens_the_skins_wrap_light_but_its_own_shadow_does_not() {
+        let skin = Material {
+            surface: Surface::Skin,
+            specular: 0.0,
+            ..Material::default()
+        };
+        let mut lit = scene(draw());
+        lit.sky = [0.0; 3];
+        lit.ground = [0.0; 3];
+        lit.lights = vec![Light::directional([1.0, 0.0, 0.0], [2.0; 3])];
+        // the normal turned a little past the terminator, away from the light (from -x)
+        let normal = normalize([0.1, 0.0, -1.0]);
+        let wrap = |seen: f32, lifted: f32| {
+            shade_scattered(
+                &lit,
+                &skin,
+                [0.8; 3],
+                normal,
+                [0.0, 0.0, -1.0],
+                [0.0; 3],
+                1.0,
+                &[seen],
+                &[lifted],
+                [0.0; 3],
+                30.0,
+                1.0,
+                normal,
+                &emitter_plan(&lit),
+                normal,
+                None,
+            )[0]
+        };
+        // its own shadow (the maps say shadowed, but not from just off the skin): the wrap shows
+        assert!(
+            wrap(0.0, 1.0) > 1e-4,
+            "the wrap past the terminator: {}",
+            wrap(0.0, 1.0)
+        );
+        // a hand's shadow, there from just off the skin too: dark
+        assert!(
+            wrap(0.0, 0.0) < wrap(0.0, 1.0) * 1e-3,
+            "a cast shadow darkens it: {} against {}",
+            wrap(0.0, 0.0),
+            wrap(0.0, 1.0)
+        );
     }
 
     #[test]

@@ -743,6 +743,10 @@ const EDGE_SPREAD: f32 = 0.5;
 const FIRM_INSET: f32 = 0.25;
 const FIRM_SOFTNESS: f32 = 0.5;
 const MAX_SQUASH: f32 = 0.02;
+// `mesh::SCATTER_LIFT`: how far off the skin (in its own metres, times `:scatter`: `skin.x` is
+// `:scatter` over 1000) the light under it near the terminator looks up its
+// light's shadow (ADR-815)
+const SCATTER_LIFT: f32 = 0.008;
 
 // `mesh::smooth_outside`: `distance`'s smooth maximum with 0 over `band`
 fn smooth_outside(distance: f32, band: f32) -> f32 {
@@ -2117,9 +2121,15 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         }
         var diffuse = vec3<f32>(lambert * seen);
         if (draw.flags.x == 0u) {
-            // the CPU's: the light under the skin in place of Lambert's, the shadow fading out
-            // of what the scattering moved toward the terminator
-            let scattered_seen = mix(1.0, seen, smoothstep(0.0, 0.3, facing));
+            // the CPU's: the light under the skin in place of Lambert's; toward the terminator
+            // what the scattering moved takes the light's shadow looked up just off the skin
+            // (`mesh::SCATTER_LIFT`), clear of the body's own shadow there but not of a hand's or
+            // an arm's (ADR-815: unshadowed, the red wrap shone in a cast shadow)
+            var lifted = seen;
+            if (light.shadow.z > 0u && facing < 0.3) {
+                lifted = shadow_visibility(light, world + surface_normal * (SCATTER_LIFT * 1000.0 * draw.skin.x), surface_normal, arrival.to_light, turn);
+            }
+            let scattered_seen = mix(lifted, seen, smoothstep(0.0, 0.3, facing));
             let scattered = skin_diffuse(facing, curvature * draw.skin.x);
             diffuse = diffuse + (scattered - vec3<f32>(lambert)) * scattered_seen;
         }
