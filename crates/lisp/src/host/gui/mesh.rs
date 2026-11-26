@@ -501,10 +501,10 @@ pub struct MeshParts {
     /// How soft its flesh is a vertex, f32 0 (bone) … 1 (soft), for the ring round a contact
     /// (ADR-805); empty: none.
     pub softness: Vec<u8>,
-    /// A strand mesh's value a vertex (`_STRAND`, E1, on trial): one f32 each, constant along a
+    /// A strand mesh's value a vertex (`_STRAND`, ADR-813): one f32 each, constant along a
     /// strand; carried in the curvature slot, which strands never read.
     pub strand: Vec<u8>,
-    /// A strand mesh's baked self-shadow a vertex (E2, on trial): four f32, `[a bx by bz]`, the hairs
+    /// A strand mesh's baked self-shadow a vertex (ADR-813): four f32, `[a bx by bz]`, the hairs
     /// crossed toward a unit direction L being max(0, a + b·L); carried in the tangent slot.
     pub visibility: Vec<u8>,
 }
@@ -561,7 +561,7 @@ impl Mesh {
             floats::<2>("uvs", &parts.uvs, count)?
         };
         let tangents = if parts.tangents.is_empty() {
-            // (a strand mesh's baked self-shadow in their place, E2: strands never read tangents)
+            // (a strand mesh's baked self-shadow in their place, ADR-813: strands never read tangents)
             if parts.visibility.is_empty() {
                 None
             } else {
@@ -685,7 +685,7 @@ impl Mesh {
                 .map(|[value]| value.clamp(0.0, 1.0))
                 .collect()
         };
-        // (a strand mesh's `_STRAND` in its place, E1: strands never read curvature)
+        // (a strand mesh's `_STRAND` in its place, ADR-813: strands never read curvature)
         let curvature = if parts.strand.is_empty() {
             vertex_curvature(&positions, &normals, &indices)
         } else {
@@ -891,15 +891,18 @@ pub struct Material {
     pub sheen: Option<[f32; 3]>,
     /// Its skin pressed by the scene's contacts (`:deform`, ADR-805).
     pub deform: bool,
-    /// A `:fibres` surface (E1, on trial): a `:strands` mesh at its real width, its coverage of a
+    /// A `:fibres` surface (ADR-813): a `:strands` mesh at its real width, its coverage of a
     /// pixel worked out exactly and blended, the three nearest layers a pixel lit (TressFX
     /// ShortCut). The GPU painter alone draws it so; the CPU painter draws it as `:strands`.
     pub fibres: bool,
-    /// Planes its strands never pass (`:clamp-planes`, E1, on trial): each `[nx ny nz offset]`,
+    /// Planes its strands never pass (`:clamp-planes`, ADR-813): each `[nx ny nz offset]`,
     /// its unit normal toward the side the strands keep to and `normal · point` of a point on it,
     /// at most [`MAX_CLAMP_PLANES`]. Strands of a `:strands` or `:fibres` surface reaching into a
     /// plane's band are flattened onto it ([`clamped_strand`]): hair laid on glass.
     pub clamp_planes: Vec<[f32; 4]>,
+    /// A `:fibres` surface's `:density`: how much of its baked hair count (`_VISIBILITY`) tints
+    /// and dims the light reaching a strand, 0 none; 0.4 by default (ADR-813).
+    pub fibre_density: f32,
 }
 
 impl Default for Material {
@@ -929,6 +932,7 @@ impl Default for Material {
             deform: false,
             fibres: false,
             clamp_planes: Vec::new(),
+            fibre_density: 0.4,
         }
     }
 }
@@ -1251,14 +1255,14 @@ pub const FIRM_SOFTNESS: f32 = 0.5;
 /// surface rather than being flattened away from what lies under it (an eye, the mouth) (ADR-805).
 pub const MAX_SQUASH: f32 = 0.02;
 
-/// The most planes a strand material's `:clamp-planes` holds (E1, on trial).
+/// The most planes a strand material's `:clamp-planes` holds (ADR-813).
 pub const MAX_CLAMP_PLANES: usize = 4;
 /// How far before a clamp plane its strands begin to be flattened (metres), and how far off its
-/// face they are held at the most (E1, on trial).
+/// face they are held at the most (ADR-813).
 pub const CLAMP_BAND: f32 = 0.008;
 pub const CLAMP_HOLD: f32 = 0.0005;
 
-/// A strand's point `centre` and unit `direction` laid against `planes` (E1, on trial): a point
+/// A strand's point `centre` and unit `direction` laid against `planes` (ADR-813): a point
 /// within [`CLAMP_BAND`] of a plane (or past it) is eased toward its face, to
 /// `HOLD + (BAND − HOLD) · e^((distance − BAND) / (BAND − HOLD))` from it: unchanged at the band's
 /// edge, with the same slope there (no kink), and never nearer than [`CLAMP_HOLD`] however deep
@@ -4464,7 +4468,7 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
                 let [root, tip] = draw.material.strand_width;
                 let uv = mesh.uvs[index];
                 let width = tip + (root - tip) * uv[1].clamp(0.0, 1.0);
-                // (laid against its `:clamp-planes`, E1: hair on glass)
+                // (laid against its `:clamp-planes`, ADR-813: hair on glass)
                 let (centre, direction) = clamped_strand(
                     &draw.material.clamp_planes,
                     [world[0], world[1], world[2]],
@@ -8856,7 +8860,7 @@ mod tests {
     }
     #[test]
     fn a_strand_meshs_value_and_bake_ride_in_its_curvature_and_tangent_slots() {
-        // E1/E2, on trial: `_STRAND` in the curvature slot, the baked self-shadow in the tangent
+        // ADR-813: `_STRAND` in the curvature slot, the baked self-shadow in the tangent
         // slot, which a strand surface never reads otherwise; a mesh without them is as before
         let floats_bytes = |values: &[f32]| -> Vec<u8> {
             values
@@ -8889,7 +8893,7 @@ mod tests {
 
     #[test]
     fn a_strand_is_laid_on_a_clamp_plane_never_through_it() {
-        // E1, on trial: glass at z = 1 facing −z (the strands keep to z < 1)
+        // ADR-813: glass at z = 1 facing −z (the strands keep to z < 1)
         let glass = [[0.0, 0.0, -1.0, -1.0]];
         let along = [0.0, 0.0, 1.0];
         let distance = |point: [f32; 3]| dot([0.0, 0.0, -1.0], point) + 1.0;

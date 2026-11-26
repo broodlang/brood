@@ -246,7 +246,8 @@ fn the_mesh_shader_validates() {
         floats[..4],
         [Material::default().scatter_scale(), 0.5, 0.15, 0.0]
     );
-    assert_eq!(floats[6], 0.0, "the rim is gone");
+    // (where the rim was: a `:fibres` surface's `:density` now, its default on any other, ADR-813)
+    assert_eq!(floats[6], Material::default().fibre_density);
     assert!(MESH_SRC.contains("coat = draw.skin.yz;"));
     // ADR-796: an eye's optics are `DrawU`'s last eight vec4s, zeros for any other surface; the
     // shader's numbers are the CPU painter's; the vertices carry the eye's frame
@@ -310,7 +311,7 @@ fn the_mesh_shader_validates() {
     assert_eq!(eye_floats(Surface::Cutout), [0.0; 32], "no other surface");
     assert_eq!(
         draw_declared, 448,
-        "the eye's fields, then a hair's `:sheen` (ADR-799), `deform` (ADR-805), `loose` (ADR-812), then the clamp planes (E1)"
+        "the eye's fields, then a hair's `:sheen` (ADR-799), `deform` (ADR-805), `loose` (ADR-812), then the clamp planes (ADR-813)"
     );
     // a hair surface's `:sheen` last, its fourth float 1 when given; its `:shift` in the
     // strand vector's spare two (ADR-799)

@@ -1,4 +1,4 @@
-//! E1, on trial: `:fibres`, hair strands at their real width, each fragment's coverage of its
+//! ADR-813: `:fibres`, hair strands at their real width, each fragment's coverage of its
 //! pixel worked out exactly and blended, with at most three layers a pixel lit (TressFX
 //! ShortCut, AMD, MIT). After a scene's colour pass:
 //!

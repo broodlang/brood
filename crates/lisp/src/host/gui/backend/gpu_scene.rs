@@ -890,7 +890,7 @@ fn loose_flesh_follows_its_lagging_bones_alike_on_both_painters() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// E1, on trial: a `:fibres` strand seen from above, at its real width. Half a pixel wide it
+/// ADR-813: a `:fibres` strand seen from above, at its real width. Half a pixel wide it
 /// covers about half its pixel, blended over the black behind (no hash, no mask); sixteen
 /// pixels wide it covers its pixel wholly; and nothing is drawn beside it. Its passes'
 /// pipelines (`fibres.rs`, `fs_fibre_*`) are made and validated here.
@@ -988,7 +988,7 @@ fn a_fibre_strand_covers_its_pixel_by_its_real_width() {
     }
 }
 
-/// E1, on trial: a strand along z, seen from above, with glass at z = 1 facing back along it
+/// ADR-813: a strand along z, seen from above, with glass at z = 1 facing back along it
 /// (`:clamp-planes`). Its part past the glass is laid onto it, so nothing of it is drawn beyond
 /// z = 1 and it is drawn as before short of it, alike on both painters (a plain `:strands`
 /// surface, which both draw the same way); without the plane it reaches z = 2.

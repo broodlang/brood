@@ -3033,3 +3033,11 @@ deep through the floor sized the floor's ring; the ring now goes by the press ca
 `:loose {:palette j :amount a}` draws its soft skin toward a palette of damped followers the game
 keeps (b3d-loose), by softness: no renderer state, alike on both painters. Run: the GPU/CPU
 contact and scene tests (154/154), the new parity test on both adapters.
+
+2026-11-26. **Hair at its real width: `:fibres` (ADR-813).** womanblend's chosen E1 hair into main:
+exact coverage at a strand's real width (ShortCut, the nearest three a pixel lit), Karis 2016's
+lobes varied strand by strand (`:strand`), a baked self-shadow (`:visibility`, `:density`), light
+through hair only from a light whose shadow map knows what is in the way (the shadowless fill lit
+the back of her hair white through her head), and `:clamp-planes` laying strands on glass. The
+trial's env knobs became the material's `:density`. Run: the GUI suites, the fibre and clamp
+parity tests on both adapters.

@@ -67,7 +67,7 @@ pub(super) struct SceneTarget {
     shadow: Option<ShadowTarget>,
     /// Its contact buffers (ADR-805), while it presses any skin.
     contacts: Option<ContactTarget>,
-    /// Its fibre buffers (E1), made the first frame it has `:fibres` and kept at its size.
+    /// Its fibre buffers (ADR-813), made the first frame it has `:fibres` and kept at its size.
     fibres: Option<super::fibres::FibreTarget>,
 }
 
@@ -164,7 +164,7 @@ pub(super) struct MeshGpu {
     hair_depth_pipelines: [wgpu::RenderPipeline; 2],
     hair_front_pipelines: [wgpu::RenderPipeline; 2],
     /// The fibres' scene group layout, their layer and front passes, and their full-screen passes
-    /// (E1, on trial: `fibres.rs`).
+    /// (ADR-813: `fibres.rs`).
     fibre_scene_layout: wgpu::BindGroupLayout,
     fibre_layers_pipelines: [wgpu::RenderPipeline; 2],
     fibre_front_pipelines: [wgpu::RenderPipeline; 2],
@@ -325,22 +325,6 @@ pub(super) fn hair_prepass() -> bool {
     *ON.get_or_init(|| std::env::var("BROOD_GUI_HAIR_PREPASS").as_deref() != Ok("0"))
 }
 
-/// Whether a `:fibres` strand's baked self-shadow is used (E2, on trial): `BROOD_GUI_FIBRE_BAKE=0`
-/// shades it by the shadow maps alone, to compare. The shader's `FIBRE_BAKE`.
-pub(super) fn fibre_bake() -> u32 {
-    u32::from(std::env::var("BROOD_GUI_FIBRE_BAKE").as_deref() != Ok("0"))
-}
-
-/// How much of the baked hair count tints and dims a `:fibres` strand's light (E2, on trial):
-/// `BROOD_GUI_FIBRE_DENSITY`, 0.4 by default. The shader's `FIBRE_DENSITY`.
-pub(super) fn fibre_density() -> f64 {
-    std::env::var("BROOD_GUI_FIBRE_DENSITY")
-        .ok()
-        .and_then(|text| text.trim().parse::<f64>().ok())
-        .filter(|density| density.is_finite() && *density >= 0.0)
-        .unwrap_or(0.4)
-}
-
 /// A trial of what a scene's hair costs on the card, for measuring only
 /// (`BROOD_GUI_HAIR_TRIAL`): 0 drawn as ever (the default), 1 its coverage alone, lit by
 /// nothing, 2 without its hair-on-hair shadow. The shader's `HAIR_TRIAL`.
@@ -455,7 +439,7 @@ impl MeshGpu {
             label: Some("mesh scene"),
             entries: &scene_entries,
         });
-        // the fibres' scene group (E1): the scene's, and the pixels' three nearest fibre depths
+        // the fibres' scene group (ADR-813): the scene's, and the pixels' three nearest fibre depths
         let mut fibre_scene_entries = scene_entries.to_vec();
         fibre_scene_entries.push(wgpu::BindGroupLayoutEntry {
             binding: 6,
@@ -653,7 +637,7 @@ impl MeshGpu {
                 wgpu::ColorWrites::ALL,
             )
         });
-        // the fibres' two passes (E1, `fibres.rs`), one-sided and double-sided: single-sample,
+        // the fibres' two passes (ADR-813, `fibres.rs`), one-sided and double-sided: single-sample,
         // against the fibres' own depth, never writing it
         let fibre_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("fibre"),
@@ -703,8 +687,6 @@ impl MeshGpu {
                         constants: &[
                             ("SAMPLES", f64::from(samples)),
                             ("HAIR_TRIAL", f64::from(hair_trial())),
-                            ("FIBRE_BAKE", f64::from(fibre_bake())),
-                            ("FIBRE_DENSITY", fibre_density()),
                         ],
                         ..Default::default()
                     },
@@ -1016,7 +998,7 @@ impl MeshGpu {
         };
         let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT;
         let color = texture("scene colour", COLOR_FORMAT, self.samples, attachment);
-        // (readable: the fibres' passes take its nearest sample, E1)
+        // (readable: the fibres' passes take its nearest sample, ADR-813)
         let depth = texture(
             "scene depth",
             DEPTH_FORMAT,
@@ -1197,7 +1179,7 @@ impl MeshGpu {
                     Surface::Strands => 5,
                     Surface::Eye => 6,
                 };
-                // and 512 for a `:fibres` strand (E1): drawn at its real width, its coverage exact
+                // and 512 for a `:fibres` strand (ADR-813): drawn at its real width, its coverage exact
                 let bits = texture_bits(
                     [base, normal, occlusion, detail].map(|texture| {
                         texture.map(|texture| texture.filter != TextureFilter::Nearest)
@@ -1366,7 +1348,7 @@ impl MeshGpu {
                     queue.write_buffer(&contacts.contacts, 0, &contact_words(scene));
                 }
             }
-            // its fibre buffers (E1): only for a scene that draws `:fibres`, so a scene without
+            // its fibre buffers (ADR-813): only for a scene that draws `:fibres`, so a scene without
             // hair costs nothing for them
             let size = scene.pixel_size();
             let target = &mut self.targets[index];
@@ -1691,7 +1673,7 @@ impl MeshGpu {
                     view: &target.depth,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
-                        // kept for the fibres' passes when the scene has them (E1)
+                        // kept for the fibres' passes when the scene has them (ADR-813)
                         store: if target.fibres.is_some() {
                             wgpu::StoreOp::Store
                         } else {
@@ -1726,7 +1708,7 @@ impl MeshGpu {
                 }
             }
             for (draw, material) in plans[index].iter().zip(&materials) {
-                // (a `:fibres` draw is drawn by the fibre passes after this one, E1)
+                // (a `:fibres` draw is drawn by the fibre passes after this one, ADR-813)
                 if draw.fibres {
                     continue;
                 }
@@ -1760,7 +1742,7 @@ impl MeshGpu {
                 pass.write_timestamp(timer.query_set(), query);
             }
             drop(pass);
-            // the scene's `:fibres` (E1, on trial: `fibres.rs`): after its colour pass, over it
+            // the scene's `:fibres` (ADR-813: `fibres.rs`): after its colour pass, over it
             let Some(fibre_target) = &target.fibres else {
                 continue;
             };
@@ -1952,7 +1934,13 @@ pub(super) fn draw_uniform(
     // strength and roughness (ADR-795; 0: none)
     let [coat_strength, coat_roughness] = material.coat.unwrap_or([0.0, 0.0]);
     floats.extend_from_slice(&[material.scatter_scale(), coat_strength, coat_roughness, 0.0]);
-    floats.extend_from_slice(&[material.roughness, material.specular, 0.0, material.cutoff]);
+    // (the third: a `:fibres` surface's `:density`, how much of its baked hair count dims its light)
+    floats.extend_from_slice(&[
+        material.roughness,
+        material.specular,
+        material.fibre_density,
+        material.cutoff,
+    ]);
     let lobes = material.lobes();
     floats.extend_from_slice(&[lobes[0], lobes[1], lobes[2], material.f0()]);
     let mut bytes = floats_bytes(&floats);
@@ -1983,7 +1971,7 @@ pub(super) fn draw_uniform(
     // `DrawU::loose`: its flesh lagging its bones, the amount (0 none), its lagging palette's
     // offset and joint count (ADR-812)
     bytes.extend(floats_bytes(&loose));
-    // `DrawU::clamp_info` and `clamps`: the planes its strands keep to (E1, on trial)
+    // `DrawU::clamp_info` and `clamps`: the planes its strands keep to (ADR-813)
     let planes = &material.clamp_planes[..material
         .clamp_planes
         .len()
@@ -2040,7 +2028,7 @@ struct DrawPlan {
     /// Pressed by the scene's contacts (ADR-805): its vertices posed and deformed by the compute
     /// passes, read from the scene's posed buffer.
     pressed: bool,
-    /// A `:fibres` draw (E1): drawn by the fibre passes after the colour pass, not in it.
+    /// A `:fibres` draw (ADR-813): drawn by the fibre passes after the colour pass, not in it.
     fibres: bool,
 }
 

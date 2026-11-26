@@ -1760,7 +1760,20 @@ fn scene_spec(
             matches!(get(material_map, "double-sided"), Some(Value::Bool(true)));
         // its skin pressed by the scene's `:contacts` (ADR-805)
         material.deform = matches!(get(material_map, "deform"), Some(Value::Bool(true)));
-        // planes its strands never pass (E1, on trial): `[[px py pz nx ny nz] …]`, a point on
+        // a `:fibres` surface's `:density`: how much of its baked hair count dims its light (a
+        // number from 0; 0.4 without it); refused when not, as a wrong one would light hair
+        // wrongly without a word
+        material.fibre_density = match get(material_map, "density") {
+            None => 0.4,
+            Some(item) if is_number(item) && num(item).is_finite() && num(item) >= 0.0 => num(item),
+            Some(other) => {
+                return Err(format!(
+                    "a material's :density is a number from 0, not {}",
+                    crate::syntax::printer::print(heap, other)
+                ));
+            }
+        };
+        // planes its strands never pass (ADR-813): `[[px py pz nx ny nz] …]`, a point on
         // each and its normal toward the side the strands keep to; refused when malformed, so
         // hair is never left passing glass without a word
         material.clamp_planes = match get(material_map, "clamp-planes") {
@@ -4028,6 +4041,39 @@ mod gui_scene_light_tests {
         assert_eq!(within.lights.len(), 2);
         let error = scene_with("[]", "{:cast-shadow :no}").expect_err("cast-shadow");
         assert!(error.contains(":cast-shadow is true or false"), "{error}");
+    }
+
+    /// ADR-813: a hair material's `:density` and `:clamp-planes` are read (each plane as its unit
+    /// normal and `normal · point`), and a wrong one is refused, never drawn wrongly in silence.
+    #[test]
+    fn a_hair_materials_density_and_clamp_planes_are_read_or_refused() {
+        let scene = scene_with(
+            "[]",
+            "{:surface :fibres :density 0.7 :clamp-planes [[3.2 1.0 1.894 0 0 -2]]}",
+        )
+        .expect("reads");
+        let material = &scene.draws[0].material;
+        assert!(material.fibres);
+        assert!((material.fibre_density - 0.7).abs() < 1e-6);
+        assert_eq!(material.clamp_planes.len(), 1);
+        let plane = material.clamp_planes[0];
+        assert!(
+            (plane[2] + 1.0).abs() < 1e-6 && (plane[3] + 1.894).abs() < 1e-5,
+            "{plane:?}"
+        );
+        assert!(
+            (scene_with("[]", "{:surface :fibres}").expect("reads").draws[0]
+                .material
+                .fibre_density
+                - 0.4)
+                .abs()
+                < 1e-6
+        );
+        let error = scene_with("[]", "{:surface :fibres :density -1}").expect_err("density");
+        assert!(error.contains(":density is a number from 0"), "{error}");
+        let error = scene_with("[]", "{:surface :fibres :clamp-planes [[0 0 0 0 0 0]]}")
+            .expect_err("no normal");
+        assert!(error.contains(":clamp-planes are each"), "{error}");
     }
 
     #[test]
