@@ -1414,3 +1414,87 @@ fn wrinkles_turn_the_skins_normal_alike_on_both_painters() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn a_contact_shadow_darkens_what_lies_just_under_a_near_edge_on_the_gpu() {
+    // seen from above, lit by one shadowed light grazing in from +x (no ambient): a card 4 mm
+    // over the floor. Just past its −x edge the floor is under it on the way to the light, too
+    // near for the shadow map to tell (ADR-818): darker with the camera's depth view (the
+    // ambient occlusion's, which the contact shadow marches through) than without; open floor
+    // is the same either way. The GPU painter only: the CPU painter is brood's frozen fallback.
+    let side = 128u32;
+    let floor = Arc::new(square(0.0, 2.0));
+    let card = Arc::new(square(0.004, 0.1));
+    let mut light = Light::directional([-1.0, -0.25, 0.0], [1.0, 1.0, 1.0]);
+    light.shadow = Some(Shadow::default());
+    let material = Material {
+        double_sided: true,
+        specular: 0.0,
+        ..Material::default()
+    };
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    // x → clip x × 4 (half a metre across, 4 mm a pixel), z → clip −y × 4, height → depth
+    scene.view_proj = [
+        4.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1, 0.0, 0.0, -4.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0,
+    ];
+    scene.eye = [0.0, 10.0, 0.0];
+    scene.lights = vec![light];
+    scene.sky = [0.0, 0.0, 0.0];
+    scene.ground = [0.0, 0.0, 0.0];
+    let draw = |mesh: u32| Draw {
+        loose: None,
+        mesh,
+        model: [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+        palette: None,
+        morphs: vec![],
+        material: material.clone(),
+    };
+    scene.draws = vec![draw(1), draw(2)];
+    let mut with_depth = scene.clone();
+    with_depth.ambient_occlusion = Some(AmbientOcclusion {
+        radius: 0.01,
+        strength: 1.0,
+    });
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    // (pixel columns: the card's −x edge at x −0.1 m is column 64 − 0.1 × 4 × 64 = 38.4)
+    let red_at = |pixels: &[u8], column: u32| i32::from(pixels[(64 * side + column) as usize * 3]);
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &floor);
+        gpu.upload_mesh(2, &card);
+        let mut paint = |scene: &Scene| {
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            renderer.set_bg(Some([0, 0, 0]));
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            gpu.read_pixels()
+        };
+        let plain = paint(&scene);
+        let shaded = paint(&with_depth);
+        let under = [37u32, 36].map(|column| (red_at(&plain, column), red_at(&shaded, column)));
+        let open = (red_at(&plain, 10), red_at(&shaded, 10));
+        eprintln!("{name}: under the edge (plain, contact) {under:?}, open floor {open:?}");
+        if !under.iter().any(|(plain, shaded)| shaded + 20 < *plain) {
+            failures.push(format!(
+                "{name}: no contact shadow under the edge: {under:?}"
+            ));
+        }
+        if (open.0 - open.1).abs() > 3 {
+            failures.push(format!("{name}: open floor changed: {open:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

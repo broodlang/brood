@@ -3076,3 +3076,9 @@ by default; the white lit by the skin model's scattering. A skin's `:wrinkles` l
 by eight zones' masks and weights; textures that are numbers upload `:data` (raw, never
 premultiplied). Both painters alike to the pixel (the wrinkle test: 139 against 211 on the CPU and
 both adapters).
+
+2026-11-26. **Contact shadows (ADR-818), GPU only; the CPU painter frozen as the fallback.** A
+shadowed light marches 2 cm toward itself through the camera's depth view, so a lip shades the
+teeth under it and a crease its floor where the shadow map cannot. New scene features go in for
+the GPU painter alone from here. Also: the CPU painter's contact skip mask held 16 of the 64
+contacts; it holds all of them now.

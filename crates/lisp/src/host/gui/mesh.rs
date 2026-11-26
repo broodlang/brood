@@ -4752,6 +4752,8 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                         turn,
                     );
                 } else {
+                    // (the GPU adds contact shadows here, ADR-818; this painter, brood's
+                    // fallback, is frozen without them)
                     *seen = shadow_visibility(
                         scene,
                         context.shadows,
