@@ -1854,21 +1854,29 @@ const CONTACT_STEPS: u32 = 12u;
 const CONTACT_THICKNESS: f32 = 0.03;
 // how far along its reflected direction a surface looks for what hides the room from it
 const REFLECTION_REACH: f32 = 0.04;
-fn contact_shadow(world: vec3<f32>, to_light: vec3<f32>) -> f32 {
-    return screen_blocked(world, to_light, CONTACT_REACH);
+fn contact_shadow(world: vec3<f32>, to_light: vec3<f32>, surface_normal: vec3<f32>, to_eye: vec3<f32>) -> f32 {
+    return screen_blocked(world, to_light, CONTACT_REACH, surface_normal, to_eye);
 }
 
 // how open the way from `world` along `direction` is, over `reach` metres, as the camera's depth
 // view holds what lies there (ADR-818): 1 open, toward 0 where something within a few centimetres
 // stands in the way (the contact shadow toward a light; toward the reflected direction, the
 // room's reflection hidden by her own cheeks and lips in her mouth)
-fn screen_blocked(world: vec3<f32>, to_light: vec3<f32>, reach: f32) -> f32 {
+fn screen_blocked(world: vec3<f32>, to_light: vec3<f32>, reach: f32, surface_normal: vec3<f32>, to_eye: vec3<f32>) -> f32 {
     let at = u32(scene.occlusion.z);
     if (at == 0u) {
         return 1.0;
     }
     let view = scene.shadows[at - 1u];
     let side = u32(view.info.y);
+    // (the gap that counts: past what two of the depth view's pixels span in depth across this
+    // surface as the camera sees it, so skin seen at a grazing angle never shades itself: a fixed
+    // gap streaked her collarbone and shoulder top)
+    let own = view.view_proj * vec4<f32>(world, 1.0);
+    let row_scale = length(vec3<f32>(view.view_proj[0].x, view.view_proj[1].x, view.view_proj[2].x));
+    let pixel_world = 2.0 * max(own.w, 1e-4) / (f32(side) * max(row_scale, 1e-6));
+    let facing = clamp(abs(dot(surface_normal, to_eye)), 0.05, 1.0);
+    let gap = 0.001 + 2.0 * pixel_world * sqrt(1.0 - facing * facing) / facing;
     var shade = 0.0;
     for (var step = 0u; step < CONTACT_STEPS; step = step + 1u) {
         let share = (f32(step) + 1.0) / f32(CONTACT_STEPS);
@@ -1889,7 +1897,7 @@ fn screen_blocked(world: vec3<f32>, to_light: vec3<f32>, reach: f32) -> f32 {
         let ahead = reached - stored;
         // (the nearest step in shade counts most; the gap in front eased in from 1 to 3 mm and out
         // toward the thickness, so the shadow's edge grades with the depth, not cut at a pixel)
-        shade = max(shade, (1.0 - share * share) * smoothstep(0.001, 0.003, ahead)
+        shade = max(shade, (1.0 - share * share) * smoothstep(gap, gap + 0.002, ahead)
             * (1.0 - smoothstep(0.5 * CONTACT_THICKNESS, CONTACT_THICKNESS, ahead)));
     }
     return 1.0 - shade;
@@ -2170,7 +2178,11 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
                 seen = hair_shadow(light, world, turn);
             } else {
                 // (and the shadow of what is too near and small for its map, ADR-818)
-                contact = contact_shadow(world, arrival.to_light);
+                // (never on skin: light travels millimetres under it, so its own creases never show
+                // shadows this sharp: on her neck and collarbones they drew hard dark lines)
+                if (draw.flags.x != 0u) {
+                    contact = contact_shadow(world, arrival.to_light, surface_normal, view);
+                }
                 seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn) * contact;
             }
         }
@@ -2274,7 +2286,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
     // (the room's reflection hidden where something of the scene stands within `REFLECTION_REACH`
     // along the reflected direction, as the depth view holds it: deep in her mouth her cheeks and
     // lips hide the room from her side teeth, which shone grey as chrome, ADR-818)
-    let reflection_open = screen_blocked(world, reflected, REFLECTION_REACH);
+    let reflection_open = select(screen_blocked(world, reflected, REFLECTION_REACH, surface_normal, view), 1.0, draw.flags.x == 0u);
     for (var layer = 0u; layer < 3u; layer = layer + 1u) {
         let weight = weights[layer];
         if (weight <= 0.0) {
@@ -2546,7 +2558,10 @@ fn fs_fibre_layers(fragment: VertexOut) -> @location(0) vec4<f32> {
     }
     let pixel = vec2<u32>(floor(fragment.clip.xy));
     let base = (pixel.y * u32(scene.picture.x) + pixel.x) * 3u;
-    var kept = 0xFFFFFFFFu - bitcast<u32>(fragment.clip.z);
+    // (its depth, nearer larger, in the top 24 bits and its coverage in the low 8: what the front
+    // pass composites the three nearest by, front to back)
+    let coverage_byte = u32(clamp(coverage, 0.0, 1.0) * 255.0 + 0.5);
+    var kept = ((0xFFFFFFFFu - bitcast<u32>(fragment.clip.z)) & 0xFFFFFF00u) | max(coverage_byte, 1u);
     for (var slot = 0u; slot < 3u; slot = slot + 1u) {
         let before = atomicMax(&fibre_layers[base + slot], kept);
         if (before == 0u) {
@@ -2570,7 +2585,24 @@ fn fs_fibre_front(fragment: VertexOut, @builtin(front_facing) front: bool) -> @l
     let uv_dy = dpdy(fragment.uv);
     let coverage = fibre_coverage(fragment);
     let lit = mesh_lit(fragment, front, texel, normal_texel, occlusion_texel, detail_texel, uv_dx, uv_dy, 1.0);
-    return vec4<f32>(lit.rgb * coverage, coverage);
+    // composited front to back among the pixel's three nearest: weighed by its coverage and by
+    // what the nearer of them let through (averaged alike, the front strand counted no more than
+    // those behind it, and hair read over-blended)
+    let pixel = vec2<u32>(floor(fragment.clip.xy));
+    let base = (pixel.y * u32(scene.picture.x) + pixel.x) * 3u;
+    let own = (0xFFFFFFFFu - bitcast<u32>(fragment.clip.z)) & 0xFFFFFF00u;
+    var through = 1.0;
+    for (var slot = 0u; slot < 3u; slot = slot + 1u) {
+        let stored = atomicLoad(&fibre_layers[base + slot]);
+        if (stored == 0u) {
+            break;
+        }
+        if ((stored & 0xFFFFFF00u) > own) {
+            through = through * (1.0 - f32(stored & 0xFFu) / 255.0);
+        }
+    }
+    let weight = coverage * through;
+    return vec4<f32>(lit.rgb * weight, weight);
 }
 
 struct ShadowOut {

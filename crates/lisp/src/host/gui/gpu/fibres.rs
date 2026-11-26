@@ -54,7 +54,8 @@ fn fs_kth(@builtin(position) at: vec4<f32>) -> @builtin(frag_depth) f32 {
     if (stored == 0u) {
         discard;
     }
-    return bitcast<f32>(0xFFFFFFFFu - stored);
+    // (its depth from the top 24 bits, the low 8 its coverage: a hair farther, so the third passes)
+    return bitcast<f32>(0xFFFFFFFFu - (stored & 0xFFFFFF00u));
 }
 
 // the fibres' mean colour over the scene, by how much of the pixel they cover together
