@@ -3094,3 +3094,19 @@ shadowed light marches 2 cm toward itself through the camera's depth view, so a 
 teeth under it and a crease its floor where the shadow map cannot. New scene features go in for
 the GPU painter alone from here. Also: the CPU painter's contact skip mask held 16 of the 64
 contacts; it holds all of them now.
+
+2026-11-26. **`seq/sort-by` sorts natively.** From b3d's stance, whose convex hull sorts eight
+points several times a frame: `sort-by` of eight points took 35 µs (`sort` of eight ints, ~0.9),
+through `map`, a Brood merge sort calling a closure per comparison, `reverse` and `map` again. Each
+key is still computed once, now paired with its item AND its position as a `[key position item]`
+triple, and the triples go to `%sort-cmp`: for any key that is not a record `%ord-compare` is the
+kernel `compare`, the same `value_cmp` order, and the position settles every tie, so equal keys
+keep their input order exactly as the stable merge sort did. A record key keeps the merge sort
+(its `compare-to` is Brood's). Every pass is a self-tail loop that runs native, and the final
+reverse is `%reverse-acc` (native), not `reverse` (kept on the VM by its builtin calls). Eight
+points 35 → 3.5 µs. Measured by instruction count, not the profiler, which over-charges small
+VM-bound functions here: it put `math/ceil` at 10% of springs and `wrapped`/`ease-share` at 14% of
+a stance frame, where making them free saved 1% and under (so trig stays a call). Guards: the
+stability tests in `sequence_test` (ties whose items run down, sabotaged red by dropping the
+position) and the native check on `%sort-by-vector` (sabotaged red by routing vectors away), both
+contract modes; a cross-process sort.

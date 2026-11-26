@@ -150,6 +150,34 @@
   (test "sort-by orders by a key function"
     (assert= (seq/sort-by (list "ccc" "a" "bb") (fn (s) (count s))) (list "a" "bb" "ccc"))
     (assert= (seq/sort-by (list -3 1 -2 4) abs) (list 1 -2 -3 4)))
+  ;; Non-record keys sort natively on `[key position item]`: equal keys must keep their input
+  ;; order, items must never be compared, and `key-fn` runs once an item.
+  (test "sort-by is stable on a vector and on a list"
+    ;; the tied items run DOWN in their own order, so a sort that broke a tie by comparing the
+    ;; items would turn them round
+    (assert= (seq/sort-by [[1 :z] [0 :y] [1 :a] [0 :b]] first) (list [0 :y] [0 :b] [1 :z] [1 :a]))
+    (assert= (seq/sort-by (list [1 :z] [0 :y] [1 :a] [0 :b]) first)
+      (list [0 :y] [0 :b] [1 :z] [1 :a]))
+    (assert= (seq/sort-by (into [] (range 20 0 -1)) (fn (_) 0)) (range 20 0 -1)))
+  (test "sort-by calls key-fn once an item, in order"
+    (let (me (self))
+      (seq/sort-by [3 1 2] (fn (item) (send me [:keyed item]) item))
+      (assert= [3 1 2] (seq/mapv [1 2 3] (fn (_) (receive ([:keyed item] item)))))
+      (assert= :none (receive ([:keyed _] :more) (after 0 :none)))))
+  (test "sort-by takes any collection, and gives back one of none or one item as it was"
+    (assert= (seq/sort-by {:b 2 :a 1} second) (list [:a 1] [:b 2]))
+    (assert= (seq/sort-by #{3 1} identity) (list 1 3))
+    (assert= (seq/sort-by (range 4) -) (list 3 2 1 0))
+    (assert= (seq/sort-by [:b 1 "x" :a] identity) (list 1 "x" :a :b))
+    (assert= [] (seq/sort-by [] identity))
+    (assert= [5] (seq/sort-by [5] identity))
+    (assert= nil (seq/sort-by nil identity)))
+  (test "sort-by over a vector runs natively"
+    (when (%native-tier?)
+      (let (points [[0.1 0.2] [0.3 -0.1] [0.05 0.4] [0.2 0.2]]
+            key (fn ([x z]) (+ (* x 1000.0) z)))
+        (assert-settles-native %sort-by-vector 6 (fn () (seq/sort-by points key)))
+        (assert-settles-native %sort-by-items 2 (fn () (seq/sort-by points key))))))
   (test "sort handles a larger, reversed input correctly"
     (assert= (sort (range 50 0 -1)) (range 1 51)))
   ;; Structural sort for non-numeric items, no custom comparator needed —
@@ -534,6 +562,17 @@
         (fn () (seq/mapv [1.0 2.0 3.0] (fn (item) (* item 2.0)))))
       (fold (range 2000) nil (fn (_ _) (seq/mapv [1.0 2.0 3.0] (fn (item) (* item 2.0)))))
       (assert= :native (get (%jit-arm-state %mapv-vector 5) :state)))))
+
+(describe "sort-by across processes"
+  (test "workers sorting a shared vector by a key each send back the same order"
+    (let (me (self)
+          source (into [] (map (range 40) (fn (index) [(math/rem (* index 7) 11) index])))
+          expected (seq/sort-by source first)
+          workers (map (range 6)
+                    (fn (_) (spawn (fn () (send me [:sorted (seq/sort-by source first)])))))
+          replies (map workers (fn (_) (receive ([:sorted found] found)))))
+      (assert= 6 (count replies))
+      (is (every? replies (fn (found) (= found expected)))))))
 
 (describe "mapv across processes"
   (test "workers mapping a shared vector each build the same vector, sent back whole"

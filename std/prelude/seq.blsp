@@ -1040,14 +1040,59 @@ structural order (`compare`) — or a key's own `compare-to` if the key is a rec
 string, keyword, vector, and record keys all work.
 
     (seq/sort-by [\"aaa\" \"b\"] count)   ;=> (\"b\" \"aaa\")"
-  ;; Each key is computed ONCE, paired with its item, and the pairs sorted — rather than
-  ;; `key-fn` running on both sides of every comparison, ~2·n·log n calls, which is what
-  ;; a completion menu sorting by a computed score paid.
-  ;; A collection of one item or none comes back as `%merge-sort` returns it — itself, and
-  ;; typed as it always was (the test is on the keyed list, so `coll` is never narrowed by a
-  ;; `count`); the comparator is never called for it.
-  (let (keyed (map (%expect-collection "seq/sort-by" coll) (fn (item) [(key-fn item) item])))
-    (if (empty? (rest keyed))
-      (%merge-sort < coll)
-      (map (%merge-sort (fn (x y) (< (%ord-compare (%vector-ref x 0) (%vector-ref y 0)) 0)) keyed)
-        (fn (pair) (%vector-ref pair 1))))))
+  ;; Each key is computed ONCE, paired with its item and its position, and the triples sorted —
+  ;; rather than `key-fn` running on both sides of every comparison, ~2·n·log n calls, which is
+  ;; what a completion menu sorting by a computed score paid.
+  ;; Keys that are not records sort natively: `%ord-compare` is the kernel `compare` for them, the
+  ;; `value_cmp` order `%sort-cmp` sorts by, and a `[key position item]` triple compares on its
+  ;; key, then its position, never its item, so equal keys keep their order: the merge sort's
+  ;; answer from one Rust sort. A record key keeps the merge sort, which asks its `compare-to`.
+  ;; Every pass is a self-tail loop that runs native; through `map`, `reverse` and the merge sort,
+  ;; eight points took 35 µs.
+  ;; A collection of one item or none comes back as it was given — itself, and typed as it
+  ;; always was; the comparator is never called for it.
+  (let (coll (%expect-collection "seq/sort-by" coll)
+        found (if (vector? coll)
+                (%sort-by-vector coll key-fn 0 (count coll) nil false)
+                (%sort-by-walk (%fold-source "seq/sort-by" coll) key-fn 0 nil false))
+        triples (%vector-ref found 0)
+        size (%vector-ref found 2))
+    (cond
+      (<= size 1) coll
+      (%vector-ref found 1)
+        (%reverse-acc (%sort-by-items (%merge-sort (fn (x y)
+                                                     (< (%ord-compare (%vector-ref x 0)
+                                                          (%vector-ref y 0))
+                                                       0))
+                                        (%reverse-acc triples nil))
+                        nil)
+          nil)
+      else (%reverse-acc (%sort-by-items (%sort-cmp triples) nil) nil))))
+
+;; `[triples record-key? count]`: a `[key position item]` triple for each item, the LAST first
+;; (the position settles ties, so the order does not matter to `%sort-cmp`), whether any key is
+;; a record, and how many there were. `key-fn` runs once an item, in order.
+(defn- %sort-by-vector (coll key-fn index size found record-key)
+  (if (= index size)
+    [found record-key size]
+    (let (item (nth coll index) key (key-fn item))
+      (%sort-by-vector coll
+        key-fn
+        (+ index 1)
+        size
+        (cons [key index item] found)
+        (if record-key true (record? key))))))
+(defn- %sort-by-walk (coll key-fn position found record-key)
+  (if (empty? coll)
+    [found record-key position]
+    (let (item (first coll) key (key-fn item))
+      (%sort-by-walk (rest coll)
+        key-fn
+        (+ position 1)
+        (cons [key position item] found)
+        (if record-key true (record? key))))))
+;; the items of sorted `triples`, the last first
+(defn- %sort-by-items (triples found)
+  (if (empty? triples)
+    found
+    (%sort-by-items (rest triples) (cons (%vector-ref (first triples) 2) found))))
