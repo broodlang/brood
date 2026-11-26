@@ -1934,7 +1934,11 @@ fn hair_fresnel(cosine: f32) -> f32 {
     return 0.0465 + 0.9535 * pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
 }
 
-fn karis_hair(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: vec3<f32>, seen: f32) -> vec3<f32> {
+// `known`: 1 when the light has a shadow map (what lies between it and the strand is known), 0
+// when not: then it lights the strand only by what faces it (R, TRT, the scatter toward the
+// viewer), never THROUGH it, since nothing says her head is not in the way (39, 2026-11-26: a
+// shadowless fill behind her head lit the back of her hair near white through it)
+fn karis_hair(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: vec3<f32>, seen: f32, known: f32) -> vec3<f32> {
     let roughness = clamp(draw.material.x, 1.0 / 255.0, 1.0);
     // each strand a little rougher or smoother than the next (`_STRAND`, E1)
     let width = roughness * roughness * (0.85 + 0.3 * fract(fibre_strand * 7.13));
@@ -1964,7 +1968,7 @@ fn karis_hair(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: ve
     let entering = hair_fresnel(cos_difference * sqrt(clamp(1.0 - entry * entry, 0.0, 1.0)));
     let through = pow(colour, vec3<f32>(0.5 * sqrt(max(1.0 - entry * entry * inverse * inverse, 0.0)) / cos_difference));
     let transmitted = hair_gaussian(width * 0.5, along - tilt)
-        * exp(-3.65 * cos_phi - 3.98) * (1.0 - entering) * (1.0 - entering) * through;
+        * exp(-3.65 * cos_phi - 3.98) * (1.0 - entering) * (1.0 - entering) * through * known;
     // TRT
     let inside = hair_fresnel(cos_difference * 0.5);
     let twice = pow(colour, vec3<f32>(0.8 / cos_difference));
@@ -1973,7 +1977,7 @@ fn karis_hair(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: ve
     // light scattered through many fibres
     let facing = safe_normalize(view - tangent * sin_view);
     let wrapped = clamp((dot(facing, to_light) + 1.0) * 0.25, 0.0, 1.0);
-    let scatter = 0.31830989 * mix(wrapped, 1.0 - abs(sin_light), 0.33);
+    let scatter = 0.31830989 * mix(wrapped, 1.0 - abs(sin_light), 0.33 * known);
     let luminance = max(dot(colour, vec3<f32>(0.2126, 0.7152, 0.0722)), 1e-4);
     let tint = pow(colour / luminance, vec3<f32>(1.0 - clamp(seen, 0.0, 1.0)));
     let shine = vec3<f32>(reflected * draw.material.y * 2.0) + transmitted + second;
@@ -2049,7 +2053,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
                 through = pow(vec3<f32>(0.98, 0.86, 0.63), vec3<f32>(crossed)) * exp(-0.03 * crossed);
             }
             let shadowed = dot(through, vec3<f32>(0.2126, 0.7152, 0.0722));
-            out = out + light.color.rgb * arriving * through * karis_hair(base, strand, view, to_light, shadowed);
+            out = out + light.color.rgb * arriving * through * karis_hair(base, strand, view, to_light, shadowed, select(0.0, 1.0, light.shadow.z > 0u));
             continue;
         }
         if (draw.flags.x == 4u || draw.flags.x == 5u) {
