@@ -2495,6 +2495,29 @@ fn eye_spec(
             ));
         }
     };
+    // `:limbus [strength width]`: the dark ring where iris meets white (strength 0 … 1, width in
+    // iris radii, above 0 and at most 1), or the defaults
+    let (limbus, limbus_width) = match heap.map_get(map, value::kw("limbus")) {
+        None | Some(Value::Nil) => (
+            crate::host::gui::mesh::DEFAULT_LIMBUS,
+            crate::host::gui::mesh::DEFAULT_LIMBUS_WIDTH,
+        ),
+        Some(Value::Vector(pair_id))
+            if heap.vector(pair_id).len() == 2
+                && heap.vector(pair_id).iter().all(|item| is_number(*item))
+                && (0.0..=1.0).contains(&num(heap.vector(pair_id)[0]))
+                && num(heap.vector(pair_id)[1]) > 0.0
+                && num(heap.vector(pair_id)[1]) <= 1.0 =>
+        {
+            (num(heap.vector(pair_id)[0]), num(heap.vector(pair_id)[1]))
+        }
+        Some(given) => {
+            return Err(format!(
+                "an :eye's :limbus is [strength width], how dark the ring where iris meets white is (0 … 1) and how wide (iris radii, above 0 and at most 1), not {}",
+                print(given)
+            ));
+        }
+    };
     Ok(Some(Eye {
         eyes,
         up,
@@ -2506,6 +2529,8 @@ fn eye_spec(
         iris_uv_radius,
         pupil,
         concavity,
+        limbus,
+        limbus_width,
     }))
 }
 

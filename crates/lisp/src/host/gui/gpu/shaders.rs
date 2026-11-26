@@ -1881,7 +1881,17 @@ struct EyeSeen {
     curvature: f32,
     iris_normal: vec3<f32>,
     axis: vec3<f32>,
+    // what its colour is multiplied by for the limbal ring (`mesh::limbus_shade`): 1 away from it
+    limbus: f32,
 };
+
+// `mesh::limbus_shade`: the limbal ring's shade at `rim` iris radii from the axis (ADR-796); its
+// strength and width ride in `eye_iris.w` and `eye_axes[1].w`
+fn limbus_shade(rim: f32) -> f32 {
+    let width = max(draw.eye_axes[1].w, 1e-3);
+    let off = (rim - 1.0) / width;
+    return 1.0 - draw.eye_iris.w * exp(-off * off);
+}
 
 // `mesh::eye_seen` (ADR-796): the line through the fragment met with the cornea's sphere on the
 // viewer's side, bent there (Snell), followed to the iris's plane; the texture read at that
@@ -1897,6 +1907,7 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
     seen.iris_normal = normal;
     seen.axis = vec3<f32>(0.0);
     seen.curvature = curvature;
+    seen.limbus = 1.0;
     let scale = sqrt(dot(frame_axis, frame_axis));
     if (scale <= 1e-12) {
         return seen;
@@ -1908,6 +1919,13 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
     let iris_radius = draw.eye_shape.y * scale;
     let cornea_radius = draw.eye_shape.z * scale;
     let ball_radius = draw.eye_shape.x * scale;
+    // the white's share of the limbal ring: by its distance from the axis, on the eye's front
+    let from_centre = world - centre.xyz;
+    let height = dot(from_centre, axis);
+    if (height > 0.0) {
+        let off_axis = from_centre - axis * height;
+        seen.limbus = limbus_shade(sqrt(dot(off_axis, off_axis)) / max(iris_radius, 1e-9));
+    }
     let limbus_height = sqrt(max(ball_radius * ball_radius - iris_radius * iris_radius, 0.0));
     let cornea_height = limbus_height - sqrt(max(cornea_radius * cornea_radius - iris_radius * iris_radius, 0.0));
     let iris_height = cornea_height + cornea_radius - draw.eye_shape.w * scale;
@@ -1958,6 +1976,7 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
     }
     seen.through = true;
     seen.uv = iris_uv + vec2<f32>(across, -above) * draw.eye_iris.x;
+    seen.limbus = limbus_shade(rim);
     // the cornea's normal, giving way to the ball's toward the limbus (ADR-804)
     seen.normal = safe_normalize(ball + (cornea_normal - ball) * cornea);
     seen.cornea = cornea;
@@ -2150,7 +2169,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             }
         }
         var diffuse = vec3<f32>(lambert * seen);
-        if (draw.flags.x == 0u) {
+        if (draw.flags.x == 0u || (draw.flags.x == 6u && under_cornea.w == 0.0)) {
             // the CPU's: the light under the skin in place of Lambert's; toward the terminator
             // what the scattering moved takes the light's shadow looked up just off the skin
             // (`mesh::SCATTER_LIFT`), clear of the body's own shadow there but not of a hand's or
@@ -2346,7 +2365,7 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
         if (seen.through) {
             let under = straight(textureSampleGrad(base_texture, texture_sampler, seen.uv, uv_dx, uv_dy), (draw.flags.y & 2u) != 0u);
             let under_texel = select(vec4<f32>(1.0), under, (draw.flags.y & 1u) != 0u);
-            base = srgb_to_linear(under_texel.rgb) * draw.color.rgb * (1.0 - seen.pupil);
+            base = srgb_to_linear(under_texel.rgb) * draw.color.rgb * (1.0 - seen.pupil) * seen.limbus;
             normal = seen.normal;
             mirror_surface = seen.normal;
             diffuse_normal = seen.iris_normal;
@@ -2357,6 +2376,8 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
             // (ADR-804)
             normal = seen.normal;
             mirror_surface = seen.normal;
+            // (and the limbal ring's edge over the white beside the iris)
+            base = base * seen.limbus;
         }
     }
     // the ambient's occlusion: its map's, times the scene's screen-space ambient occlusion

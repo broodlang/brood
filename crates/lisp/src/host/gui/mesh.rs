@@ -776,6 +776,11 @@ pub const DEFAULT_IRIS_DEPTH: f32 = 0.0033;
 pub const DEFAULT_PUPIL: f32 = 0.35;
 /// The slope of the bowl an iris is lit as, at its edge, unless the material says: about 19°.
 pub const DEFAULT_IRIS_CONCAVITY: f32 = 0.35;
+/// An `:eye`'s limbal ring by default (ADR-796): how much it darkens the iris's edge and the white
+/// beside it at its darkest, and how wide it is (its Gaussian's width, in iris radii). A real
+/// iris meets the white in a soft dark ring, darker in the young.
+pub const DEFAULT_LIMBUS: f32 = 0.45;
+pub const DEFAULT_LIMBUS_WIDTH: f32 = 0.1;
 /// The steepest bowl a material may ask for.
 pub const MAX_IRIS_CONCAVITY: f32 = 4.0;
 /// How soft the pupil's edge is: it fades over this share of its radius either side.
@@ -824,6 +829,10 @@ pub struct Eye {
     /// How steeply the iris, lit as a shallow bowl, slopes up at its edge: the tangent of the
     /// angle its normal leans toward the axis there (0: lit flat).
     pub concavity: f32,
+    /// The limbal ring's darkness at the iris's edge, 0 … 1 (0: none), and its width in iris
+    /// radii (ADR-796, `:limbus [strength width]`).
+    pub limbus: f32,
+    pub limbus_width: f32,
 }
 
 impl Eye {
@@ -2270,6 +2279,17 @@ pub struct EyeSeen {
     pub iris_normal: [f32; 3],
     /// The eye's unit axis, about which the light is bent on its way in ([`light_under_cornea`]).
     pub axis: [f32; 3],
+    /// What its colour is multiplied by for the limbal ring ([`limbus_shade`]): 1 away from it.
+    pub limbus: f32,
+}
+
+/// The limbal ring's shade at `rim` iris radii from the eye's axis (ADR-796): `1 − limbus ·
+/// e^(−((rim − 1) / width)²)`, darkest at the iris's edge and fading both ways, into the iris
+/// seen through the cornea and over the white beside it. The shader's is the same.
+pub fn limbus_shade(eye: &Eye, rim: f32) -> f32 {
+    let width = eye.limbus_width.max(1e-3);
+    let off = (rim - 1.0) / width;
+    1.0 - eye.limbus * (-off * off).exp()
 }
 
 /// What bends the light on its way to a surface under a cornea ([`shade`]): the eye's unit
@@ -2325,6 +2345,7 @@ pub fn eye_seen(
         curvature,
         iris_normal: normal,
         axis: [0.0; 3],
+        limbus: 1.0,
     };
     let scale = dot(frame.axis, frame.axis).sqrt();
     let Some(at) = eye.eyes.get((frame.index + 0.5) as usize) else {
@@ -2344,6 +2365,18 @@ pub fn eye_seen(
     let iris_radius = eye.iris_radius * scale;
     let cornea_radius = eye.cornea_radius * scale;
     let ball_radius = eye.radius * scale;
+    // the white's share of the limbal ring: by its distance from the axis, on the eye's front
+    let from_centre = [0, 1, 2].map(|index| world[index] - frame.centre[index]);
+    let height = dot(from_centre, axis);
+    let off_axis = [0, 1, 2].map(|index| from_centre[index] - axis[index] * height);
+    let missed = EyeSeen {
+        limbus: if height > 0.0 {
+            limbus_shade(eye, dot(off_axis, off_axis).sqrt() / iris_radius.max(1e-9))
+        } else {
+            1.0
+        },
+        ..missed
+    };
     // heights along the axis from the eye's centre: the limbus's plane, the cornea's centre,
     // the iris's plane
     let limbus_height = (ball_radius * ball_radius - iris_radius * iris_radius)
@@ -2427,6 +2460,7 @@ pub fn eye_seen(
         curvature: curvature + (1.0 / cornea_radius - curvature) * cornea,
         iris_normal,
         axis,
+        limbus: limbus_shade(eye, rim),
     }
 }
 
@@ -2528,8 +2562,11 @@ pub fn shade_scattered(
     under_cornea: Option<&UnderCornea>,
 ) -> [f32; 3] {
     let ambient = ambient(scene, diffuse_normal);
-    let skin = (material.surface == Surface::Skin)
-        .then(|| (skin_table(), curvature * material.scatter_scale()));
+    // (and an eye's white, not under its cornea: light scattered in the sclera as in skin, a soft,
+    // slightly warm edge where it turns from the light, ADR-796)
+    let scatters = material.surface == Surface::Skin
+        || (material.surface == Surface::Eye && under_cornea.is_none());
+    let skin = scatters.then(|| (skin_table(), curvature * material.scatter_scale()));
     let mut out = [0, 1, 2].map(|channel| base[channel] * ambient[channel] * occlusion);
     let f0 = material.f0();
     // a `:hair` surface's highlights: as sharp as its roughness asks
@@ -4543,7 +4580,8 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     let under = context.base_texture.as_ref().map_or([1.0; 4], |texture| {
                         sample_lod(texture, seen.uv[0], seen.uv[1], base_lod)
                     });
-                    let kept = 1.0 - seen.pupil;
+                    // (the pupil drawn, and the limbal ring at the iris's edge)
+                    let kept = (1.0 - seen.pupil) * seen.limbus;
                     base = [
                         srgb_to_linear(under[0]) * material.color[0] * kept,
                         srgb_to_linear(under[1]) * material.color[1] * kept,
@@ -4562,6 +4600,8 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     // normal (ADR-804)
                     normal = seen.normal;
                     mirror_surface = seen.normal;
+                    // (and the limbal ring's edge over the white beside the iris)
+                    base = base.map(|channel| channel * seen.limbus);
                 }
             }
             let occlusion = context
@@ -4600,7 +4640,9 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                         surface_normal,
                         turn,
                     );
-                    if material.surface == Surface::Skin {
+                    if material.surface == Surface::Skin
+                        || (material.surface == Surface::Eye && under_cornea.is_none())
+                    {
                         scattered_visibility[index] = shadow_visibility(
                             scene,
                             context.shadows,
@@ -8537,6 +8579,9 @@ mod tests {
             iris_uv_radius: 0.25,
             pupil: DEFAULT_PUPIL,
             concavity: DEFAULT_IRIS_CONCAVITY,
+            // (no limbal ring: this eye is for the refraction and the pupil)
+            limbus: 0.0,
+            limbus_width: DEFAULT_LIMBUS_WIDTH,
         }
     }
 
@@ -9200,6 +9245,8 @@ mod tests {
         assert_eq!(seen_across(&eye, 0.5).axis, [0.0, 0.0, 1.0]);
         let flat = Eye {
             concavity: 0.0,
+            limbus: 0.0,
+            limbus_width: DEFAULT_LIMBUS_WIDTH,
             ..eye.clone()
         };
         assert_eq!(seen_across(&flat, 0.7).iris_normal, [0.0, 0.0, 1.0]);
@@ -9369,5 +9416,52 @@ mod tests {
             1.0
         );
         assert_eq!(within_weight(Some(&[0.0; 4]), [-5.0, 0.0, 0.0]), 1.0);
+    }
+
+    /// ADR-796: the limbal ring darkens the iris's edge by its strength and fades both ways,
+    /// into the iris and over the white, within a few widths.
+    #[test]
+    fn the_limbal_ring_darkens_the_iris_edge_and_fades_both_ways() {
+        let eye = Eye {
+            eyes: vec![],
+            up: [0.0, 1.0, 0.0],
+            radius: 0.012,
+            iris_radius: 0.006,
+            cornea_radius: 0.008,
+            iris_depth: 0.003,
+            ior: 1.376,
+            iris_uv_radius: 0.1,
+            pupil: 0.3,
+            concavity: 0.3,
+            limbus: 0.45,
+            limbus_width: 0.1,
+        };
+        assert!(
+            (limbus_shade(&eye, 1.0) - 0.55).abs() < 1e-6,
+            "darkest at the edge"
+        );
+        assert!(
+            limbus_shade(&eye, 0.6) > 0.999,
+            "the iris's middle untouched"
+        );
+        assert!(
+            limbus_shade(&eye, 1.4) > 0.999,
+            "the white away from it untouched"
+        );
+        assert!(
+            limbus_shade(&eye, 0.9) < limbus_shade(&eye, 0.8),
+            "deepening toward the edge"
+        );
+        assert_eq!(
+            limbus_shade(
+                &Eye {
+                    limbus: 0.0,
+                    ..eye.clone()
+                },
+                1.0
+            ),
+            1.0,
+            "none at strength 0"
+        );
     }
 }

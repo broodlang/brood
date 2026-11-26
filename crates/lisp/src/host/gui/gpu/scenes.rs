@@ -2033,6 +2033,9 @@ fn eye_floats(material: &crate::host::gui::mesh::Material) -> [f32; 32] {
     floats[28] = eye.iris_uv_radius;
     floats[29] = eye.pupil;
     floats[30] = eye.concavity;
+    // the limbal ring (`eye_iris.w`, `eye_axes[1].w`: two spare floats)
+    floats[31] = eye.limbus;
+    floats[15] = eye.limbus_width;
     floats
 }
 

@@ -278,6 +278,8 @@ fn the_mesh_shader_validates() {
         iris_uv_radius: 0.1,
         pupil: 0.3,
         concavity: 0.5,
+        limbus: 0.3,
+        limbus_width: 0.12,
     };
     let eye_floats = |surface: Surface| -> Vec<f32> {
         let eyed = Draw {
@@ -305,11 +307,13 @@ fn the_mesh_shader_validates() {
         eye_floats(Surface::Eye),
         [
             1.0, 2.0, 3.0, 2.0, -1.0, 2.0, 3.0, 0.0, // the centres, and how many
-            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, // the axes
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0,
+            0.12, // the axes (the second's fourth: the limbal ring's width)
             0.0, 1.0, 0.0, 1.4, // up, the index
             0.012, 0.006, 0.008, 0.003, // the shape
             0.3, 0.7, 0.7, 0.2, // the irises in the texture
-            0.1, 0.3, 0.5, 0.0, // the iris's radius there, the pupil, the bowl's slope
+            0.1, 0.3, 0.5,
+            0.3, // the iris's radius there, the pupil, the bowl's slope, the limbal ring's strength
         ]
     );
     assert_eq!(eye_floats(Surface::Cutout), [0.0; 32], "no other surface");
