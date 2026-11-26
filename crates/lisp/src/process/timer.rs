@@ -52,6 +52,11 @@ impl SchedDeadline {
     pub(super) fn remaining(self) -> Duration {
         self.0.saturating_duration_since(sched_now())
     }
+
+    /// How long ago the deadline passed on the scheduler clock; zero until it is reached.
+    pub(super) fn overdue_by(self) -> Duration {
+        sched_now().saturating_duration_since(self.0)
+    }
 }
 
 /// Min-heap of `(deadline, pid, gen)`: `Reverse` turns the max-heap into
@@ -92,6 +97,10 @@ static TIMER_THREADS_STARTED: AtomicUsize = AtomicUsize::new(0);
 pub(super) fn arm_timer(pid: u64, deadline: SchedDeadline, generation: u64) {
     #[cfg(not(target_arch = "wasm32"))]
     ensure_timer_thread();
+    #[cfg(not(target_arch = "wasm32"))]
+    if fault_drop_timer(deadline) {
+        return;
+    }
     let (lock, cv) = &*TIMERS;
     let mut q = crate::core::sync::lock(lock);
     // Wake the timer thread only when this deadline is the NEW EARLIEST (or the heap was
@@ -300,23 +309,74 @@ fn ensure_timer_thread() {
     }
 }
 
-/// Sleep until the nearest deadline, then wake every process whose deadline passed.
+/// How often the timer thread looks for receives parked past their deadline
+/// ([`super::mailbox::report_overdue_receives`]).
+#[cfg(not(target_arch = "wasm32"))]
+const OVERDUE_WATCH_PERIOD: Duration = Duration::from_secs(2);
+
+/// `BROOD_FAULT_DROP_TIMER=<ms>`: FAULT INJECTION — `arm_timer` queues no deadline that is
+/// due within `<ms>` of being armed, so a green `receive … (after …)` that short and parks is
+/// never woken by its deadline; longer ones (a test's own sleep) still fire. Exists so the
+/// overdue-receive watchdog is testable: a lost timer is what it watches for, and nothing an
+/// ordinary program does provokes one. Read once.
+#[cfg(not(target_arch = "wasm32"))]
+fn fault_drop_timer(deadline: SchedDeadline) -> bool {
+    static WITHIN: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    WITHIN
+        .get_or_init(|| {
+            std::env::var("BROOD_FAULT_DROP_TIMER")
+                .ok()
+                .and_then(|ms| ms.parse().ok())
+                .map(Duration::from_millis)
+        })
+        .is_some_and(|within| deadline.remaining() <= within)
+}
+
+/// Sleep until the nearest deadline, then wake every process whose deadline passed. Every
+/// [`OVERDUE_WATCH_PERIOD`] it also looks for green receives still parked well past their
+/// deadline and names them (KI-413: the mur forge's pool, 2026-11-19, eight processes parked in
+/// `receive`, seven of them with `after`, that never ran again, with nothing on stderr to say
+/// which way).
 #[cfg(not(target_arch = "wasm32"))]
 fn timer_loop() {
     TIMER_THREADS_STARTED.fetch_add(1, Ordering::Relaxed);
     let (lock, cv) = &*TIMERS;
     let mut q = crate::core::sync::lock(lock);
+    let mut next_watch = Instant::now() + OVERDUE_WATCH_PERIOD;
+    let mut reported = HashMap::new();
     loop {
+        let until_watch = next_watch.saturating_duration_since(Instant::now());
+        if until_watch.is_zero() {
+            // The live entries, as `(pid, gen)`: an overdue process whose current gen is
+            // not among them has lost its timer.
+            let pending: std::collections::HashSet<(u64, u64)> = q
+                .iter()
+                .map(|Reverse((_, pid, generation))| (*pid, *generation))
+                .collect();
+            drop(q);
+            // Caught like a wake: a fault in a diagnostic must not end every timeout.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::mailbox::report_overdue_receives(&pending, &mut reported)
+            }));
+            next_watch = Instant::now() + OVERDUE_WATCH_PERIOD;
+            q = crate::core::sync::lock(lock);
+            continue;
+        }
         match q.peek().copied() {
             // `unwrap_or_else(into_inner)`, not `unwrap`: a poisoned condvar wait would
             // otherwise kill the timer thread and with it every deadline in the runtime —
             // exactly the cascade `core/sync.rs` exists to refuse (KI-97 item 3).
-            None => q = cv.wait(q).unwrap_or_else(|e| e.into_inner()),
+            None => {
+                q = cv
+                    .wait_timeout(q, until_watch)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
             Some(Reverse((deadline, _, _))) => {
                 let remaining = deadline.remaining();
                 if !remaining.is_zero() {
                     q = cv
-                        .wait_timeout(q, remaining)
+                        .wait_timeout(q, remaining.min(until_watch))
                         .unwrap_or_else(|e| e.into_inner())
                         .0;
                 } else {

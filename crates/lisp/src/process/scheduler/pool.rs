@@ -189,6 +189,28 @@ fn stranded_report_queue(lock: &std::sync::Mutex<VecDeque<Box<Process>>>) -> Opt
     }
 }
 
+/// Where `pid` is among the run queues, for a diagnostic: `queued on worker N`, `in no run
+/// queue`, or `a run queue was busy` when one could not be looked at. Only `try_lock`s.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn run_queue_of(pid: u64) -> String {
+    let mut busy = false;
+    for (wid, Padded((lock, _))) in WORKERS.iter().enumerate() {
+        match lock.try_lock() {
+            Ok(queue) => {
+                if queue.iter().any(|process| process.pid == pid) {
+                    return format!("queued on worker {wid}");
+                }
+            }
+            Err(_) => busy = true,
+        }
+    }
+    if busy {
+        "a run queue was busy".to_string()
+    } else {
+        "in no run queue".to_string()
+    }
+}
+
 pub(crate) fn sched_dbg() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     crate::diagnostics::debug_flags::is_set(&ON, "BROOD_SCHED_DBG")

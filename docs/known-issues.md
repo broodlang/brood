@@ -68,6 +68,39 @@ the scheduler, dist, GC or the JIT — run it repeatedly.
 
 (An open entry's `## KI-N` section goes here until it is resolved.)
 
+## KI-413 — the mur forge's pool and connection processes stopped running, alive, for a week ⚠️ watching 2026-11-26
+
+**Symptom.** mur.fly.dev (Brood 1383f37, one shared vCPU, 512 MB with ~80 MB free, 2 workers,
+JIT and wasm on), 2026-11-19 22:43 UTC: store-postgres's pool process, its replenish ticker
+and its six connection processes — all parked in `receive`, the ticker and the connections in
+`receive … (after …)` — stopped running at once and never ran again. Postgres saw the six
+sockets idle for 21 h (no keepalive `SELECT 1`), so none of the connections ran its `after`
+clause; the sockets stayed open, so none of them was retired. The rest of the runtime served
+requests all week, and the health check's `task/task … {:timeout 1500}` coordinator — a green
+receive on the same timer heap — timed out on time every call.
+
+**Reproduction.** Not yet. Six instances of the incident's shape (a pool, six connections and a
+ticker in `receive … after`, request churn with task timeouts, kills, crashes and allocation
+spikes, `BROOD_J=2` pinned to one core, with and without a tight `BROOD_MEM_LIMIT`) ran 50 min
+each on whklat without a permanent stall.
+
+**Cause.** Not known. What the evidence rules out: a dead timer thread (the health
+coordinator's deadline fired), a dead net reactor (HTTP kept serving on it), and an ordinary
+kill (it closes the sockets). What it leaves, most likely first: (1) the processes were lost by
+the scheduler — out of their mailbox's waiter slot and in no run queue, which leaves the pid
+registered and its sockets open; (2) their timer entries were dropped while they stayed parked;
+(3) they were woken into a run queue no executor drained. The pool's silence proves less: at
+store-postgres a6615d9 its loop has no `after`, and a respawn blocks it in `connection/start`'s
+untimed receive, so a connect that never answered would hang it on its own.
+
+**Diagnostic armed.** The timer thread now names, every 2 s, any green receive still waiting
+5 s past its `after` deadline, once per process and deadline, with which link broke: parked
+with its timer entry pending (the timer never fired it), parked with no live entry (a lost
+timer), woken but not run (stranded in a run queue, which it names), or parked nowhere — no
+waiter, no blocked thread, in no queue (a lost process). `BROOD_FAULT_DROP_TIMER=<ms>` proves it
+fires (`crates/cli/tests/overdue_receive_watchdog.rs`). Next sighting: read the `[timer]
+OVERDUE RECEIVE` line, keep the binary and the log, and attach before restarting.
+
 ## KI-397 — an Interp's parked waiters outlived its drop past the 30 s deadline ⚠️ watching 2026-11-17
 
 **Symptom.** `interp_teardown::dropping_an_interp_reaps_permanently_parked_waiters` failed once in
@@ -131,6 +164,7 @@ Each closed row's full section is `## KI-N` in [archive/known-issues-closed.md](
 
 | # | What | Status |
 |---|---|---|
+| KI-413 | **The mur forge's pool and connection processes stopped running, alive, for a week** — the pool, its ticker and six connections, parked in `receive` (all but the pool with `after`), never ran again while the rest of the runtime served | ⚠️ watching 2026-11-26 — not reproduced; the timer thread's overdue-receive watchdog names the next sighting and the broken link |
 | KI-410 | **Arithmetic on a number that is an int one time and a float the next deopted for good, and a float reaching an int-carried loop param was read as its bits** — `b2d-scenery/block-walk` `handle-int-guard(tag=4)` on every activation, `math/abs` latched BAILED; `(walk-carry 0 0 [1.5 2.5 3.5])` answered `false` | ✅ **FIXED 2026-11-23** — dispatch by tag where no guess holds (ADR-780), and the back edge tag-checks a boxed arg for a carried slot. Guard: `cli::polymorphic_arithmetic`, sabotage-verified |
 | KI-411 | **A loop running in native code never ran a collection that its builtin calls made due** — native code calls a builtin directly (`brood_rt_call_native_fl`, `jit_dispatch_call`), and no VM safepoint follows, so the byte trigger (KI-307) never fired there: a warm 3 000-step `str` build collected once where the VM collects three times, and a native `str`/`%vector-concat` loop could grow memory as KI-307 did. Hidden by armed contracts (`str` a shim, whose VM frames collect); found by the new `make test-eager` (`gc_byte_trigger_test`) | ✅ **FIXED 2026-11-25** — the allocator flags the crossing (`byte_budget_spent`) and `Heap::collect_if_bytes_spent` acts on it after each builtin called from native code: one flag load a call (wordcount +4% against a control build, the rest flat). Guard: `gc_byte_trigger_test` "already running native", red unarmed without the fix |
 | KI-409 | **A `def` over a draining tail freed the list under the global** — `(def xs (cons x xs))` across an aging flip left a fresh cell over an old-generation tail, the drain freed it; `make gcstress` red on five files (`runtime string handle`) | ✅ **FIXED 2026-11-23** — promotion re-homes every older-generation value it meets inside what it copies. Guard: `runtime_collector::a_def_of_a_fresh_cell_over_an_old_gen_tail_is_rehomed_off_the_freed_generation` (red with the old fallback). Also the tree-walker job's silent 120 s timeout of `rehome_keeps_positions` on `258dc646`: a loader died of it and main waited unlinked; the loaders are now `spawn-link`ed, so the test reds at once with the panic |
