@@ -28,6 +28,12 @@
     (%bytes-index-of haystack needle)
     (%bytes-index-of haystack needle (first more))))
 
+(defn scatter (dense:bytes indices:bytes index-width:int values:bytes -> bytes)
+  "dense with values written over it at indices: indices holds unsigned little-endian integers index-width bytes each (1, 2, 4 or 8), values one element for each, all the same size, and element i lands at byte (index i) × that size. Later elements win where indices repeat. Errors when indices or values is not whole entries or an index names an element past the end of dense. One native pass: what filling a glTF sparse accessor is.
+
+    (bytes/scatter #b\"aaaa\" (bytes 3 1) 1 #b\"xy\")   ;=> #b\"ayax\""
+  (%bytes-scatter dense indices index-width values))
+
 ; An older `bytes/append` took a PATH: it appended an iolist to a FILE, which is not a bytes
 ; operation at all — that is `file/spit-bytes-append`. The name now means what it reads as,
 ; the bytes analogue of the bare `append` (above).

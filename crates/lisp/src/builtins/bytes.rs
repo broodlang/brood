@@ -73,6 +73,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The first index of the needle bytes within haystack at or after from (default 0), or -1 if absent. The byte-protocol workhorse (locate a \\r\\n\\r\\n, a frame delimiter, …).",
         bytes_index_of);
     primitives.def(
+        "%bytes-scatter",
+        Arity::exact(4),
+        Sig::new(vec![bytes_ty, bytes_ty, int, bytes_ty], bytes_ty),
+        &["dense", "indices", "index-width", "values"],
+        "dense with values written over it at indices: indices holds unsigned little-endian integers index-width bytes each (1, 2, 4 or 8), values one element for each, all the same size, and element i lands at byte (index i) × that size. Later elements win where indices repeat. Errors when indices or values is not whole entries or an index names an element past the end of dense. One native pass: what filling a sparse accessor is.",
+        bytes_scatter);
+    primitives.def(
         "%base64-encode",
         Arity::exact(2),
         Sig::new(vec![any, any], string),
@@ -310,6 +317,66 @@ pub(super) fn bytes_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
             .unwrap_or(-1)
     };
     Ok(Value::int(idx))
+}
+
+/// `(%bytes-scatter dense indices index-width values)` — `dense` with `values` written over
+/// it: `indices` is unsigned little-endian integers `index-width` bytes each, `values` one
+/// equal-sized element an index, and element `i` lands at byte `index × element size`. The
+/// native pass behind filling a sparse accessor (a glTF shape key: millions of values, a
+/// `bytes/slice` an index in the language took seconds).
+pub(super) fn bytes_scatter(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let width = expect_int(heap, "bytes/scatter", arg(args, 2))?;
+    if !matches!(width, 1 | 2 | 4 | 8) {
+        return Err(LispError::runtime(format!(
+            "bytes/scatter: index-width must be 1, 2, 4 or 8, got {width}"
+        )));
+    }
+    let width = width as usize;
+    let dense = as_bytes(heap, "bytes/scatter", arg(args, 0))?;
+    let indices = as_bytes(heap, "bytes/scatter", arg(args, 1))?;
+    let values = as_bytes(heap, "bytes/scatter", arg(args, 3))?;
+    if !indices.len().is_multiple_of(width) {
+        return Err(LispError::runtime(format!(
+            "bytes/scatter: {} bytes of indices is not whole {width}-byte indices",
+            indices.len()
+        )));
+    }
+    let amount = indices.len() / width;
+    if amount == 0 {
+        if !values.is_empty() {
+            return Err(LispError::runtime(format!(
+                "bytes/scatter: {} bytes of values for no index",
+                values.len()
+            )));
+        }
+        return Ok(arg(args, 0));
+    }
+    if values.is_empty() || !values.len().is_multiple_of(amount) {
+        return Err(LispError::runtime(format!(
+            "bytes/scatter: {} bytes of values is not one element for each of {amount} indices",
+            values.len()
+        )));
+    }
+    let element = values.len() / amount;
+    let mut out = dense.to_vec();
+    for (narrow, value) in indices.chunks_exact(width).zip(values.chunks_exact(element)) {
+        let mut word = [0u8; 8];
+        word[..width].copy_from_slice(narrow);
+        let index = u64::from_le_bytes(word);
+        let place = usize::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_mul(element))
+            .filter(|start| start.checked_add(element).is_some_and(|end| end <= out.len()));
+        let Some(start) = place else {
+            return Err(LispError::runtime(format!(
+                "bytes/scatter: index {index} names no element of {} ({element} bytes each)",
+                out.len() / element
+            ))
+            .with_code(error_codes::INDEX_OUT_OF_RANGE));
+        };
+        out[start..start + element].copy_from_slice(value);
+    }
+    Ok(heap.alloc_bytes(SharedBlob::new(&out)))
 }
 
 /// `(bytes->list b)` — the bytes as a list of integers 0–255.

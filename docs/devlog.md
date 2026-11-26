@@ -3164,3 +3164,10 @@ back to filling every one (13 s). A target may now carry `:normal-vertices`, mer
 `:normal-vertex-type` (`:u8`, `:u16`, `:u32`) so a loader hands the lists on at the width the
 file holds them: 1,149 of her 1,302 sparse accessors are narrow. Guard:
 `a_sparse_targets_normals_on_vertices_of_their_own_are_the_target_given_dense`.
+
+2026-11-26. **`bytes/scatter`: a sparse accessor filled in one native pass.** b3d filled a glTF
+sparse accessor with a `bytes/slice` an index, in Brood: womanblend's 2.4 million sparse values
+took 13 s a read, which is why b3d kept every model's filled values in a 170 MB file beside it
+(ten of them by now, 1.6 GB). `(bytes/scatter dense indices index-width values)` writes each
+element at its index natively. Guard: `tests/bytes_test.blsp` "bytes/scatter" (held to the same
+fill written a slice at a time).

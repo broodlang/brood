@@ -61,6 +61,7 @@ arg silently becoming `nil`.
 | **Bytes** (immutable byte sequences; `crates/lisp/src/builtins/bytes.rs`) | `%byte-at` | 2 | `(byte-at b i)` → the byte at index `i` as an int 0–255 (out of range errors) |
 | | `%subbytes` | 2–3 | the byte slice `[start, end)` (`end` defaults to the length) as a fresh bytes value |
 | | `%bytes-index-of` | 2–3 | the first index of the `needle` bytes in `haystack` at or after `from` (default 0), or -1 if not present — the byte-protocol workhorse (find a `\r\n\r\n`, a frame delimiter, …) |
+| | `%bytes-scatter` | 4 | `dense` with `values` written over it at `indices` (unsigned little-endian, `index-width` bytes each; one equal-sized element an index, landing at index × its size): one native pass, what filling a sparse accessor is. Errors on entries that are not whole or an index past the end |
 | | `%byte-length` | 1 | The number of bytes in b. O(1). |
 | | `%bytes-concat` | any | One bytes value joining all arguments, each an iolist (ADR-139): a string (UTF-8), a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those. The in-memory materialiser of the iolist model. |
 | | `%bytes->list` | 1 | The bytes b as a list of integers 0–255. |

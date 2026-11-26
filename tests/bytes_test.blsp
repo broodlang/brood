@@ -214,3 +214,40 @@
     ;; tests/deep_values_test.blsp for the dedicated coverage.
     (let (deep (fold (range 40000) (list "x") (fn (acc _) (list acc))))
       (is (= (bytes/append deep) #b"x")))))
+
+(describe "bytes/scatter"
+  (test "values land at their indices, an element each, whatever the index width"
+    (is (= (bytes/scatter #b"aaaaaa" (bytes 2 0) 1 #b"xyzw") #b"zwaaxy"))
+    (is (= (bytes/scatter #b"aaaaaa" (bytes 2 0 0 0) 2 #b"xyzw") #b"zwaaxy"))
+    (is (= (bytes/scatter #b"aaaaaa" (bytes 2 0 0 0 0 0 0 0) 4 #b"xyzw") #b"zwaaxy"))
+    (is (= (bytes/scatter #b"aaaa" (bytes 3 0 0 0 0 0 0 0) 8 #b"x") #b"aaax")))
+  (test "it is the fill written out a slice at a time"
+    (let (dense (bytes/append (seq/mapv (range 40) (fn (_) 0)))
+          indices [1 4 5 9]
+          values (bytes/append (seq/mapv (range 16) (fn (at) (+ at 1))))
+          sliced (fold (range (count indices))
+                   dense
+                   (fn (filled at)
+                     (let (start (* 4 (nth indices at)))
+                       (bytes/append (bytes/slice filled 0 start)
+                         (bytes/slice values (* 4 at) (* 4 (+ at 1)))
+                         (bytes/slice filled (+ start 4) (count filled)))))))
+      (is (= (bytes/scatter dense (bytes indices) 1 values) sliced))))
+  (test "dense is left as it was, and no index is no change"
+    (let (dense #b"aaaa")
+      (is (= (bytes/scatter dense (bytes 1) 1 #b"x") #b"axaa"))
+      (is (= dense #b"aaaa"))
+      (is (= (bytes/scatter dense #b"" 4 #b"") #b"aaaa"))))
+  (test "where indices repeat, the later element wins"
+    (is (= (bytes/scatter #b"aa" (bytes 1 1) 1 #b"xy") #b"ay")))
+  (test "an index past the end, entries that are not whole and a strange width are refused"
+    (is (= (try (bytes/scatter #b"aaaa" (bytes 4) 1 #b"x") (catch _e :refused)) :refused))
+    (is (= (try (bytes/scatter #b"aaaa" (bytes 1) 1 #b"xyzwv") (catch _e :refused)) :refused))
+    (is (= (try (bytes/scatter #b"aaaa" (bytes 1 0 0) 2 #b"x") (catch _e :refused)) :refused))
+    (is (= (try (bytes/scatter #b"aaaa" (bytes 1 2) 1 #b"xyz") (catch _e :refused)) :refused))
+    (is (= (try (bytes/scatter #b"aaaa" (bytes 1) 3 #b"x") (catch _e :refused)) :refused))
+    (is (= (try (bytes/scatter #b"aaaa" #b"" 1 #b"x") (catch _e :refused)) :refused)))
+  (test "a filled value crosses to another process whole"
+    (let (parent (self)
+          _ (spawn (fn () (send parent (bytes/scatter #b"aaaa" (bytes 2) 1 #b"x")))))
+      (is (= (receive (filled filled) (after 5000 :timeout)) #b"aaxa")))))
