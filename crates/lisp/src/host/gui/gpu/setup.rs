@@ -572,7 +572,13 @@ pub(super) fn request_device(
             } else {
                 wgpu::Features::empty()
             }),
-        required_limits: wgpu::Limits::default(),
+        // the defaults, but buffers as large as the card takes: a whole head of hair is over
+        // three million vertices (wgpu's default 256 MB dropped a mesh of 49 152 strands)
+        required_limits: wgpu::Limits {
+            max_buffer_size: adapter.limits().max_buffer_size,
+            max_storage_buffer_binding_size: adapter.limits().max_storage_buffer_binding_size,
+            ..wgpu::Limits::default()
+        },
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: wgpu::MemoryHints::default(),
         trace: wgpu::Trace::Off,

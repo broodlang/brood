@@ -14,6 +14,11 @@ use crate::host::gui::mesh::{
 /// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4,
 /// curvature 1.
 pub(super) const VERTEX_FLOATS: usize = 26;
+
+/// A `:fibres` mesh casts its shadow from one strand in this many (its triangles ordered by each
+/// strand's random number, so the first share is an even choice), each drawn this many times as
+/// wide, so the shadow covers as much (ADR-813): the shadow pass was most of a head's cost.
+pub(super) const FIBRE_SHADOW_SHARE: u32 = 8;
 /// The `SceneU` uniform (3744 bytes: each shadow view says where its map is kept, ADR-800),
 /// padded to the dynamic-offset alignment.
 pub(super) const SCENE_BYTES: u64 = 3840;
@@ -1672,7 +1677,13 @@ impl MeshGpu {
                         pass.set_bind_group(3, material, &[]);
                         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                         pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(0..mesh.index_count, 0, instance..instance + 1);
+                        // (a `:fibres` mesh: the first share of its strands, ordered at random)
+                        let drawn = if draw.fibres {
+                            (mesh.index_count / FIBRE_SHADOW_SHARE).max(3) / 3 * 3
+                        } else {
+                            mesh.index_count
+                        };
+                        pass.draw_indexed(0..drawn, 0, instance..instance + 1);
                     }
                 }
             }
@@ -2046,7 +2057,19 @@ pub(super) fn draw_uniform(
         .wrinkles
         .as_ref()
         .map_or(0.0, |wrinkles| wrinkles.uv as f32);
-    bytes.extend(floats_bytes(&[planes.len() as f32, wrinkle_uv, 0.0, 0.0]));
+    // (and for a `:fibres` draw, how many of its strands the shadow pass stands each one it draws
+    // for: `FIBRE_SHADOW_SHARE`, ADR-813)
+    let shadow_share = if material.fibres {
+        FIBRE_SHADOW_SHARE as f32
+    } else {
+        1.0
+    };
+    bytes.extend(floats_bytes(&[
+        planes.len() as f32,
+        wrinkle_uv,
+        shadow_share,
+        0.0,
+    ]));
     let mut clamps = [0.0f32; crate::host::gui::mesh::MAX_CLAMP_PLANES * 4];
     for (slot, plane) in planes.iter().enumerate() {
         clamps[slot * 4..slot * 4 + 4].copy_from_slice(plane);
