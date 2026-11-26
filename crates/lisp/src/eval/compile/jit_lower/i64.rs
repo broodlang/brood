@@ -639,6 +639,9 @@ pub(super) fn jit_lower_i64_arm(
         .declare_function(&format!("brood_jit_i64x_{seq}"), Linkage::Export, &xsig)
         .ok()
         .or_bail("cranelift-declare-function")?;
+    // The two functions' machine-code sizes, for `BROOD_PERF_MAP` (`finish::note_perf_map`).
+    let worker_size: usize;
+    let wrap_size: usize;
     // Wrapper imports.
     let mut ptr_sig = m.make_signature();
     ptr_sig.params.push(AbiParam::new(ptr_ty));
@@ -788,6 +791,9 @@ pub(super) fn jit_lower_i64_arm(
         m.define_function(worker_id, &mut ctx)
             .ok()
             .or_bail("cranelift-define-function")?;
+        worker_size = ctx
+            .compiled_code()
+            .map_or(0, |compiled| compiled.code_buffer().len());
         m.clear_context(&mut ctx);
     }
 
@@ -947,6 +953,9 @@ pub(super) fn jit_lower_i64_arm(
         m.define_function(wrap_id, &mut ctx)
             .ok()
             .or_bail("cranelift-define-function")?;
+        wrap_size = ctx
+            .compiled_code()
+            .map_or(0, |compiled| compiled.code_buffer().len());
         m.clear_context(&mut ctx);
     }
 
@@ -981,5 +990,8 @@ pub(super) fn jit_lower_i64_arm(
             insts
         );
     }
-    Some(m.get_finalized_function(wrap_id))
+    let entry = m.get_finalized_function(wrap_id);
+    super::finish::note_perf_map(entry, wrap_size, arm, false);
+    super::finish::note_perf_map(m.get_finalized_function(worker_id), worker_size, arm, true);
+    Some(entry)
 }

@@ -112,16 +112,20 @@ pub(super) fn define_and_finalize(
         eprintln!("[jit-bail] cranelift-define-function: {e:?}");
     }
     defined.ok().or_bail("cranelift-define-function")?;
+    let size = context
+        .compiled_code()
+        .map_or(0, |compiled| compiled.code_buffer().len());
     #[cfg(debug_assertions)]
     let dump = code_dump_request(context, arm, code);
     #[cfg(not(debug_assertions))]
-    let _ = (arm, code, inlined);
+    let _ = code;
     module.clear_context(context);
     module
         .finalize_definitions()
         .ok()
         .or_bail("cranelift-finalize")?;
     let entry = module.get_finalized_function(id);
+    note_perf_map(entry, size, arm, inlined);
     #[cfg(debug_assertions)]
     if let Some((name, length)) = dump {
         // SAFETY: `entry` is a finalized function of `length` bytes in r-x JIT memory.
@@ -133,6 +137,31 @@ pub(super) fn define_and_finalize(
         );
     }
     Some(entry)
+}
+
+/// `BROOD_PERF_MAP=1`: name the native arm at `entry` (`size` bytes) for `perf`, one
+/// `address size name` line appended to `/tmp/perf-<pid>.map` — the file `perf report` reads to
+/// name JIT code. Opened per arm (arms install rarely), so no process-wide handle is kept. A
+/// failed write is ignored: it is a diagnostic, never a reason to refuse native code.
+pub(super) fn note_perf_map(entry: *const u8, size: usize, arm: &CompiledArm, inlined: bool) {
+    if size == 0 || !crate::diagnostics::debug_flags::perf_map() {
+        return;
+    }
+    use std::io::Write;
+    let name = match (arm.dbg_name.or(arm.fn_name), arm.src_file.as_deref()) {
+        (Some(name), _) => crate::core::value::symbol_name(name),
+        (None, Some(file)) => format!("<fn in {file}>"),
+        (None, None) => "<fn>".to_string(),
+    };
+    let suffix = if inlined { " (inlined)" } else { "" };
+    let path = format!("/tmp/perf-{}.map", std::process::id());
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{:x} {:x} brood:{name}{suffix}", entry as usize, size);
+    }
 }
 
 /// Debug builds: `BROOD_DUMP_CODE=<substring>[,insts:<n>…]` dumps the finalized machine code

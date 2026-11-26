@@ -214,7 +214,31 @@
     (assert= (math/min 2.5 1) 1)
     ;; the 2-arg arm and the variadic arm must not disagree
     (assert= (math/max 3 9) (math/max 3 9 3))
-    (assert= (math/min 3 9) (math/min 9 3 9))))
+    (assert= (math/min 3 9) (math/min 9 3 9)))
+  ;; Three arguments have an arm of their own too (through the rest list and `apply` they cost
+  ;; 20× two calls), folded as `%max` folds them. It must answer exactly what `apply %max`
+  ;; does, in every order: which of equal values comes back (an int or a float), and where a
+  ;; NaN sits — `%max` keeps the best so far against a NaN, so its position decides the answer.
+  (test "the three-argument arm answers what the variadic fold does, ties and NaN included"
+    (let (bad (- (math/exp 1000.0) (math/exp 1000.0))
+          triples [[1 2 3]
+                    [3 2 1]
+                    [2 3 1]
+                    [1 1.0 1]
+                    [1.0 1 1.0]
+                    [2 1/2 0.5]
+                    [-7 -2 -9]
+                    [bad 1.0 2.0]
+                    [1.0 bad 2.0]
+                    [1.0 2.0 bad]
+                    [2.0 1.0 bad]
+                    [bad bad 1.0]])
+      (doseq ([a b c] triples)
+        (is (= (str (math/max a b c)) (str (apply %max [a b c]))))
+        (is (= (str (math/min a b c)) (str (apply %min [a b c]))))
+        ;; and of the same kind, not only equal: `(= 1 1.0)` would hide a swapped tie
+        (is (= (type-of (math/max a b c)) (type-of (apply %max [a b c]))))
+        (is (= (type-of (math/min a b c)) (type-of (apply %min [a b c]))))))))
 
 (describe "arbitrary-precision integers (bignums)"
   (test "arithmetic past i64 promotes; in-range results demote"

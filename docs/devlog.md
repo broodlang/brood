@@ -3121,3 +3121,15 @@ without a journal. ADR-811 lowers `count` of a record as a call after four decli
 (`BROOD_J=2`, bedit `file_save_test` at `BEDIT_REF`), 0 in 40 after; the new
 `preemption_shapes::an_unwound_count_call_returns_the_same_value` panics exactly so with the old
 predicate. Run: `preemption_shapes` + `preemption`, `jit_count_call_test` both ways, clippy.
+
+2026-11-26. **`BROOD_PERF_MAP`; three-argument `max`/`min`.** `BROOD_PERF_MAP=1` appends each native
+arm to `/tmp/perf-<pid>.map` (`address size brood:<name>`), the file `perf report` reads to name JIT
+code, so kernel sampling attributes native time to Brood functions with nothing changed in the
+program. First use, on b3d's hair frame: only ~11% of samples are in JIT code at all; the rest is
+the runtime's own (`exec_chunk`, the call dispatch, allocation, message copies) — the measure that
+retired the sampling profiler's 10× over-charging of small VM-bound functions as a guide. `perf`
+cannot walk through JIT frames (no frame pointers, no unwind tables), so the map names native time
+but not the call chain into the runtime. `math/max`/`math/min` gained a three-argument arm, folded
+as `%max`/`%min` fold (the rest list and `apply` cost ~20× two calls: 467 → 119 ns). Guards:
+`cli::perf_map` (red with the writer disabled), and `math_test`'s three-argument agreement over ties
+and NaN in every position (red with the fold order swapped), both contract modes.

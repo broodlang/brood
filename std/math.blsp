@@ -64,6 +64,9 @@ import. This module adds the rest: `quot`, `mod`, `rem`, `sqrt`, `pow`, `ceil`, 
 
     (math/max 1 2)   ;=> 2"
   ((a b) (%max a b))
+  ;; Three, the next most common, folded as `%max` folds them (left to right, a later value
+  ;; replacing the best only when it is larger): through the rest list and `apply`, 20× the cost.
+  ((a b c) (%max (%max a b) c))
   ((& xs) (apply %max xs)))
 ;; The result IS one of the arguments, so its type is theirs — `(math/max 2 3)` is `2 | 3`,
 ;; `(math/max lo hi)` over numbers is a number. Without this the checker read the kernel's
@@ -75,6 +78,7 @@ import. This module adds the rest: `quot`, `mod`, `rem`, `sqrt`, `pow`, `ceil`, 
 
     (math/min 1 2)   ;=> 1"
   ((a b) (%min a b))
+  ((a b c) (%min (%min a b) c))
   ((& xs) (apply %min xs)))
 (sig min (& ?A -> ?A))
 (defn rem (a:int b:int -> int)
