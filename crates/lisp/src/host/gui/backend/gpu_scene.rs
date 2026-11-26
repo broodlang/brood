@@ -987,3 +987,117 @@ fn a_fibre_strand_covers_its_pixel_by_its_real_width() {
         );
     }
 }
+
+/// E1, on trial: a strand along z, seen from above, with glass at z = 1 facing back along it
+/// (`:clamp-planes`). Its part past the glass is laid onto it, so nothing of it is drawn beyond
+/// z = 1 and it is drawn as before short of it, alike on both painters (a plain `:strands`
+/// surface, which both draw the same way); without the plane it reaches z = 2.
+#[test]
+fn a_strand_is_laid_on_its_clamp_plane_alike_on_both_painters() {
+    let side = 128u32;
+    let strand = Arc::new(
+        Mesh::from_parts(MeshParts {
+            positions: bytes_of(&[0.0, 0.0, -2.0, 0.0, 0.0, -2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 2.0]),
+            normals: bytes_of(&[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
+            uvs: bytes_of(&[-0.5, 1.0, 0.5, 1.0, -0.5, 0.0, 0.5, 0.0]),
+            indices: [0u16, 1, 2, 1, 3, 2]
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect(),
+            ..MeshParts::default()
+        })
+        .expect("a strand"),
+    );
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    // seen straight down, 16 pixels a metre: z = 0.5 at row 72, z = 1.5 at row 88
+    scene.view_proj = [
+        0.25, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1, 0.0, 0.0, -0.25, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0,
+    ];
+    scene.eye = [0.0, 10.0, 0.0];
+    scene.lights = vec![Light::directional([0.0, -1.0, 0.0], [1.0, 1.0, 1.0])];
+    let shoot = |planes: Vec<[f32; 4]>| {
+        let mut scene = scene.clone();
+        scene.draws = vec![Draw {
+            loose: None,
+            mesh: 1,
+            model: [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            palette: None,
+            morphs: vec![],
+            material: Material {
+                surface: Surface::Strands,
+                double_sided: true,
+                strand_width: [0.25, 0.25],
+                roughness: 0.6,
+                specular: 0.0,
+                color: [0.9, 0.6, 0.3, 1.0],
+                clamp_planes: planes,
+                ..Material::default()
+            },
+        }];
+        scene
+    };
+    // the glass: normal −z (the strand keeps to z < 1), −z · (0, 0, 1) = −1
+    let clamped = shoot(vec![[0.0, 0.0, -1.0, -1.0]]);
+    let free = shoot(vec![]);
+    let meshes = |handle: u32| (handle == 1).then(|| strand.clone());
+    let red = |pixels: &[u8], stride: usize, row: u32| {
+        i32::from(pixels[((row * side + 64) * stride as u32) as usize])
+    };
+    let (_, _, cpu_clamped) = rasterize(&clamped, &meshes, &|_| None);
+    let (_, _, cpu_free) = rasterize(&free, &meshes, &|_| None);
+    assert!(
+        red(&cpu_free, 4, 88) > 40,
+        "the CPU painter: the free strand reaches z = 1.5"
+    );
+    assert!(
+        red(&cpu_clamped, 4, 88) < 3,
+        "the CPU painter: nothing past the glass"
+    );
+    assert!(
+        red(&cpu_clamped, 4, 72) > 40,
+        "the CPU painter: the strand short of the glass"
+    );
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &strand);
+        let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+        renderer.set_bg(Some([0, 0, 0]));
+        gpu.paint(&[Op::Scene(Arc::new(clamped.clone()))], &mut renderer)
+            .expect("an offscreen frame is never skipped");
+        let pixels = gpu.read_pixels();
+        let apart = (0..side * side)
+            .filter(|at| pixels[(*at * 3) as usize].abs_diff(cpu_clamped[(*at * 4) as usize]) > 24)
+            .count();
+        eprintln!(
+            "{name}: past the glass {}, short of it {}, pixels apart from the CPU {apart} of {}",
+            red(&pixels, 3, 88),
+            red(&pixels, 3, 72),
+            side * side
+        );
+        if red(&pixels, 3, 88) >= 3
+            || red(&pixels, 3, 72) <= 40
+            || apart > (side * side / 100) as usize
+        {
+            failures.push(format!(
+                "{name}: past {} short {} apart {apart}",
+                red(&pixels, 3, 88),
+                red(&pixels, 3, 72)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

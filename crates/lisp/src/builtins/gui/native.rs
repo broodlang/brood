@@ -1760,6 +1760,64 @@ fn scene_spec(
             matches!(get(material_map, "double-sided"), Some(Value::Bool(true)));
         // its skin pressed by the scene's `:contacts` (ADR-805)
         material.deform = matches!(get(material_map, "deform"), Some(Value::Bool(true)));
+        // planes its strands never pass (E1, on trial): `[[px py pz nx ny nz] …]`, a point on
+        // each and its normal toward the side the strands keep to; refused when malformed, so
+        // hair is never left passing glass without a word
+        material.clamp_planes = match get(material_map, "clamp-planes") {
+            None => Vec::new(),
+            Some(Value::Vector(planes_id)) => {
+                let planes = heap.vector(planes_id).to_vec();
+                if planes.len() > crate::host::gui::mesh::MAX_CLAMP_PLANES {
+                    return Err(format!(
+                        "a material's :clamp-planes holds at most {} planes",
+                        crate::host::gui::mesh::MAX_CLAMP_PLANES
+                    ));
+                }
+                let mut read = Vec::with_capacity(planes.len());
+                for plane in planes {
+                    let numbers: Vec<f32> = match plane {
+                        Value::Vector(plane_id) => heap
+                            .vector(plane_id)
+                            .iter()
+                            .filter(|item| is_number(**item))
+                            .map(|item| num(*item))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    let length = numbers.get(3..6).map_or(0.0, |normal| {
+                        (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2])
+                            .sqrt()
+                    });
+                    if numbers.len() != 6
+                        || numbers.iter().any(|number| !number.is_finite())
+                        || length < 1e-6
+                    {
+                        return Err(format!(
+                            "a material's :clamp-planes are each [px py pz nx ny nz], a point and a normal, not {}",
+                            crate::syntax::printer::print(heap, plane)
+                        ));
+                    }
+                    let normal = [
+                        numbers[3] / length,
+                        numbers[4] / length,
+                        numbers[5] / length,
+                    ];
+                    read.push([
+                        normal[0],
+                        normal[1],
+                        normal[2],
+                        normal[0] * numbers[0] + normal[1] * numbers[1] + normal[2] * numbers[2],
+                    ]);
+                }
+                read
+            }
+            Some(other) => {
+                return Err(format!(
+                    "a material's :clamp-planes is a vector of [px py pz nx ny nz], not {}",
+                    crate::syntax::printer::print(heap, other)
+                ));
+            }
+        };
         material.cast_shadow = match get(material_map, "cast-shadow") {
             None | Some(Value::Bool(true)) => true,
             Some(Value::Bool(false)) => false,

@@ -697,6 +697,8 @@ struct DrawU {
     sheen: vec4<f32>,           // a hair surface's second highlight's colour (`:sheen`), w 1 when given (ADR-799)
     deform: vec4<u32>,          // pressed by the scene's contacts (ADR-805), its first posed vertex, whether it has a softness, its vertex count
     loose: vec4<f32>,           // its flesh lagging its bones (ADR-812): the amount (0 none), its lagging palette's offset, its joint count
+    clamp_info: vec4<f32>,      // x: how many `:clamp-planes` its strands keep to (E1, on trial)
+    clamps: array<vec4<f32>, 4>,  // each plane: its unit normal toward the strands' side, `normal · point`
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
@@ -1062,8 +1064,9 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
     if (draw.flags.x == 5u) {
         // a ribbon turned to face the camera: its tangent the strand's direction (the mesh's
         // normal), its fourth the coverage
-        let direction = safe_normalize(out.normal);
-        let ribbon = strand_vertex(world.xyz, direction, input.uv, draw.strand.xy);
+        let clamped = clamped_strand(world.xyz, safe_normalize(out.normal));
+        let direction = clamped.direction;
+        let ribbon = strand_vertex(clamped.centre, direction, input.uv, draw.strand.xy);
         out.clip = scene.view_proj * vec4<f32>(ribbon.world, 1.0);
         out.world = ribbon.world;
         out.normal = ribbon.normal;
@@ -1117,6 +1120,39 @@ struct StrandVertex {
 
 // `mesh::strand_vertex`: a strand's point on its ribbon's side `uv.x`, the ribbon `widths`
 // (root, tip; `uv.y` 1 at the root) wide but never under a pixel, turned to face the camera
+const CLAMP_BAND: f32 = 0.008;
+const CLAMP_HOLD: f32 = 0.0005;
+
+struct ClampedStrand {
+    centre: vec3<f32>,
+    direction: vec3<f32>,
+};
+
+// `mesh::clamped_strand`: a strand's point and direction laid against the draw's `:clamp-planes`
+// (E1, on trial), eased within `CLAMP_BAND` of each plane to no nearer than `CLAMP_HOLD`
+fn clamped_strand(centre_given: vec3<f32>, direction_given: vec3<f32>) -> ClampedStrand {
+    var centre = centre_given;
+    var direction = direction_given;
+    let reach = CLAMP_BAND - CLAMP_HOLD;
+    let count = min(u32(draw.clamp_info.x + 0.5), 4u);
+    for (var index = 0u; index < count; index = index + 1u) {
+        let plane = draw.clamps[index];
+        let distance = dot(plane.xyz, centre) - plane.w;
+        if (distance < CLAMP_BAND) {
+            let slope = exp((distance - CLAMP_BAND) / reach);
+            let eased = CLAMP_HOLD + reach * slope;
+            let across = dot(direction, plane.xyz);
+            centre = centre + plane.xyz * (eased - distance);
+            let bent = direction + plane.xyz * (slope - 1.0) * across;
+            // (straight into the plane: nothing left along it, so it keeps its own direction)
+            if (dot(bent, bent) >= 1e-8) {
+                direction = normalize(bent);
+            }
+        }
+    }
+    return ClampedStrand(centre, direction);
+}
+
 fn strand_vertex(centre: vec3<f32>, direction: vec3<f32>, uv: vec2<f32>, widths: vec2<f32>) -> StrandVertex {
     let view = safe_normalize(scene.eye.xyz - centre);
     // seen end-on it narrows, never under `mesh::STRAND_END_ON` of its width
@@ -2367,8 +2403,8 @@ fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> Shado
     var world = (posed.matrix * vec4<f32>(posed.position, 1.0)).xyz;
     if (draw.flags.x == 5u) {
         // the ribbon as the camera sees it, as the CPU painter's posed vertices are
-        let direction = safe_normalize((posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz);
-        world = strand_vertex(world, direction, input.uv, draw.strand.xy).world;
+        let clamped = clamped_strand(world, safe_normalize((posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz));
+        world = strand_vertex(clamped.centre, clamped.direction, input.uv, draw.strand.xy).world;
     }
     out.clip = scene.shadows[view_index].view_proj * vec4<f32>(world, 1.0);
     out.uv = input.uv;

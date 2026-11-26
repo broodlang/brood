@@ -1983,6 +1983,17 @@ pub(super) fn draw_uniform(
     // `DrawU::loose`: its flesh lagging its bones, the amount (0 none), its lagging palette's
     // offset and joint count (ADR-812)
     bytes.extend(floats_bytes(&loose));
+    // `DrawU::clamp_info` and `clamps`: the planes its strands keep to (E1, on trial)
+    let planes = &material.clamp_planes[..material
+        .clamp_planes
+        .len()
+        .min(crate::host::gui::mesh::MAX_CLAMP_PLANES)];
+    bytes.extend(floats_bytes(&[planes.len() as f32, 0.0, 0.0, 0.0]));
+    let mut clamps = [0.0f32; crate::host::gui::mesh::MAX_CLAMP_PLANES * 4];
+    for (slot, plane) in planes.iter().enumerate() {
+        clamps[slot * 4..slot * 4 + 4].copy_from_slice(plane);
+    }
+    bytes.extend(floats_bytes(&clamps));
     bytes
 }
 

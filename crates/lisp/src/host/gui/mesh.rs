@@ -895,6 +895,11 @@ pub struct Material {
     /// pixel worked out exactly and blended, the three nearest layers a pixel lit (TressFX
     /// ShortCut). The GPU painter alone draws it so; the CPU painter draws it as `:strands`.
     pub fibres: bool,
+    /// Planes its strands never pass (`:clamp-planes`, E1, on trial): each `[nx ny nz offset]`,
+    /// its unit normal toward the side the strands keep to and `normal · point` of a point on it,
+    /// at most [`MAX_CLAMP_PLANES`]. Strands of a `:strands` or `:fibres` surface reaching into a
+    /// plane's band are flattened onto it ([`clamped_strand`]): hair laid on glass.
+    pub clamp_planes: Vec<[f32; 4]>,
 }
 
 impl Default for Material {
@@ -923,6 +928,7 @@ impl Default for Material {
             sheen: None,
             deform: false,
             fibres: false,
+            clamp_planes: Vec::new(),
         }
     }
 }
@@ -1244,6 +1250,54 @@ pub const FIRM_SOFTNESS: f32 = 0.5;
 /// in proportion. Pressed further (a pose that pushes a face deep through glass), skin passes the
 /// surface rather than being flattened away from what lies under it (an eye, the mouth) (ADR-805).
 pub const MAX_SQUASH: f32 = 0.02;
+
+/// The most planes a strand material's `:clamp-planes` holds (E1, on trial).
+pub const MAX_CLAMP_PLANES: usize = 4;
+/// How far before a clamp plane its strands begin to be flattened (metres), and how far off its
+/// face they are held at the most (E1, on trial).
+pub const CLAMP_BAND: f32 = 0.008;
+pub const CLAMP_HOLD: f32 = 0.0005;
+
+/// A strand's point `centre` and unit `direction` laid against `planes` (E1, on trial): a point
+/// within [`CLAMP_BAND`] of a plane (or past it) is eased toward its face, to
+/// `HOLD + (BAND − HOLD) · e^((distance − BAND) / (BAND − HOLD))` from it: unchanged at the band's
+/// edge, with the same slope there (no kink), and never nearer than [`CLAMP_HOLD`] however deep
+/// it was. Its direction is bent as that easing bends the strand (the part across the plane
+/// times the easing's slope), so a strand lies along the glass. The GPU's `clamped_strand`
+/// mirrors it.
+pub fn clamped_strand(
+    planes: &[[f32; 4]],
+    centre: [f32; 3],
+    direction: [f32; 3],
+) -> ([f32; 3], [f32; 3]) {
+    let reach = CLAMP_BAND - CLAMP_HOLD;
+    planes
+        .iter()
+        .take(MAX_CLAMP_PLANES)
+        .fold((centre, direction), |(centre, direction), plane| {
+            let normal = [plane[0], plane[1], plane[2]];
+            let distance = dot(normal, centre) - plane[3];
+            if distance >= CLAMP_BAND {
+                return (centre, direction);
+            }
+            let slope = ((distance - CLAMP_BAND) / reach).exp();
+            let eased = CLAMP_HOLD + reach * slope;
+            let across = dot(direction, normal);
+            let bent =
+                [0, 1, 2].map(|axis| direction[axis] + normal[axis] * (slope - 1.0) * across);
+            // (a strand pointing straight into the plane has nothing left along it: it keeps
+            // its own direction rather than an arbitrary one)
+            let bent = if dot(bent, bent) < 1e-8 {
+                direction
+            } else {
+                normalize(bent)
+            };
+            (
+                [0, 1, 2].map(|axis| centre[axis] + normal[axis] * (eased - distance)),
+                bent,
+            )
+        })
+}
 
 /// A shape pressing on skin (ADR-805), in world space.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -4410,7 +4464,12 @@ fn pose_vertices(scene: &Scene, mesh: &Mesh, draw: &Draw) -> Vec<ClipVertex> {
                 let [root, tip] = draw.material.strand_width;
                 let uv = mesh.uvs[index];
                 let width = tip + (root - tip) * uv[1].clamp(0.0, 1.0);
-                let centre = [world[0], world[1], world[2]];
+                // (laid against its `:clamp-planes`, E1: hair on glass)
+                let (centre, direction) = clamped_strand(
+                    &draw.material.clamp_planes,
+                    [world[0], world[1], world[2]],
+                    direction,
+                );
                 let (vertex, ribbon_normal, coverage) =
                     strand_vertex(scene, centre, direction, uv[0].signum(), width);
                 return ClipVertex {
@@ -8826,5 +8885,38 @@ mod tests {
         })
         .expect("a triangle");
         assert!(plain.tangents.is_none());
+    }
+
+    #[test]
+    fn a_strand_is_laid_on_a_clamp_plane_never_through_it() {
+        // E1, on trial: glass at z = 1 facing −z (the strands keep to z < 1)
+        let glass = [[0.0, 0.0, -1.0, -1.0]];
+        let along = [0.0, 0.0, 1.0];
+        let distance = |point: [f32; 3]| dot([0.0, 0.0, -1.0], point) + 1.0;
+        // far off the glass: untouched
+        let (far, far_direction) = clamped_strand(&glass, [0.0, 0.0, 0.9], along);
+        assert_eq!((far, far_direction), ([0.0, 0.0, 0.9], along));
+        // 34 mm through it (her scalp riding on as her cheek presses): held at its face, never past
+        let slant = normalize([1.0, 0.0, 1.0]);
+        let (deep, deep_direction) = clamped_strand(&glass, [0.0, 0.0, 1.034], slant);
+        assert!(
+            (distance(deep) - CLAMP_HOLD).abs() < 1e-4,
+            "held {} m off the glass",
+            distance(deep)
+        );
+        // and a slanting strand's direction laid along the glass (what is left across it is the
+        // easing's slope there, e^((-0.034 - BAND) / (BAND - HOLD)), 0.4%)
+        assert!(deep_direction[2].abs() < 0.005, "{deep_direction:?}");
+        // (straight into the glass, nothing is left along it: it keeps its own direction)
+        assert_eq!(clamped_strand(&glass, [0.0, 0.0, 1.034], along).1, along);
+        // eased: order kept, every depth off the glass, the band's edge unmoved
+        let depths = [0.02, 0.008, 0.004, 0.0, -0.005, -0.02];
+        let eased: Vec<f32> = depths
+            .iter()
+            .map(|depth| distance(clamped_strand(&glass, [0.0, 0.0, 1.0 - depth], along).0))
+            .collect();
+        assert!(eased.windows(2).all(|pair| pair[0] > pair[1]), "{eased:?}");
+        assert!(eased.iter().all(|left| *left >= CLAMP_HOLD), "{eased:?}");
+        assert!((eased[1] - CLAMP_BAND).abs() < 1e-6, "{eased:?}");
     }
 }
