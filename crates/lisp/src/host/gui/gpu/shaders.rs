@@ -724,9 +724,9 @@ struct DrawU {
 
 struct ContactList {
     count: vec4<u32>,
-    // five vec4 a contact: `[x y z kind]`, `[x y z w]`, its drag, its own limb's joints, its one limb's
+    // six vec4 a contact: `[x y z kind]`, `[x y z w]`, its drag, its own limb's joints, its one limb's, its `:within`
     // (`scenes::contact_words`)
-    shapes: array<vec4<f32>, 320>,
+    shapes: array<vec4<f32>, 384>,
 };
 @group(3) @binding(8) var<storage, read> mesh_vertices: array<f32>;
 @group(3) @binding(9) var<uniform> contact_list: ContactList;
@@ -757,8 +757,8 @@ fn smooth_outside(distance: f32, band: f32) -> f32 {
 // `mesh::Contact::signed_distance`: how far `point` lies outside contact `slot` (negative inside),
 // in w, and the unit direction out of it there, in xyz
 fn contact_distance(slot: u32, point: vec3<f32>) -> vec4<f32> {
-    let first = contact_list.shapes[slot * 5u];
-    let second = contact_list.shapes[slot * 5u + 1u];
+    let first = contact_list.shapes[slot * 6u];
+    let second = contact_list.shapes[slot * 6u + 1u];
     let kind = u32(first.w + 0.5);
     if (kind == 0u) {
         return vec4<f32>(first.xyz, dot(first.xyz, point) - second.x);
@@ -786,8 +786,8 @@ fn contact_distance(slot: u32, point: vec3<f32>) -> vec4<f32> {
 // `:skip` joints passing a half
 fn contact_skipped(slot: u32, input: VertexIn) -> bool {
     // its own limb (`:skip`), or not the one limb it presses (`:only`, its first joint -1: any)
-    let skip = contact_list.shapes[slot * 5u + 3u];
-    let only = contact_list.shapes[slot * 5u + 4u];
+    let skip = contact_list.shapes[slot * 6u + 3u];
+    let only = contact_list.shapes[slot * 6u + 4u];
     var own = 0.0;
     var one = 0.0;
     for (var at = 0u; at < 4u; at = at + 1u) {
@@ -800,6 +800,17 @@ fn contact_skipped(slot: u32, input: VertexIn) -> bool {
         }
     }
     return own > 0.5 || (only.x >= 0.0 && one <= 0.5);
+}
+
+// `mesh::within_weight`: how much contact `slot` acts at `point`, on its `:within` side only,
+// eased in over `WITHIN_BAND` (ADR-816); everywhere when it has none (all zero)
+const WITHIN_BAND: f32 = 0.02;
+fn contact_within(slot: u32, point: vec3<f32>) -> f32 {
+    let within = contact_list.shapes[slot * 6u + 5u];
+    if (dot(within.xyz, within.xyz) <= 1e-12) {
+        return 1.0;
+    }
+    return smoothstep(0.0, WITHIN_BAND, dot(within.xyz, point) - within.w);
 }
 
 // a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 24 a vertex)
@@ -867,7 +878,8 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let distance = contact_distance(slot, world).w;
         if (distance < 0.0 && !contact_skipped(slot, input)) {
-            atomicMax(&contact_depths[slot], bitcast<u32>(-distance));
+            // (as far as it acts there: its `:within` side, ADR-816)
+            atomicMax(&contact_depths[slot], bitcast<u32>(-distance * contact_within(slot, world)));
         }
     }
 }
@@ -896,6 +908,11 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         // (as far as skin can be squashed, never a raw depth: `mesh::deform_by_contacts`)
         let depth = min(bitcast<f32>(atomicLoad(&contact_depths[slot])), MAX_SQUASH);
         let measured = contact_distance(slot, point);
+        // (how much it acts here: on its `:within` side only, `mesh::within_weight`, ADR-816)
+        let weight = contact_within(slot, point);
+        if (weight <= 0.0) {
+            continue;
+        }
         let out = measured.xyz;
         let distance = measured.w;
         // (`mesh::deform_by_contacts`: the patch's edge eased over a band, a firm part sunk a
@@ -904,7 +921,7 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         let eased = smooth_outside(distance, band);
         let into = 1.0 - smoothstep(-band, band, distance);
         let inset = FIRM_INSET * depth * clamp(1.0 - softness / FIRM_SOFTNESS, 0.0, 1.0) * into;
-        let moved = min(eased - distance - inset, MAX_SQUASH * softness);
+        let moved = min(eased - distance - inset, MAX_SQUASH * softness) * weight;
         var lift = 0.0;
         var slope = 0.0;
         if (depth > 0.0 && distance > 0.0) {
@@ -913,8 +930,8 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
             if (reach < 3.0) {
                 let crest = RING_LIFT * softness * depth;
                 let fall = exp(0.5 - reach * reach) * 1.41421356;
-                lift = crest * reach * fall;
-                slope = crest / width * fall * (1.0 - 2.0 * reach * reach);
+                lift = crest * reach * fall * weight;
+                slope = crest / width * fall * (1.0 - 2.0 * reach * reach) * weight;
             }
         }
         let sideways = out - normal * dot(out, normal);
@@ -922,9 +939,9 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         // (its `:drag`: wholly inside the patch, less through its edge and ring)
         let reach = (RING_WIDTH + RING_SPREAD * depth) * (0.5 + softness);
         let outside = max(distance, 0.0) / reach;
-        let held = into + (1.0 - into) * exp(-outside * outside);
-        point = point + contact_list.shapes[slot * 5u + 2u].xyz * held;
-        let turned = safe_normalize(normal + (-out - normal) * into);
+        let held = (into + (1.0 - into) * exp(-outside * outside)) * weight;
+        point = point + contact_list.shapes[slot * 6u + 2u].xyz * held;
+        let turned = safe_normalize(normal + (-out - normal) * into * weight);
         if (dot(sideways, sideways) > 1e-8) {
             normal = safe_normalize(turned - safe_normalize(sideways) * slope);
         } else {

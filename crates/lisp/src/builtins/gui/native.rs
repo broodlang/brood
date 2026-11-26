@@ -1990,6 +1990,8 @@ fn scene_spec(
     let mut contact_skips = Vec::new();
     // and the one limb whose skin alone each presses (`:only [j …]`, up to four)
     let mut contact_onlys = Vec::new();
+    // and the side of a plane each acts on (`:within [px py pz nx ny nz]`, ADR-816), or everywhere
+    let mut contact_withins = Vec::new();
     if let Some(given) = get(map, "contacts") {
         let Value::Vector(list) = given else {
             return Err(":contacts is a vector of contact maps".into());
@@ -2029,6 +2031,22 @@ fn scene_spec(
                 }
             }
             contact_onlys.push(only);
+            contact_withins.push(match numbers(get(contact, "within"), 6) {
+                None => [0.0; 4],
+                Some(within) => {
+                    let length = (within[3] * within[3] + within[4] * within[4] + within[5] * within[5]).sqrt();
+                    if length < 1e-6 {
+                        return Err("a contact's :within is [px py pz nx ny nz], a point on the plane and its normal toward the side it acts on".into());
+                    }
+                    let normal = [within[3] / length, within[4] / length, within[5] / length];
+                    [
+                        normal[0],
+                        normal[1],
+                        normal[2],
+                        normal[0] * within[0] + normal[1] * within[1] + normal[2] * within[2],
+                    ]
+                }
+            });
             use crate::host::gui::mesh::Contact;
             let contact = if let Some(plane) = numbers(get(contact, "plane"), 4) {
                 let length =
@@ -2078,6 +2096,7 @@ fn scene_spec(
         contact_drags,
         contact_skips,
         contact_onlys,
+        contact_withins,
     }))
 }
 

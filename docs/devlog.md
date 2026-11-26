@@ -3047,3 +3047,10 @@ rotation: `host::gui::centres` (walked over the surface's points, so seams do no
 `gui/skin-centres`, a mesh's `:centres`, both painters blending quaternions and stretches about
 each vertex's centre, `gui/posed-positions` for probes. On womanblend: arms-up armpit squeezed
 92% → 67%, collarbones 37% → 20%, the mat squat's bottom 40% → 29%.
+
+2026-11-26. **Skin wrap light and cast shadows (ADR-815); contacts `:within` (ADR-816); hair fibres
+tinted by their own colour (ADR-813 amended).** The light under the skin near the terminator takes a
+cast shadow looked up just off the skin; a contact can act on one side of a plane only (womanblend's
+knee meeting behind the knee, not over the kneecap); `:fibres`' self-shadow tints by each fibre's
+transmittance from its colour, so hair colours no longer all read orange by a lamp. Run: the GUI
+suites (164), parity of `:within` on both adapters.

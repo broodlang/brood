@@ -83,16 +83,16 @@ struct ContactTarget {
     depths: wgpu::Buffer,
 }
 
-/// A scene's `:contacts` as the shader's `ContactList` holds them (ADR-805): how many, then five
-/// vec4 each (the third its `:drag`, the fourth its `:skip` joints, the fifth its `:only`), `[x y z kind]` and `[x y z w]`: a plane's normal and offset (kind 0), a sphere's
+/// A scene's `:contacts` as the shader's `ContactList` holds them (ADR-805): how many, then six
+/// vec4 each (the third its `:drag`, the fourth its `:skip` joints, the fifth its `:only`, the sixth its `:within`), `[x y z kind]` and `[x y z w]`: a plane's normal and offset (kind 0), a sphere's
 /// centre and radius (1), a capsule's start, end and radius (2).
 fn contact_words(scene: &Scene) -> Vec<u8> {
     use crate::host::gui::mesh::{Contact, MAX_CONTACTS};
     let contacts = &scene.contacts[..scene.contacts.len().min(MAX_CONTACTS)];
     let mut bytes = words_bytes(&[contacts.len() as u32, 0, 0, 0]);
-    let mut floats = vec![0.0f32; MAX_CONTACTS * 20];
+    let mut floats = vec![0.0f32; MAX_CONTACTS * 24];
     for (slot, contact) in contacts.iter().enumerate() {
-        let at = slot * 20;
+        let at = slot * 24;
         let [first, second] = match *contact {
             Contact::Plane { normal, offset } => [
                 [normal[0], normal[1], normal[2], 0.0],
@@ -138,6 +138,10 @@ fn contact_words(scene: &Scene) -> Vec<u8> {
             } else {
                 f32::from(*joint)
             };
+        }
+        // the sixth: the side of a plane it acts on (`:within`, ADR-816; all zero: everywhere)
+        if let Some(within) = scene.contact_withins.get(slot) {
+            floats[at + 20..at + 24].copy_from_slice(within);
         }
     }
     bytes.extend(floats_bytes(&floats));
@@ -1350,7 +1354,7 @@ impl MeshGpu {
                         contacts: buffer(
                             device,
                             "contacts",
-                            16 + crate::host::gui::mesh::MAX_CONTACTS as u64 * 80,
+                            16 + crate::host::gui::mesh::MAX_CONTACTS as u64 * 96,
                             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                         ),
                         depths: buffer(
@@ -2080,6 +2084,7 @@ pub(super) fn scene_uniform_len() -> usize {
         contact_drags: Vec::new(),
         contact_skips: Vec::new(),
         contact_onlys: Vec::new(),
+        contact_withins: Vec::new(),
         draws: Vec::new(),
     };
     scene_words(&scene, &shadow_plan(&scene, None), &emitter_plan(&scene)).len() * 4

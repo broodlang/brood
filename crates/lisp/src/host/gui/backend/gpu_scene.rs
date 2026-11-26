@@ -69,6 +69,7 @@ fn scene() -> Scene {
         contact_drags: Vec::new(),
         contact_skips: Vec::new(),
         contact_onlys: Vec::new(),
+        contact_withins: Vec::new(),
         draws: vec![Draw {
             loose: None,
             mesh: 1,
@@ -721,6 +722,43 @@ fn a_ball_pressed_into_soft_skin_dents_it_alike_on_both_painters() {
         );
         if dent < 500 || unchanged > 0 || apart > gpu_red.len() / 50 {
             failures.push(format!("{name}: dent {dent}, unpressed apart {unchanged}, {apart} pixels apart from the CPU"));
+        }
+    }
+    // ADR-816: the same ball acting only where x > 0 (`:within`): its left half drawn as the
+    // unpressed slab, and both painters alike
+    let mut half = pressed.clone();
+    half.contact_withins = vec![[1.0, 0.0, 0.0, 0.0]];
+    let (_, _, cpu_half) = rasterize(&half, &meshes, &|_| None);
+    let left_apart = (0..side as usize)
+        .flat_map(|row| (0..side as usize / 3).map(move |column| row * side as usize + column))
+        .filter(|at| cpu_half[at * 4].abs_diff(cpu_plain[at * 4]) > 4)
+        .count();
+    assert!(
+        left_apart < 20,
+        "the far side unpressed: {left_apart} pixels apart"
+    );
+    assert!(
+        difference(&cpu_half, &cpu_plain, 4) > 100,
+        "the near side pressed"
+    );
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &slab);
+        let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+        renderer.set_bg(Some([0, 0, 0]));
+        gpu.paint(&[Op::Scene(Arc::new(half.clone()))], &mut renderer)
+            .expect("an offscreen frame is never skipped");
+        let pixels = gpu.read_pixels();
+        let apart = (0..(side * side) as usize)
+            .filter(|at| pixels[at * 3].abs_diff(cpu_half[at * 4]) > 24)
+            .count();
+        eprintln!("{name}: within, pixels apart from the CPU {apart}");
+        if apart > (side * side / 50) as usize {
+            failures.push(format!("{name}: within, {apart} pixels apart from the CPU"));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

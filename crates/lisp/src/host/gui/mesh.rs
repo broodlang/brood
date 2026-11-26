@@ -1247,6 +1247,10 @@ pub struct Scene {
     /// a vertex pressed only where its weights on them pass a half: a plane between her thighs
     /// pressing one thigh's skin, another the other's (ADR-805). One a contact, or none.
     pub contact_onlys: Vec<[u16; 4]>,
+    /// The side of a plane each contact acts on (`:within`, ADR-816): `[nx ny nz d]`, acting where
+    /// `n · p > d` and faded in over [`WITHIN_BAND`]; all zero (or none): everywhere. A plane
+    /// through her knee pressing only behind it, not over her kneecap. One a contact, or none.
+    pub contact_withins: Vec<[f32; 4]>,
 }
 
 /// The most contacts a scene presses its skin with (ADR-805). 64 since ADR-810: womanblend's
@@ -1274,6 +1278,23 @@ pub const FIRM_SOFTNESS: f32 = 0.5;
 /// in proportion. Pressed further (a pose that pushes a face deep through glass), skin passes the
 /// surface rather than being flattened away from what lies under it (an eye, the mouth) (ADR-805).
 pub const MAX_SQUASH: f32 = 0.02;
+
+/// How far over the boundary of its `:within` side a contact's band of action reaches (metres,
+/// ADR-816): it acts wholly that far inside, not at all outside, eased between.
+pub const WITHIN_BAND: f32 = 0.02;
+
+/// How much a contact with `within` (`[nx ny nz d]`, all zero: everywhere) acts at `point`: 0 on
+/// the far side of its plane, 1 a [`WITHIN_BAND`] inside, smooth between (ADR-816).
+pub fn within_weight(within: Option<&[f32; 4]>, point: [f32; 3]) -> f32 {
+    match within {
+        Some(&[nx, ny, nz, d]) if nx * nx + ny * ny + nz * nz > 1e-12 => smoothstep(
+            0.0,
+            WITHIN_BAND,
+            nx * point[0] + ny * point[1] + nz * point[2] - d,
+        ),
+        _ => 1.0,
+    }
+}
 
 /// How far off the skin a light's shadow is looked up for the light under the skin near the
 /// terminator, in the skin's own metres (times its `:scatter`, which scales how far the light
@@ -1406,6 +1427,7 @@ pub fn deform_by_contacts(
     contacts: &[Contact],
     depths: &[f32],
     drags: &[[f32; 3]],
+    withins: &[[f32; 4]],
     point: [f32; 3],
     normal: [f32; 3],
     softness: f32,
@@ -1426,6 +1448,11 @@ pub fn deform_by_contacts(
         // deep through a contact (a foot through the floor in a crouch) must not swell every ring
         let depth = depth.min(MAX_SQUASH);
         let (distance, out) = contact.signed_distance(point);
+        // how much it acts here: on its `:within` side only, eased in over its band (ADR-816)
+        let weight = within_weight(withins.get(slot), point);
+        if weight <= 0.0 {
+            continue;
+        }
         // the patch's edge eased over `band`: the distance's smooth maximum with 0, so skin meets
         // the surface tangentially instead of creasing where the patch ends
         let band = EDGE_BAND + EDGE_SPREAD * depth;
@@ -1436,7 +1463,7 @@ pub fn deform_by_contacts(
         let inset = FIRM_INSET * depth * (1.0 - softness / FIRM_SOFTNESS).clamp(0.0, 1.0) * into;
         // at most `MAX_SQUASH` × softness: tissue gives only so far (a lid, bone, barely); pushed
         // further, the skin passes the surface with the rest of her rather than opening holes
-        let moved = (eased - distance - inset).min(MAX_SQUASH * softness);
+        let moved = (eased - distance - inset).min(MAX_SQUASH * softness) * weight;
         // the ring: nothing at the patch's edge, rising to its crest a little way out, falling
         // away; as wide as the press is deep, wider and higher for soft flesh
         let (mut lift, mut slope) = (0.0, 0.0);
@@ -1446,8 +1473,8 @@ pub fn deform_by_contacts(
             if reach < 3.0 {
                 let crest = RING_LIFT * softness * depth;
                 let fall = (0.5 - reach * reach).exp() * std::f32::consts::SQRT_2;
-                lift = crest * reach * fall;
-                slope = crest / width * fall * (1.0 - 2.0 * reach * reach);
+                lift = crest * reach * fall * weight;
+                slope = crest / width * fall * (1.0 - 2.0 * reach * reach) * weight;
             }
         }
         let across = dot(out, normal);
@@ -1458,13 +1485,14 @@ pub fn deform_by_contacts(
         if let Some(drag) = drags.get(slot) {
             let reach = (RING_WIDTH + RING_SPREAD * depth) * (0.5 + softness);
             let outside = distance.max(0.0) / reach;
-            let held = into + (1.0 - into) * (-outside * outside).exp();
+            let held = (into + (1.0 - into) * (-outside * outside).exp()) * weight;
             point = [0, 1, 2].map(|axis| point[axis] + drag[axis] * held);
         }
         // its normal turns to face into the contact (out of the body) across the band, and leans
         // with the ring's slope: toward the contact where the ring rises, away where it falls
-        let turned =
-            normalize([0, 1, 2].map(|axis| normal[axis] + (-out[axis] - normal[axis]) * into));
+        let turned = normalize(
+            [0, 1, 2].map(|axis| normal[axis] + (-out[axis] - normal[axis]) * into * weight),
+        );
         normal = if dot(sideways, sideways) > 1e-8 {
             let away = normalize(sideways);
             normalize([0, 1, 2].map(|axis| turned[axis] - away[axis] * slope))
@@ -4903,7 +4931,11 @@ fn press_posed(scene: &Scene, posed: &mut [Posed]) {
             );
             for (slot, (depth, contact)) in depths.iter_mut().zip(contacts).enumerate() {
                 if skipped & (1 << slot) == 0 {
-                    *depth = depth.max(-contact.signed_distance(vertex.world).0);
+                    // (as far as it acts there: its `:within` side, ADR-816)
+                    *depth = depth.max(
+                        -contact.signed_distance(vertex.world).0
+                            * within_weight(scene.contact_withins.get(slot), vertex.world),
+                    );
                 }
             }
         }
@@ -4915,6 +4947,7 @@ fn press_posed(scene: &Scene, posed: &mut [Posed]) {
                 contacts,
                 &depths,
                 &scene.contact_drags,
+                &scene.contact_withins,
                 vertex.world,
                 vertex.normal,
                 softness,
@@ -5201,6 +5234,7 @@ mod tests {
             contact_drags: Vec::new(),
             contact_skips: Vec::new(),
             contact_onlys: Vec::new(),
+            contact_withins: Vec::new(),
             draws: vec![draw],
         }
     }
@@ -8917,6 +8951,7 @@ mod tests {
             &floor,
             &depths,
             &[],
+            &[],
             [0.0, -0.005, 0.0],
             [0.6, -0.8, 0.0],
             1.0,
@@ -8925,11 +8960,13 @@ mod tests {
         assert!(laid[1].abs() < 2e-4, "{laid:?}");
         assert!(laid_normal[1] < -0.99, "{laid_normal:?}");
         // a firm part (a nipple) sits a little behind the surface, sunk into the softer flesh
-        let (firm, _) = deform_by_contacts(&floor, &depths, &[], [0.0, -0.005, 0.0], down, 0.1, 0);
+        let (firm, _) =
+            deform_by_contacts(&floor, &depths, &[], &[], [0.0, -0.005, 0.0], down, 0.1, 0);
         assert!(firm[1] < laid[1] - 0.0005, "{firm:?} against {laid:?}");
         // outside the eased edge, soft: lifted along its own normal (toward the floor, out of the
         // body), at most RING_LIFT × the depth at the crest; and nothing right at the edge
-        let (ring, _) = deform_by_contacts(&floor, &depths, &[], [0.02, 0.012, 0.0], down, 1.0, 0);
+        let (ring, _) =
+            deform_by_contacts(&floor, &depths, &[], &[], [0.02, 0.012, 0.0], down, 1.0, 0);
         let lift = 0.012 - ring[1];
         assert!(lift > 0.0 && lift <= RING_LIFT * 0.005 + 1e-6, "{lift}");
         let edge = smooth_outside(1e-5, EDGE_BAND + EDGE_SPREAD * 0.005);
@@ -8938,35 +8975,54 @@ mod tests {
             "the eased edge lifts skin off the surface only a little: {edge}"
         );
         // the same point as bone: no ring
-        let (bone, _) = deform_by_contacts(&floor, &depths, &[], [0.02, 0.0005, 0.0], down, 0.0, 0);
+        let (bone, _) =
+            deform_by_contacts(&floor, &depths, &[], &[], [0.02, 0.0005, 0.0], down, 0.0, 0);
         assert_eq!(bone, [0.02, 0.0005, 0.0]);
         // and bone inside the floor: never pressed (a limb that presses is softness 0 too)
         let (bone_inside, _) =
-            deform_by_contacts(&floor, &depths, &[], [0.0, -0.005, 0.0], down, 0.0, 0);
+            deform_by_contacts(&floor, &depths, &[], &[], [0.0, -0.005, 0.0], down, 0.0, 0);
         assert_eq!(bone_inside, [0.0, -0.005, 0.0]);
         // far off: untouched
         let (far, far_normal) =
-            deform_by_contacts(&floor, &depths, &[], [0.0, 0.2, 0.0], down, 1.0, 0);
+            deform_by_contacts(&floor, &depths, &[], &[], [0.0, 0.2, 0.0], down, 1.0, 0);
         assert_eq!((far, far_normal), ([0.0, 0.2, 0.0], down));
         // pushed far past the surface, firm skin gives only so far (MAX_SQUASH × softness) and passes
         // it, rather than being flattened away from what lies under it
         let deep_depths = contact_depths(&floor, [[0.0, -0.05, 0.0]].iter());
-        let (deep, _) =
-            deform_by_contacts(&floor, &deep_depths, &[], [0.0, -0.05, 0.0], down, 0.1, 0);
+        let (deep, _) = deform_by_contacts(
+            &floor,
+            &deep_depths,
+            &[],
+            &[],
+            [0.0, -0.05, 0.0],
+            down,
+            0.1,
+            0,
+        );
         assert!(deep[1] < -0.04, "{deep:?}");
         // one part driven 15 cm through the floor (a foot, in a crouch) does not swell the soft skin
         // near it: the ring is sized by what skin can squash, not by that depth
-        let (near, _) = deform_by_contacts(&floor, &[0.15], &[], [0.0, 0.05, 0.0], down, 1.0, 0);
+        let (near, _) =
+            deform_by_contacts(&floor, &[0.15], &[], &[], [0.0, 0.05, 0.0], down, 1.0, 0);
         assert!(
             (0.05 - near[1]).abs() < 0.008,
             "the ring stays small: {near:?}"
         );
         // dragged along the floor by its friction: inside, the whole drag; far off, none
         let drag = [[0.003, 0.0, 0.0]];
-        let (held, _) =
-            deform_by_contacts(&floor, &depths, &drag, [0.0, -0.005, 0.0], down, 1.0, 0);
+        let (held, _) = deform_by_contacts(
+            &floor,
+            &depths,
+            &drag,
+            &[],
+            [0.0, -0.005, 0.0],
+            down,
+            1.0,
+            0,
+        );
         assert!((held[0] - 0.003).abs() < 1e-4, "{held:?}");
-        let (free, _) = deform_by_contacts(&floor, &depths, &drag, [0.0, 0.2, 0.0], down, 1.0, 0);
+        let (free, _) =
+            deform_by_contacts(&floor, &depths, &drag, &[], [0.0, 0.2, 0.0], down, 1.0, 0);
         assert!(free[0].abs() < 1e-6, "{free:?}");
     }
 
@@ -9029,6 +9085,7 @@ mod tests {
         let (kept, _) = deform_by_contacts(
             &floor,
             &[0.005],
+            &[],
             &[],
             [0.0, -0.005, 0.0],
             [0.0, -1.0, 0.0],
@@ -9270,5 +9327,47 @@ mod tests {
         assert!(eased.windows(2).all(|pair| pair[0] > pair[1]), "{eased:?}");
         assert!(eased.iter().all(|left| *left >= CLAMP_HOLD), "{eased:?}");
         assert!((eased[1] - CLAMP_BAND).abs() < 1e-6, "{eased:?}");
+    }
+
+    /// ADR-816: a contact `:within` a side of a plane presses skin only there, fading in over
+    /// `WITHIN_BAND`: a floor acting where x > 0 lays skin passed into it at x = 0.1 onto it and
+    /// leaves skin passed into it at x = −0.1 where it was.
+    #[test]
+    fn a_contact_within_a_side_presses_only_there() {
+        let floor = [Contact::Plane {
+            normal: [0.0, 1.0, 0.0],
+            offset: 0.0,
+        }];
+        let right_only = [[1.0, 0.0, 0.0, 0.0]];
+        let down = [0.0, -1.0, 0.0];
+        let (inside, _) = deform_by_contacts(
+            &floor,
+            &[0.005],
+            &[],
+            &right_only,
+            [0.1, -0.005, 0.0],
+            down,
+            1.0,
+            0,
+        );
+        assert!(inside[1].abs() < 0.001, "laid onto the floor: {inside:?}");
+        let (outside, _) = deform_by_contacts(
+            &floor,
+            &[0.005],
+            &[],
+            &right_only,
+            [-0.1, -0.005, 0.0],
+            down,
+            1.0,
+            0,
+        );
+        assert_eq!(outside, [-0.1, -0.005, 0.0], "not pressed on the far side");
+        // the weight: nothing at the plane, whole a band inside, smooth between
+        assert_eq!(within_weight(Some(&right_only[0]), [0.0, 0.0, 0.0]), 0.0);
+        assert_eq!(
+            within_weight(Some(&right_only[0]), [WITHIN_BAND, 0.0, 0.0]),
+            1.0
+        );
+        assert_eq!(within_weight(Some(&[0.0; 4]), [-5.0, 0.0, 0.0]), 1.0);
     }
 }
