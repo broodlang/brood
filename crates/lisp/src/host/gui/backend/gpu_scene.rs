@@ -764,6 +764,166 @@ fn a_ball_pressed_into_soft_skin_dents_it_alike_on_both_painters() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// ADR-805/810: contacts past the sixteenth, alike on both painters. A soft slab with 21
+/// contacts: a ball pressing and dragging it at slot 4, and twenty far balls that press nothing,
+/// among them an `:only` at 17 and at 20 and a `:within` at 19. The CPU painter's skip mask was
+/// 16 bits until 1f94bcc89: slot 20's `:only` wrapped onto slot 4 and the slab was never
+/// pressed there. Drawn, the 21 must be the ball alone, on both painters (press and drag; not
+/// the contact shadows, the CPU painter being frozen at ADR-818).
+#[test]
+fn contacts_past_sixteen_press_and_drag_alike_on_both_painters() {
+    use crate::host::gui::mesh::Contact;
+    let side = 96u32;
+    let cells = 48usize;
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    for row in 0..=cells {
+        for column in 0..=cells {
+            positions.extend_from_slice(&[
+                column as f32 / cells as f32 - 0.5,
+                row as f32 / cells as f32 - 0.5,
+                0.5,
+            ]);
+            normals.extend_from_slice(&[0.0, 0.0, -1.0]);
+        }
+    }
+    let mut indices = Vec::new();
+    for row in 0..cells {
+        for column in 0..cells {
+            let corner = (row * (cells + 1) + column) as u32;
+            let next = corner + (cells + 1) as u32;
+            indices.extend_from_slice(&[corner, corner + 1, next, corner + 1, next + 1, next]);
+        }
+    }
+    let count = (cells + 1) * (cells + 1);
+    let slab = Arc::new(
+        Mesh::from_parts(MeshParts {
+            positions: bytes_of(&positions),
+            normals: bytes_of(&normals),
+            indices: indices
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect(),
+            indices_wide: true,
+            softness: bytes_of(&vec![1.0; count]),
+            ..MeshParts::default()
+        })
+        .expect("a slab"),
+    );
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    scene.lights = vec![Light::directional([0.6, -0.5, 0.6], [1.0, 1.0, 1.0])];
+    scene.draws = vec![Draw {
+        loose: None,
+        mesh: 1,
+        model: [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+        palette: None,
+        morphs: vec![],
+        material: Material {
+            surface: Surface::Standard,
+            deform: true,
+            double_sided: true,
+            roughness: 0.6,
+            specular: 0.0,
+            color: [0.8, 0.8, 0.8, 1.0],
+            ..Material::default()
+        },
+    }];
+    let ball = Contact::Sphere {
+        centre: [0.0, 0.0, 0.35],
+        radius: 0.2,
+    };
+    let far = Contact::Sphere {
+        centre: [0.0, 0.0, -10.0],
+        radius: 0.1,
+    };
+    let drag = [0.02, 0.0, 0.0];
+    let none = [u16::MAX; 4];
+    // the ball alone, pressing and dragging: what the 21 must draw
+    let mut alone = scene.clone();
+    alone.contacts = vec![ball];
+    alone.contact_drags = vec![drag];
+    // the 21: the ball at slot 4, an `:only` (joint 0) at 17 and 20, a `:within` at 19
+    let mut many = scene.clone();
+    many.contacts = (0..21).map(|slot| if slot == 4 { ball } else { far }).collect();
+    many.contact_drags = (0..21)
+        .map(|slot| if slot == 4 { drag } else { [0.0; 3] })
+        .collect();
+    many.contact_onlys = (0..21)
+        .map(|slot| {
+            if slot == 17 || slot == 20 {
+                [0, u16::MAX, u16::MAX, u16::MAX]
+            } else {
+                none
+            }
+        })
+        .collect();
+    many.contact_withins = (0..21)
+        .map(|slot| if slot == 19 { [1.0, 0.0, 0.0, 0.0] } else { [0.0; 4] })
+        .collect();
+    let plain = scene.clone();
+    let meshes = |handle: u32| (handle == 1).then(|| slab.clone());
+    let (_, _, cpu_alone) = rasterize(&alone, &meshes, &|_| None);
+    let (_, _, cpu_many) = rasterize(&many, &meshes, &|_| None);
+    let (_, _, cpu_plain) = rasterize(&plain, &meshes, &|_| None);
+    let apart = |a: &[u8], a_stride: usize, b: &[u8], b_stride: usize| -> usize {
+        a.chunks(a_stride)
+            .zip(b.chunks(b_stride))
+            .filter(|(x, y)| x[0].abs_diff(y[0]) > 24)
+            .count()
+    };
+    // (red summed over the picture, as the ball's test measures a dent: a dent shades many pixels
+    // a little)
+    let difference = |a: &[u8], a_stride: usize, b: &[u8], b_stride: usize| -> u64 {
+        a.chunks(a_stride)
+            .zip(b.chunks(b_stride))
+            .map(|(x, y)| u64::from(x[0].abs_diff(y[0])))
+            .sum()
+    };
+    let pixels = (side * side) as usize;
+    let dent = difference(&cpu_alone, 4, &cpu_plain, 4);
+    let many_from_alone = difference(&cpu_many, 4, &cpu_alone, 4);
+    eprintln!("CPU: the ball's dent {dent}; the 21 from the ball alone {many_from_alone}");
+    assert!(dent > 500, "the ball alone dents the slab on the CPU painter ({dent})");
+    assert_eq!(
+        many_from_alone, 0,
+        "the CPU painter: the 21 contacts draw as the ball alone: slot 4 pressed and dragged past slot 16's :only and :within"
+    );
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &slab);
+        let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+        renderer.set_bg(Some([0, 0, 0]));
+        gpu.paint(&[Op::Scene(Arc::new(many.clone()))], &mut renderer)
+            .expect("an offscreen frame is never skipped");
+        let gpu_many = gpu.read_pixels();
+        let from_cpu = apart(&gpu_many, 3, &cpu_many, 4);
+        let dented = difference(&gpu_many, 3, &cpu_plain, 4);
+        eprintln!(
+            "{name}: 21 contacts: {from_cpu} pixels apart from the CPU's of {pixels}, dented {dented} from the unpressed slab"
+        );
+        if from_cpu > pixels / 50 || dented <= 500 {
+            failures.push(format!(
+                "{name}: 21 contacts: {from_cpu} pixels apart from the CPU, dented {dented} from unpressed"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// ADR-812: a slab skinned to one joint, its left half bone (softness 0) and its right half soft
 /// (1), drawn `:loose` toward a lagging palette 10 cm above its own at amount 0.5: its right half
 /// is drawn 5 cm up and its left where it was, alike on both painters; without `:loose` (or at
