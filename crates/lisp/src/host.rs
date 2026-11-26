@@ -10,6 +10,7 @@ pub(crate) mod dial; // dialling a TCP peer by name with the resolve and the con
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file_watch; // file change notification as process messages (ADR-782); wasm has none
 pub mod gui; // optional windowed display backend (feature "gui") — ADR-046 frontend #2
+pub mod hair; // a hair lock's sub-steps, natively: b3d-hair's step for every lock in one call (ADR-821)
 #[cfg(feature = "native-kernels")]
 pub mod native;
 #[cfg(not(target_arch = "wasm32"))]

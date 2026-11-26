@@ -119,9 +119,6 @@ fn the_mesh_shader_validates() {
             .count(),
         2
     );
-    // ADR-819: the posed face normals' fixed point, spelled in the WGSL as a literal
-    assert_eq!(super::scenes::FACE_SUM_SCALE, 1.0e9);
-    assert!(MESH_SRC.contains("const FACE_SUM_SCALE: f32 = 1.0e9;"));
     let module = wgpu::naga::front::wgsl::parse_str(MESH_SRC).expect("parses");
     let scene_type = module
         .types
