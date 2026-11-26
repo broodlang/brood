@@ -886,6 +886,75 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
+// a pressed mesh's normals from its posed surface (ADR-819): its triangles, each vertex's welded
+// point, each point's face normal at rest, and the frame's face normals summed by point
+@group(3) @binding(17) var<storage, read> mesh_triangles: array<u32>;
+@group(3) @binding(18) var<storage, read> mesh_welds: array<u32>;
+@group(3) @binding(19) var<storage, read> mesh_rest_faces: array<vec4<f32>>;
+@group(3) @binding(20) var<storage, read_write> face_sums: array<atomic<i32>>;
+// `scenes::FACE_SUM_SCALE`: a face normal's length (twice its area, m²) in the sums' fixed point
+const FACE_SUM_SCALE: f32 = 1.0e9;
+
+// `v` turned as `start` turns onto `end` (the shortest turn: a normal's own twist does not matter)
+fn turned_as(v: vec3<f32>, start: vec3<f32>, end: vec3<f32>) -> vec3<f32> {
+    let axis = cross(start, end);
+    let sine = length(axis);
+    let cosine = dot(start, end);
+    if (sine < 1e-6) {
+        return v;
+    }
+    let k = axis / sine;
+    return v * cosine + cross(k, v) * sine + k * dot(k, v) * (1.0 - cosine);
+}
+
+// pass C (ADR-819): each posed triangle's face normal, as long as twice its area, added to each
+// of its corners' points
+@compute @workgroup_size(64)
+fn cs_contact_faces(@builtin(global_invocation_id) id: vec3<u32>) {
+    let first = id.x * 3u;
+    if (first + 2u >= arrayLength(&mesh_triangles)) {
+        return;
+    }
+    let corners = vec3<u32>(mesh_triangles[first], mesh_triangles[first + 1u], mesh_triangles[first + 2u]);
+    let a = posed_out[(draw.deform.y + corners.x) * 3u].xyz;
+    let b = posed_out[(draw.deform.y + corners.y) * 3u].xyz;
+    let c = posed_out[(draw.deform.y + corners.z) * 3u].xyz;
+    let face = cross(b - a, c - a) * FACE_SUM_SCALE;
+    let whole = vec3<i32>(i32(round(face.x)), i32(round(face.y)), i32(round(face.z)));
+    for (var corner = 0u; corner < 3u; corner = corner + 1u) {
+        let point = mesh_welds[corners[corner]] * 3u;
+        atomicAdd(&face_sums[point], whole.x);
+        atomicAdd(&face_sums[point + 1u], whole.y);
+        atomicAdd(&face_sums[point + 2u], whole.z);
+    }
+}
+
+// pass D (ADR-819): each vertex's normal set by how its posed surface has changed from rest: the
+// normal its bones (and keys) carry, plus its point's posed face normal less the rest one turned
+// as its normal was. At rest, or moved rigidly, that difference is nothing and the normal is as
+// made; where the skin bends hard over a coarse mesh (a squat, an arm raised), the light follows
+// the surface instead of lying in flat patches
+@compute @workgroup_size(64)
+fn cs_contact_normals(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= draw.deform.w) {
+        return;
+    }
+    let at = (draw.deform.y + id.x) * 3u;
+    let carried = posed_out[at + 1u].xyz;
+    let made = safe_normalize(vertex_at(id.x).normal);
+    let point = mesh_welds[id.x] * 3u;
+    let posed_face = safe_normalize(vec3<f32>(
+        f32(atomicLoad(&face_sums[point])),
+        f32(atomicLoad(&face_sums[point + 1u])),
+        f32(atomicLoad(&face_sums[point + 2u]))));
+    let rest_face = turned_as(mesh_rest_faces[mesh_welds[id.x]].xyz, made, carried);
+    let normal = safe_normalize(carried + posed_face - rest_face);
+    let tangent = posed_out[at + 2u];
+    let square = safe_normalize(tangent.xyz - normal * dot(normal, tangent.xyz));
+    posed_out[at + 1u] = vec4<f32>(normal, 0.0);
+    posed_out[at + 2u] = vec4<f32>(square, tangent.w);
+}
+
 // pass B: each posed vertex pressed (`mesh::deform_by_contacts`), its tangent kept square to its
 // new normal
 @compute @workgroup_size(64)
