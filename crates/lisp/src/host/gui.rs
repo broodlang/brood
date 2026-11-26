@@ -1539,6 +1539,10 @@ pub enum TextureFilter {
     Nearest,
     Smooth,
     Coverage,
+    /// Numbers, not a picture (ADR-817: wrinkle maps and zone masks): sampled bilinear at its own
+    /// size, every channel raw, its alpha a fourth number like the others, never premultiplied
+    /// (a mask's zone in red must survive an alpha of 0).
+    Data,
 }
 
 #[cfg(not(feature = "gui"))]
@@ -1560,6 +1564,11 @@ pub(crate) mod effects; // lighting, post-processing and particles, shared by bo
 // because `Op` carries a scene whether or not a painter is compiled in
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub mod mesh;
+
+// each skinned vertex's centre of rotation, worked out once from the rest pose and the weights
+// (ADR-814): what skinning that blends rotations turns the vertex about
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub mod centres;
 
 // the GPU's own time on a frame's scenes, empty where nothing measures it (ADR-801)
 pub mod scene_gpu_times;

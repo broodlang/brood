@@ -47,6 +47,8 @@ wasm_unsupported_builtins!(
     gui_texture,
     gui_texture_free,
     gui_mesh,
+    gui_skin_centres,
+    gui_posed_positions,
     gui_mesh_free,
     gui_input,
     gui_sound,

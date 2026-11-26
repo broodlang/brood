@@ -681,7 +681,7 @@ struct DrawU {
     model: mat4x4<f32>,
     color: vec4<f32>,
     skin: vec4<f32>,            // a `:skin` surface: its curvature (1 / mesh units) to 1 / mm, times `:scatter`; the `:coat`'s strength, its roughness
-    material: vec4<f32>,        // roughness, specular, spare, cutoff
+    material: vec4<f32>,        // roughness, specular, a `:fibres` surface's `:density`, cutoff
     lobes: vec4<f32>,           // roughness times a, times b, mix of a, F0
     flags: vec4<u32>,           // surface, texture bits (`scenes::texture_bits`), palette offset, skinned
     morph_info: vec4<u32>,      // morphed (0 or 1), vertex count, palette joint count, first offset
@@ -696,6 +696,10 @@ struct DrawU {
     eye_iris: vec4<f32>,        // the iris's radius in the texture, the pupil's share of the iris, the slope of the bowl the iris is lit as
     sheen: vec4<f32>,           // a hair surface's second highlight's colour (`:sheen`), w 1 when given (ADR-799)
     deform: vec4<u32>,          // pressed by the scene's contacts (ADR-805), its first posed vertex, whether it has a softness, its vertex count
+    loose: vec4<f32>,           // its flesh lagging its bones (ADR-812): the amount (0 none), its lagging palette's offset, its joint count
+    clamp_info: vec4<f32>,      // x: how many `:clamp-planes` its strands keep to (ADR-813); y: the UV set its `:wrinkles` read by (ADR-817)
+    clamps: array<vec4<f32>, 4>,  // each plane: its unit normal toward the strands' side, `normal · point`
+    wrinkles: array<vec4<f32>, 2>,  // a skin's eight wrinkle zones' weights (ADR-817; zero: none)
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
@@ -721,9 +725,9 @@ struct DrawU {
 
 struct ContactList {
     count: vec4<u32>,
-    // five vec4 a contact: `[x y z kind]`, `[x y z w]`, its drag, its own limb's joints, its one limb's
+    // six vec4 a contact: `[x y z kind]`, `[x y z w]`, its drag, its own limb's joints, its one limb's, its `:within`
     // (`scenes::contact_words`)
-    shapes: array<vec4<f32>, 320>,
+    shapes: array<vec4<f32>, 384>,
 };
 @group(3) @binding(8) var<storage, read> mesh_vertices: array<f32>;
 @group(3) @binding(9) var<uniform> contact_list: ContactList;
@@ -740,6 +744,10 @@ const EDGE_SPREAD: f32 = 0.5;
 const FIRM_INSET: f32 = 0.25;
 const FIRM_SOFTNESS: f32 = 0.5;
 const MAX_SQUASH: f32 = 0.02;
+// `mesh::SCATTER_LIFT`: how far off the skin (in its own metres, times `:scatter`: `skin.x` is
+// `:scatter` over 1000) the light under it near the terminator looks up its
+// light's shadow (ADR-815)
+const SCATTER_LIFT: f32 = 0.008;
 
 // `mesh::smooth_outside`: `distance`'s smooth maximum with 0 over `band`
 fn smooth_outside(distance: f32, band: f32) -> f32 {
@@ -750,8 +758,8 @@ fn smooth_outside(distance: f32, band: f32) -> f32 {
 // `mesh::Contact::signed_distance`: how far `point` lies outside contact `slot` (negative inside),
 // in w, and the unit direction out of it there, in xyz
 fn contact_distance(slot: u32, point: vec3<f32>) -> vec4<f32> {
-    let first = contact_list.shapes[slot * 5u];
-    let second = contact_list.shapes[slot * 5u + 1u];
+    let first = contact_list.shapes[slot * 6u];
+    let second = contact_list.shapes[slot * 6u + 1u];
     let kind = u32(first.w + 0.5);
     if (kind == 0u) {
         return vec4<f32>(first.xyz, dot(first.xyz, point) - second.x);
@@ -779,8 +787,8 @@ fn contact_distance(slot: u32, point: vec3<f32>) -> vec4<f32> {
 // `:skip` joints passing a half
 fn contact_skipped(slot: u32, input: VertexIn) -> bool {
     // its own limb (`:skip`), or not the one limb it presses (`:only`, its first joint -1: any)
-    let skip = contact_list.shapes[slot * 5u + 3u];
-    let only = contact_list.shapes[slot * 5u + 4u];
+    let skip = contact_list.shapes[slot * 6u + 3u];
+    let only = contact_list.shapes[slot * 6u + 4u];
     var own = 0.0;
     var one = 0.0;
     for (var at = 0u; at < 4u; at = at + 1u) {
@@ -795,9 +803,20 @@ fn contact_skipped(slot: u32, input: VertexIn) -> bool {
     return own > 0.5 || (only.x >= 0.0 && one <= 0.5);
 }
 
-// a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 21 a vertex)
+// `mesh::within_weight`: how much contact `slot` acts at `point`, on its `:within` side only,
+// eased in over `WITHIN_BAND` (ADR-816); everywhere when it has none (all zero)
+const WITHIN_BAND: f32 = 0.02;
+fn contact_within(slot: u32, point: vec3<f32>) -> f32 {
+    let within = contact_list.shapes[slot * 6u + 5u];
+    if (dot(within.xyz, within.xyz) <= 1e-12) {
+        return 1.0;
+    }
+    return smoothstep(0.0, WITHIN_BAND, dot(within.xyz, point) - within.w);
+}
+
+// a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 26 a vertex)
 fn vertex_at(index: u32) -> VertexIn {
-    let at = index * 21u;
+    let at = index * 26u;
     var input: VertexIn;
     input.index = index;
     input.position = vec3<f32>(mesh_vertices[at], mesh_vertices[at + 1u], mesh_vertices[at + 2u]);
@@ -807,6 +826,8 @@ fn vertex_at(index: u32) -> VertexIn {
     input.joints = vec4<u32>(bitcast<u32>(mesh_vertices[at + 12u]), bitcast<u32>(mesh_vertices[at + 13u]), bitcast<u32>(mesh_vertices[at + 14u]), bitcast<u32>(mesh_vertices[at + 15u]));
     input.weights = vec4<f32>(mesh_vertices[at + 16u], mesh_vertices[at + 17u], mesh_vertices[at + 18u], mesh_vertices[at + 19u]);
     input.curvature = mesh_vertices[at + 20u];
+    input.centre = vec3<f32>(mesh_vertices[at + 21u], mesh_vertices[at + 22u], mesh_vertices[at + 23u]);
+    input.uv2 = vec2<f32>(mesh_vertices[at + 24u], mesh_vertices[at + 25u]);
     return input;
 }
 
@@ -818,6 +839,16 @@ fn contact_softness(index: u32) -> f32 {
     return 1.0;
 }
 
+// `mesh::skin_matrix` over the draw's lagging palette (ADR-812): where `position` would be were
+// its bones where the game's followers carry them; `world` itself when none of them moves it
+fn loose_world(input: VertexIn, position: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+    let skin = skinning(input, u32(draw.loose.y + 0.5), u32(draw.loose.z + 0.5));
+    if (skin[3].w == 0.0) {
+        return world;
+    }
+    return ((draw.model * skin) * vec4<f32>(position, 1.0)).xyz;
+}
+
 // pass A: each pressed vertex posed (into the scene's posed buffer) and each contact's deepest
 // press into it kept (a positive float's bits order as the float does)
 @compute @workgroup_size(64)
@@ -827,7 +858,14 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let input = vertex_at(id.x);
     let posed = pose(input);
-    let world = (posed.matrix * vec4<f32>(posed.position, 1.0)).xyz;
+    var world = (posed.matrix * vec4<f32>(posed.position, 1.0)).xyz;
+    // its soft flesh toward where its bones' followers carry it (`mesh::pose_vertices`, ADR-812)
+    if (draw.loose.x > 0.0) {
+        let share = clamp(contact_softness(id.x) * draw.loose.x, 0.0, 1.0);
+        if (share > 0.0) {
+            world = world + (loose_world(input, posed.position, world) - world) * share;
+        }
+    }
     let normal = safe_normalize((posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz);
     let tangent = safe_normalize((posed.matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz);
     let at = (draw.deform.y + id.x) * 3u;
@@ -842,7 +880,8 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let distance = contact_distance(slot, world).w;
         if (distance < 0.0 && !contact_skipped(slot, input)) {
-            atomicMax(&contact_depths[slot], bitcast<u32>(-distance));
+            // (as far as it acts there: its `:within` side, ADR-816)
+            atomicMax(&contact_depths[slot], bitcast<u32>(-distance * contact_within(slot, world)));
         }
     }
 }
@@ -871,6 +910,11 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         // (as far as skin can be squashed, never a raw depth: `mesh::deform_by_contacts`)
         let depth = min(bitcast<f32>(atomicLoad(&contact_depths[slot])), MAX_SQUASH);
         let measured = contact_distance(slot, point);
+        // (how much it acts here: on its `:within` side only, `mesh::within_weight`, ADR-816)
+        let weight = contact_within(slot, point);
+        if (weight <= 0.0) {
+            continue;
+        }
         let out = measured.xyz;
         let distance = measured.w;
         // (`mesh::deform_by_contacts`: the patch's edge eased over a band, a firm part sunk a
@@ -879,7 +923,7 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         let eased = smooth_outside(distance, band);
         let into = 1.0 - smoothstep(-band, band, distance);
         let inset = FIRM_INSET * depth * clamp(1.0 - softness / FIRM_SOFTNESS, 0.0, 1.0) * into;
-        let moved = min(eased - distance - inset, MAX_SQUASH * softness);
+        let moved = min(eased - distance - inset, MAX_SQUASH * softness) * weight;
         var lift = 0.0;
         var slope = 0.0;
         if (depth > 0.0 && distance > 0.0) {
@@ -888,8 +932,8 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
             if (reach < 3.0) {
                 let crest = RING_LIFT * softness * depth;
                 let fall = exp(0.5 - reach * reach) * 1.41421356;
-                lift = crest * reach * fall;
-                slope = crest / width * fall * (1.0 - 2.0 * reach * reach);
+                lift = crest * reach * fall * weight;
+                slope = crest / width * fall * (1.0 - 2.0 * reach * reach) * weight;
             }
         }
         let sideways = out - normal * dot(out, normal);
@@ -897,9 +941,9 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         // (its `:drag`: wholly inside the patch, less through its edge and ring)
         let reach = (RING_WIDTH + RING_SPREAD * depth) * (0.5 + softness);
         let outside = max(distance, 0.0) / reach;
-        let held = into + (1.0 - into) * exp(-outside * outside);
-        point = point + contact_list.shapes[slot * 5u + 2u].xyz * held;
-        let turned = safe_normalize(normal + (-out - normal) * into);
+        let held = (into + (1.0 - into) * exp(-outside * outside)) * weight;
+        point = point + contact_list.shapes[slot * 6u + 2u].xyz * held;
+        let turned = safe_normalize(normal + (-out - normal) * into * weight);
         if (dot(sideways, sideways) > 1e-8) {
             normal = safe_normalize(turned - safe_normalize(sideways) * slope);
         } else {
@@ -917,6 +961,21 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
 // a material's `:detail` tile (ADR-797): a tangent-space normal's x and y in red and green
 // about DETAIL_FLAT, the cavity in blue; a flat, open texel where the material has none
 @group(3) @binding(4) var detail_texture: texture_2d<f32>;
+// a skin's expression wrinkles (ADR-817): the compress and stretch maps and the zones' two masks
+@group(3) @binding(13) var wrinkle_compress: texture_2d<f32>;
+@group(3) @binding(14) var wrinkle_stretch: texture_2d<f32>;
+@group(3) @binding(15) var wrinkle_mask_first: texture_2d<f32>;
+@group(3) @binding(16) var wrinkle_mask_second: texture_2d<f32>;
+
+// `mesh::wrinkle_tilt`: each zone's mask times its weight, summed apart for the compress map
+// (weights above 0) and the stretch map (below), times each map's tilt
+fn wrinkle_tilt(compress: vec4<f32>, stretch: vec4<f32>, first: vec4<f32>, second: vec4<f32>) -> vec2<f32> {
+    let low = draw.wrinkles[0];
+    let high = draw.wrinkles[1];
+    let pushed = dot(first, max(low, vec4<f32>(0.0))) + dot(second, max(high, vec4<f32>(0.0)));
+    let drawn = dot(first, max(-low, vec4<f32>(0.0))) + dot(second, max(-high, vec4<f32>(0.0)));
+    return detail_tilt(compress) * pushed + detail_tilt(stretch) * drawn;
+}
 
 struct VertexIn {
     @builtin(vertex_index) index: u32,
@@ -927,6 +986,10 @@ struct VertexIn {
     @location(4) joints: vec4<u32>,
     @location(5) weights: vec4<f32>,
     @location(6) curvature: f32,
+    // its centre of rotation (ADR-814): what it turns about when its draw's `flags.w` is 2
+    @location(7) centre: vec3<f32>,
+    // its second UV set (ADR-817)
+    @location(8) uv2: vec2<f32>,
 };
 struct VertexOut {
     // invariant: the hair's depth pass and its front pass must put a sample at the same depth
@@ -942,6 +1005,13 @@ struct VertexOut {
     @location(5) eye_centre: vec4<f32>,
     @location(6) eye_axis: vec3<f32>,
     @location(7) eye_up: vec3<f32>,
+    // a `:fibres` strand (ADR-813): its real width and its drawn width, in pixels, for its coverage
+    @location(8) strand_px: vec2<f32>,
+    // a `:fibres` strand's baked self-shadow (ADR-813): the hairs crossed toward L are max(0, x + yzw·L),
+    // yzw turned into the world
+    @location(9) visibility: vec4<f32>,
+    // its second UV set (`mesh::Mesh::uvs2`, ADR-817): what `:wrinkles {:uv 1}` reads by
+    @location(10) uv2: vec2<f32>,
 };
 
 // a vertex morphed, and the matrix that skins and places it
@@ -950,6 +1020,60 @@ struct Posed {
     position: vec3<f32>,
     normal: vec3<f32>,
 };
+
+// `mesh::skin_matrix`: vertex `input`'s skinning matrix from the palette at `start` with
+// `joint_count` joints, w 0 in its last column when no joint of the palette moves it. Its
+// joints' matrices blended; or, for a draw whose vertices turn about their centres (`flags.w`
+// 2, ADR-814) and a vertex on two joints or more, its joints' rotations blended (their
+// quaternions, sign-aligned with the heaviest's, at `start + joint_count + joint`, then
+// normalised) and their stretches, the vertex turned about its centre and that centre put where
+// the blended matrices put it
+fn skinning(input: VertexIn, start: u32, joint_count: u32) -> mat4x4<f32> {
+    var skin = mat4x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
+    var moving = 0u;
+    var heaviest = 0u;
+    var most = 0.0;
+    for (var slot = 0u; slot < 4u; slot = slot + 1u) {
+        let joint = input.joints[slot];
+        let weight = input.weights[slot];
+        if (weight > 0.0 && joint < joint_count) {
+            skin = skin + palette[start + joint] * weight;
+            moving = moving + 1u;
+            if (weight > most) {
+                most = weight;
+                heaviest = joint;
+            }
+        }
+    }
+    if (draw.flags.w != 2u || moving < 2u) {
+        return skin;
+    }
+    let reference = palette[start + joint_count + heaviest][0];
+    var quaternion = vec4<f32>(0.0);
+    var stretch = mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    for (var slot = 0u; slot < 4u; slot = slot + 1u) {
+        let joint = input.joints[slot];
+        let weight = input.weights[slot];
+        if (weight > 0.0 && joint < joint_count) {
+            let entry = palette[start + joint_count + joint];
+            let q = entry[0];
+            quaternion = quaternion + q * select(weight, -weight, dot(q, reference) < 0.0);
+            stretch = stretch + mat3x3<f32>(entry[1].xyz, entry[2].xyz, entry[3].xyz) * weight;
+        }
+    }
+    let length = sqrt(dot(quaternion, quaternion));
+    if (length < 1e-8) {
+        return skin;
+    }
+    let q = quaternion / length;
+    let rotation = mat3x3<f32>(
+        vec3<f32>(1.0 - 2.0 * (q.y * q.y + q.z * q.z), 2.0 * (q.x * q.y + q.z * q.w), 2.0 * (q.x * q.z - q.y * q.w)),
+        vec3<f32>(2.0 * (q.x * q.y - q.z * q.w), 1.0 - 2.0 * (q.x * q.x + q.z * q.z), 2.0 * (q.y * q.z + q.x * q.w)),
+        vec3<f32>(2.0 * (q.x * q.z + q.y * q.w), 2.0 * (q.y * q.z - q.x * q.w), 1.0 - 2.0 * (q.x * q.x + q.y * q.y)));
+    let turned = rotation * stretch;
+    let centre = (skin * vec4<f32>(input.centre, 1.0)).xyz - turned * input.centre;
+    return mat4x4<f32>(vec4<f32>(turned[0], 0.0), vec4<f32>(turned[1], 0.0), vec4<f32>(turned[2], 0.0), vec4<f32>(centre, 1.0));
+}
 
 fn pose(input: VertexIn) -> Posed {
     var position = input.position;
@@ -960,22 +1084,11 @@ fn pose(input: VertexIn) -> Posed {
         normal = normal + morphs[at + 1u].xyz;
     }
     var matrix = draw.model;
-    if (draw.flags.w == 1u) {
+    if (draw.flags.w != 0u) {
         // as `skin_matrix` skins: a joint past the palette's end is skipped, and a vertex no
         // joint of the palette moves stays rigid
-        let start = draw.flags.z;
-        let joint_count = draw.morph_info.z;
-        var skin = mat4x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
-        var moved = false;
-        for (var slot = 0u; slot < 4u; slot = slot + 1u) {
-            let joint = input.joints[slot];
-            let weight = input.weights[slot];
-            if (weight > 0.0 && joint < joint_count) {
-                skin = skin + palette[start + joint] * weight;
-                moved = true;
-            }
-        }
-        if (moved) {
+        let skin = skinning(input, draw.flags.z, draw.morph_info.z);
+        if (skin[3].w != 0.0) {
             matrix = draw.model * skin;
         }
     }
@@ -992,6 +1105,7 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
         pressed.clip = scene.view_proj * vec4<f32>(pressed.world, 1.0);
         pressed.normal = posed_vertices[at + 1u].xyz;
         pressed.uv = input.uv;
+        pressed.uv2 = input.uv2;
         pressed.tangent = posed_vertices[at + 2u];
         pressed.curvature = input.curvature;
         pressed.eye_centre = vec4<f32>(0.0);
@@ -1006,11 +1120,14 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
     out.world = world.xyz;
     out.normal = (posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz;
     out.uv = input.uv;
+    out.uv2 = input.uv2;
     out.tangent = vec4<f32>((posed.matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz, input.tangent.w);
     out.curvature = input.curvature;
     out.eye_centre = vec4<f32>(0.0);
     out.eye_axis = vec3<f32>(0.0);
     out.eye_up = vec3<f32>(0.0);
+    out.strand_px = vec2<f32>(0.0);
+    out.visibility = vec4<f32>(0.0);
     if (draw.flags.x == 6u && draw.eye_centres[0].w > 0.0) {
         // `mesh::eye_frame`: the eye whose centre at rest is nearest, moved as this vertex is
         var index = 0u;
@@ -1026,12 +1143,16 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
     if (draw.flags.x == 5u) {
         // a ribbon turned to face the camera: its tangent the strand's direction (the mesh's
         // normal), its fourth the coverage
-        let direction = safe_normalize(out.normal);
-        let ribbon = strand_vertex(world.xyz, direction, input.uv, draw.strand.xy);
+        let clamped = clamped_strand(world.xyz, safe_normalize(out.normal));
+        let direction = clamped.direction;
+        let ribbon = strand_vertex(clamped.centre, direction, input.uv, draw.strand.xy);
         out.clip = scene.view_proj * vec4<f32>(ribbon.world, 1.0);
         out.world = ribbon.world;
         out.normal = ribbon.normal;
         out.tangent = vec4<f32>(direction, ribbon.coverage);
+        out.strand_px = ribbon.pixels;
+        // (its tangent slot carries its baked self-shadow, ADR-813: a strand's direction is its normal)
+        out.visibility = vec4<f32>(input.tangent.x, (posed.matrix * vec4<f32>(input.tangent.yzw, 0.0)).xyz);
     }
     return out;
 }
@@ -1043,6 +1164,9 @@ override SAMPLES: u32 = 4u;
 // a trial of what hair costs (`BROOD_GUI_HAIR_TRIAL`): 0 drawn as ever, 1 its coverage
 // alone (lit by nothing: its base colour), 2 with no hair-on-hair shadow
 override HAIR_TRIAL: u32 = 0u;
+// a `:fibres` fragment's strand value and baked self-shadow, set by `mesh_lit` for `shade`
+var<private> fibre_strand: f32 = 0.0;
+var<private> fibre_visibility: vec4<f32> = vec4<f32>(0.0);
 
 // a `:hair` surface's coverage step at `sample`, as `mesh::HAIR_COVERAGE_STEPS` holds them:
 // eight, (k + 0.5) / 8 in an order that spreads them; with four samples the four of them that
@@ -1065,10 +1189,45 @@ struct StrandVertex {
     world: vec3<f32>,
     normal: vec3<f32>,
     coverage: f32,
+    // its real width and its drawn width in pixels (a `:fibres` strand reads them, ADR-813)
+    pixels: vec2<f32>,
 };
 
 // `mesh::strand_vertex`: a strand's point on its ribbon's side `uv.x`, the ribbon `widths`
 // (root, tip; `uv.y` 1 at the root) wide but never under a pixel, turned to face the camera
+const CLAMP_BAND: f32 = 0.008;
+const CLAMP_HOLD: f32 = 0.0005;
+
+struct ClampedStrand {
+    centre: vec3<f32>,
+    direction: vec3<f32>,
+};
+
+// `mesh::clamped_strand`: a strand's point and direction laid against the draw's `:clamp-planes`
+// (ADR-813), eased within `CLAMP_BAND` of each plane to no nearer than `CLAMP_HOLD`
+fn clamped_strand(centre_given: vec3<f32>, direction_given: vec3<f32>) -> ClampedStrand {
+    var centre = centre_given;
+    var direction = direction_given;
+    let reach = CLAMP_BAND - CLAMP_HOLD;
+    let count = min(u32(draw.clamp_info.x + 0.5), 4u);
+    for (var index = 0u; index < count; index = index + 1u) {
+        let plane = draw.clamps[index];
+        let distance = dot(plane.xyz, centre) - plane.w;
+        if (distance < CLAMP_BAND) {
+            let slope = exp((distance - CLAMP_BAND) / reach);
+            let eased = CLAMP_HOLD + reach * slope;
+            let across = dot(direction, plane.xyz);
+            centre = centre + plane.xyz * (eased - distance);
+            let bent = direction + plane.xyz * (slope - 1.0) * across;
+            // (straight into the plane: nothing left along it, so it keeps its own direction)
+            if (dot(bent, bent) >= 1e-8) {
+                direction = normalize(bent);
+            }
+        }
+    }
+    return ClampedStrand(centre, direction);
+}
+
 fn strand_vertex(centre: vec3<f32>, direction: vec3<f32>, uv: vec2<f32>, widths: vec2<f32>) -> StrandVertex {
     let view = safe_normalize(scene.eye.xyz - centre);
     // seen end-on it narrows, never under `mesh::STRAND_END_ON` of its width
@@ -1087,7 +1246,12 @@ fn strand_vertex(centre: vec3<f32>, direction: vec3<f32>, uv: vec2<f32>, widths:
             pixel = 0.01 / pixels;
         }
     }
-    let drawn = max(width, pixel);
+    var drawn = max(width, pixel);
+    // a `:fibres` strand (ADR-813) is drawn at its real width and 0.7 of a pixel more each side: room for
+    // its exact coverage, worked out in the fragment stage
+    if ((draw.flags.y & 512u) != 0u) {
+        drawn = width + 1.4 * pixel;
+    }
     var coverage = 0.0;
     if (drawn > 0.0) {
         coverage = clamp(width / drawn, 0.0, 1.0);
@@ -1097,6 +1261,7 @@ fn strand_vertex(centre: vec3<f32>, direction: vec3<f32>, uv: vec2<f32>, widths:
     out.world = centre + across * (drawn * 0.5 * side);
     out.normal = safe_normalize(across * side + facing);
     out.coverage = coverage;
+    out.pixels = vec2<f32>(width / max(pixel, 1e-12), drawn / max(pixel, 1e-12));
     return out;
 }
 
@@ -1739,7 +1904,17 @@ struct EyeSeen {
     curvature: f32,
     iris_normal: vec3<f32>,
     axis: vec3<f32>,
+    // what its colour is multiplied by for the limbal ring (`mesh::limbus_shade`): 1 away from it
+    limbus: f32,
 };
+
+// `mesh::limbus_shade`: the limbal ring's shade at `rim` iris radii from the axis (ADR-796); its
+// strength and width ride in `eye_iris.w` and `eye_axes[1].w`
+fn limbus_shade(rim: f32) -> f32 {
+    let width = max(draw.eye_axes[1].w, 1e-3);
+    let off = (rim - 1.0) / width;
+    return 1.0 - draw.eye_iris.w * exp(-off * off);
+}
 
 // `mesh::eye_seen` (ADR-796): the line through the fragment met with the cornea's sphere on the
 // viewer's side, bent there (Snell), followed to the iris's plane; the texture read at that
@@ -1755,6 +1930,7 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
     seen.iris_normal = normal;
     seen.axis = vec3<f32>(0.0);
     seen.curvature = curvature;
+    seen.limbus = 1.0;
     let scale = sqrt(dot(frame_axis, frame_axis));
     if (scale <= 1e-12) {
         return seen;
@@ -1766,6 +1942,13 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
     let iris_radius = draw.eye_shape.y * scale;
     let cornea_radius = draw.eye_shape.z * scale;
     let ball_radius = draw.eye_shape.x * scale;
+    // the white's share of the limbal ring: by its distance from the axis, on the eye's front
+    let from_centre = world - centre.xyz;
+    let height = dot(from_centre, axis);
+    if (height > 0.0) {
+        let off_axis = from_centre - axis * height;
+        seen.limbus = limbus_shade(sqrt(dot(off_axis, off_axis)) / max(iris_radius, 1e-9));
+    }
     let limbus_height = sqrt(max(ball_radius * ball_radius - iris_radius * iris_radius, 0.0));
     let cornea_height = limbus_height - sqrt(max(cornea_radius * cornea_radius - iris_radius * iris_radius, 0.0));
     let iris_height = cornea_height + cornea_radius - draw.eye_shape.w * scale;
@@ -1816,6 +1999,7 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
     }
     seen.through = true;
     seen.uv = iris_uv + vec2<f32>(across, -above) * draw.eye_iris.x;
+    seen.limbus = limbus_shade(rim);
     // the cornea's normal, giving way to the ball's toward the limbus (ADR-804)
     seen.normal = safe_normalize(ball + (cornea_normal - ball) * cornea);
     seen.cornea = cornea;
@@ -1827,6 +2011,84 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
     return seen;
 }
 
+
+// ADR-813: hair lit as Karis 2016 does it (UE4's `HairShading`): Marschner's three paths
+// made cheap. R, the white shine off the cuticle, shifted toward the root; TT, light through the
+// fibre, tinted by its colour (lights her outline from behind); TRT, the second, coloured shine;
+// and Karis's stand-in for light scattered through many fibres, a wrapped Lambert about a normal
+// facing the viewer, tinted deeper the more it was shadowed. `tangent` the strand's direction,
+// `seen` how much of the light its shadow lets through. Brood's lights put no 1/π on diffuse,
+// so the whole is π times UE's.
+// one hair fibre's transmittance, crossed once through its middle (two radii), from its colour:
+// the absorption Chiang & Bitterli 2016 ("A practical and controllable hair and fur model") give
+// for a hair of that albedo at its roughness β, σa = (ln A / (5.969 − 0.215β + 2.532β² − 10.73β³
+// + 5.574β⁴ + 0.245β⁵))², so a light hair passes much and a dark one little, each its own hue
+fn fibre_transmittance(colour: vec3<f32>) -> vec3<f32> {
+    let b = clamp(draw.material.x, 0.0, 1.0);
+    let b2 = b * b;
+    let denominator = 5.969 - 0.215 * b + 2.532 * b2 - 10.73 * b2 * b + 5.574 * b2 * b2 + 0.245 * b2 * b2 * b;
+    let ratio = log(clamp(colour, vec3<f32>(1e-4), vec3<f32>(1.0))) / denominator;
+    return exp(-2.0 * ratio * ratio);
+}
+
+fn hair_gaussian(width: f32, angle: f32) -> f32 {
+    return exp(-0.5 * angle * angle / (width * width)) / (2.50662827 * width);
+}
+
+// Schlick at hair's index, 1.55
+fn hair_fresnel(cosine: f32) -> f32 {
+    return 0.0465 + 0.9535 * pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
+}
+
+// `known`: 1 when the light has a shadow map (what lies between it and the strand is known), 0
+// when not: then it lights the strand only by what faces it (R, TRT, the scatter toward the
+// viewer), never THROUGH it, since nothing says her head is not in the way (39, 2026-11-26: a
+// shadowless fill behind her head lit the back of her hair near white through it)
+fn karis_hair(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: vec3<f32>, seen: f32, known: f32) -> vec3<f32> {
+    let roughness = clamp(draw.material.x, 1.0 / 255.0, 1.0);
+    // each strand a little rougher or smoother than the next (`_STRAND`, ADR-813)
+    let width = roughness * roughness * (0.85 + 0.3 * fract(fibre_strand * 7.13));
+    let sin_light = clamp(dot(tangent, to_light), -1.0, 1.0);
+    let sin_view = clamp(dot(tangent, view), -1.0, 1.0);
+    let cos_difference = cos(0.5 * abs(asin(sin_view) - asin(sin_light)));
+    let light_across = to_light - sin_light * tangent;
+    let view_across = view - sin_view * tangent;
+    let cos_phi = dot(light_across, view_across)
+        * inverseSqrt(dot(light_across, light_across) * dot(view_across, view_across) + 1e-4);
+    let cos_half_phi = sqrt(clamp(0.5 + 0.5 * cos_phi, 0.0, 1.0));
+    // the cuticle's tilt (2°) and the index the fibre's cross-section shows (Karis's fit)
+    // (each strand's own, ±1°: `_STRAND`)
+    let tilt = 0.035 + (fract(fibre_strand) - 0.5) * 0.035;
+    let index = 1.19 / cos_difference + 0.36 * cos_difference;
+    let colour = max(base, vec3<f32>(1e-4));
+    let along = sin_light + sin_view;
+    // R
+    let shift = 2.0 * sin(-2.0 * tilt)
+        * (cos(-2.0 * tilt) * cos_half_phi * sqrt(max(1.0 - sin_view * sin_view, 0.0)) + sin(-2.0 * tilt) * sin_view);
+    let reflected = hair_gaussian(width * 1.41421356 * max(cos_half_phi, 1e-3), along - shift)
+        * 0.25 * cos_half_phi
+        * hair_fresnel(sqrt(clamp(0.5 + 0.5 * dot(view, to_light), 0.0, 1.0)));
+    // TT
+    let inverse = 1.0 / index;
+    let entry = cos_half_phi * (1.0 + inverse * (0.6 - 0.8 * cos_phi));
+    let entering = hair_fresnel(cos_difference * sqrt(clamp(1.0 - entry * entry, 0.0, 1.0)));
+    let through = pow(colour, vec3<f32>(0.5 * sqrt(max(1.0 - entry * entry * inverse * inverse, 0.0)) / cos_difference));
+    let transmitted = hair_gaussian(width * 0.5, along - tilt)
+        * exp(-3.65 * cos_phi - 3.98) * (1.0 - entering) * (1.0 - entering) * through * known;
+    // TRT
+    let inside = hair_fresnel(cos_difference * 0.5);
+    let twice = pow(colour, vec3<f32>(0.8 / cos_difference));
+    let second = hair_gaussian(width * 2.0, along - 4.0 * tilt)
+        * exp(17.0 * cos_phi - 16.78) * (1.0 - inside) * (1.0 - inside) * inside * twice;
+    // light scattered through many fibres
+    let facing = safe_normalize(view - tangent * sin_view);
+    let wrapped = clamp((dot(facing, to_light) + 1.0) * 0.25, 0.0, 1.0);
+    let scatter = 0.31830989 * mix(wrapped, 1.0 - abs(sin_light), 0.33 * known);
+    let luminance = max(dot(colour, vec3<f32>(0.2126, 0.7152, 0.0722)), 1e-4);
+    let tint = pow(colour / luminance, vec3<f32>(1.0 - clamp(seen, 0.0, 1.0)));
+    let shine = vec3<f32>(reflected * draw.material.y * 2.0) + transmitted + second;
+    return 3.14159265 * (shine + sqrt(colour) * scatter * tint);
+}
 // (`diffuse_normal` is what the light falls on and `mirror_surface` the surface a reflection must
 // not go under: `normal` and `surface_normal` but for an `:eye` under its cornea, ADR-796)
 fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>, curvature: f32, specular_kept: f32, diffuse_normal: vec3<f32>, mirror_surface: vec3<f32>, under_cornea: vec4<f32>) -> vec3<f32> {
@@ -1885,6 +2147,22 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         }
         let mirror_lambert = max(dot(normal, to_light), 0.0);
         let half_vector = safe_normalize(to_light + view);
+        // a `:fibres` strand (ADR-813): Karis's three paths and his scattered light, all of it
+        // under the hair's own shadow
+        if ((draw.flags.y & 512u) != 0u) {
+            // its baked self-shadow where it has one (ADR-813): the hairs crossed toward this light, each
+            // passing some of it as ITS OWN colour lets it through (`fibre_transmittance`) and scattering
+            // a little away; the shadow maps' estimate otherwise. (A fixed ginger fibre once tinted
+            // every hair colour the same orange by the lamp and from behind: 39, 2026-11-26)
+            var through = vec3<f32>(seen);
+            if (dot(fibre_visibility, fibre_visibility) > 0.0) {
+                let crossed = draw.material.z * max(0.0, fibre_visibility.x + dot(fibre_visibility.yzw, to_light));
+                through = pow(fibre_transmittance(base), vec3<f32>(crossed)) * exp(-0.03 * crossed);
+            }
+            let shadowed = dot(through, vec3<f32>(0.2126, 0.7152, 0.0722));
+            out = out + light.color.rgb * arriving * through * karis_hair(base, strand, view, to_light, shadowed, select(0.0, 1.0, light.shadow.z > 0u));
+            continue;
+        }
         if (draw.flags.x == 4u || draw.flags.x == 5u) {
             // the two highlights' shifts (`:shift`, ADR-799) and the second one's colour
             // (`:sheen`, else the hair's own)
@@ -1914,10 +2192,16 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             }
         }
         var diffuse = vec3<f32>(lambert * seen);
-        if (draw.flags.x == 0u) {
-            // the CPU's: the light under the skin in place of Lambert's, the shadow fading out
-            // of what the scattering moved toward the terminator
-            let scattered_seen = mix(1.0, seen, smoothstep(0.0, 0.3, facing));
+        if (draw.flags.x == 0u || (draw.flags.x == 6u && under_cornea.w == 0.0)) {
+            // the CPU's: the light under the skin in place of Lambert's; toward the terminator
+            // what the scattering moved takes the light's shadow looked up just off the skin
+            // (`mesh::SCATTER_LIFT`), clear of the body's own shadow there but not of a hand's or
+            // an arm's (ADR-815: unshadowed, the red wrap shone in a cast shadow)
+            var lifted = seen;
+            if (light.shadow.z > 0u && facing < 0.3) {
+                lifted = shadow_visibility(light, world + surface_normal * (SCATTER_LIFT * 1000.0 * draw.skin.x), surface_normal, arrival.to_light, turn);
+            }
+            let scattered_seen = mix(lifted, seen, smoothstep(0.0, 0.3, facing));
             let scattered = skin_diffuse(facing, curvature * draw.skin.x);
             diffuse = diffuse + (scattered - vec3<f32>(lambert)) * scattered_seen;
         }
@@ -2051,6 +2335,15 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
 // the hair's front pass (`fs_hair_front`) keeps the early depth test (ADR-802)
 fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: vec4<f32>, occlusion_texel: vec4<f32>, detail_texel: vec4<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>, alpha: f32) -> vec4<f32> {
     var base = srgb_to_linear(texel.rgb) * draw.color.rgb;
+    // a `:fibres` strand (ADR-813): its own lightness (`_STRAND`, ±20 %), darker toward its root, and
+    // its value and baked self-shadow handed to the light loop
+    let fibres = (draw.flags.y & 512u) != 0u;
+    if (fibres) {
+        fibre_strand = fragment.curvature;
+        fibre_visibility = fragment.visibility;
+        let root = clamp(fragment.uv.y, 0.0, 1.0);
+        base = base * (0.8 + 0.4 * fract(fibre_strand)) * mix(1.0, 0.75, root * root);
+    }
     var normal = safe_normalize(fragment.normal);
     if (!front) {
         normal = -normal;
@@ -2068,6 +2361,21 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
         let tilt = detail_tilt(detail_texel);
         if (tilt.x != 0.0 || tilt.y != 0.0) {
             local = detail_normal(local, tilt, draw.detail.z);
+            framed = true;
+        }
+    }
+    // her expression's wrinkles (ADR-817, the CPU's `fill_triangle`): the compress and stretch
+    // maps' tilts by the zones' masks and weights, laid over the rest
+    if ((draw.flags.y & 1024u) != 0u) {
+        // (read at their own size, `:data`, by the UV set they name: `clamp_info.y` 1 the second)
+        let at = select(fragment.uv, fragment.uv2, draw.clamp_info.y > 0.5);
+        let tilt = wrinkle_tilt(
+            textureSampleLevel(wrinkle_compress, texture_sampler, at, 0.0),
+            textureSampleLevel(wrinkle_stretch, texture_sampler, at, 0.0),
+            textureSampleLevel(wrinkle_mask_first, texture_sampler, at, 0.0),
+            textureSampleLevel(wrinkle_mask_second, texture_sampler, at, 0.0));
+        if (tilt.x != 0.0 || tilt.y != 0.0) {
+            local = detail_normal(local, tilt, 1.0);
             framed = true;
         }
     }
@@ -2095,7 +2403,7 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
         if (seen.through) {
             let under = straight(textureSampleGrad(base_texture, texture_sampler, seen.uv, uv_dx, uv_dy), (draw.flags.y & 2u) != 0u);
             let under_texel = select(vec4<f32>(1.0), under, (draw.flags.y & 1u) != 0u);
-            base = srgb_to_linear(under_texel.rgb) * draw.color.rgb * (1.0 - seen.pupil);
+            base = srgb_to_linear(under_texel.rgb) * draw.color.rgb * (1.0 - seen.pupil) * seen.limbus;
             normal = seen.normal;
             mirror_surface = seen.normal;
             diffuse_normal = seen.iris_normal;
@@ -2106,11 +2414,14 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
             // (ADR-804)
             normal = seen.normal;
             mirror_surface = seen.normal;
+            // (and the limbal ring's edge over the white beside the iris)
+            base = base * seen.limbus;
         }
     }
     // the ambient's occlusion: its map's, times the scene's screen-space ambient occlusion
     let occlusion = select(1.0, occlusion_texel.r, (draw.flags.y & 16u) != 0u)
-        * ambient_occlusion(fragment.world, surface_normal);
+        * ambient_occlusion(fragment.world, surface_normal)
+        * select(1.0, exp(-0.05 * max(fibre_visibility.x, 0.0)), fibres);
     // a soft shadow's taps turned by the pixel's noise, the CPU painter's at the same pixel
     let turn = 6.28318531 * pixel_noise(floor(fragment.clip.xy));
     // a hair's strand: the bitangent, as its UV v runs
@@ -2157,6 +2468,56 @@ fn fs_hair_front(fragment: VertexOut, @builtin(front_facing) front: bool) -> @lo
     return mesh_lit(fragment, front, texel, normal_texel, occlusion_texel, detail_texel, uv_dx, uv_dy, 1.0);
 }
 
+// ADR-813 (`fibres.rs`): a `:fibres` strand's three nearest depths a pixel, each kept as
+// 0xFFFFFFFF − its bits, so the nearest is the largest and a cleared slot (0) is empty
+@group(0) @binding(6) var<storage, read_write> fibre_layers: array<atomic<u32>>;
+
+// how much of its pixel a `:fibres` fragment covers: a pixel-wide box against the strand's real
+// width, from the fragment's distance off the strand's middle (in pixels), times its colour's alpha
+fn fibre_coverage(fragment: VertexOut) -> f32 {
+    let off = fragment.uv.x * fragment.strand_px.y;
+    let half = 0.5 * fragment.strand_px.x;
+    let covered = clamp(min(off + 0.5, half) - max(off - 0.5, -half), 0.0, 1.0);
+    return covered * draw.color.a;
+}
+
+// the fibres' layer pass: the fragment's depth among its pixel's three nearest, and its
+// coverage multiplied out of the pixel's transmittance
+@fragment
+fn fs_fibre_layers(fragment: VertexOut) -> @location(0) vec4<f32> {
+    let coverage = fibre_coverage(fragment);
+    if (coverage < 0.002) {
+        return vec4<f32>(1.0);
+    }
+    let pixel = vec2<u32>(floor(fragment.clip.xy));
+    let base = (pixel.y * u32(scene.picture.x) + pixel.x) * 3u;
+    var kept = 0xFFFFFFFFu - bitcast<u32>(fragment.clip.z);
+    for (var slot = 0u; slot < 3u; slot = slot + 1u) {
+        let before = atomicMax(&fibre_layers[base + slot], kept);
+        if (before == 0u) {
+            break;
+        }
+        kept = min(kept, before);
+    }
+    return vec4<f32>(1.0 - coverage);
+}
+
+// the fibres' front pass: shaded only at or before the pixel's third nearest depth (the depth
+// test, early: no `discard` here), their colour and coverage added up
+@fragment
+fn fs_fibre_front(fragment: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let base_texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
+    let normal_texel = straight(textureSample(normal_texture, texture_sampler, fragment.uv), (draw.flags.y & 8u) != 0u);
+    let occlusion_texel = straight(textureSample(occlusion_texture, texture_sampler, fragment.uv), (draw.flags.y & 32u) != 0u);
+    let detail_texel = straight(textureSample(detail_texture, texture_sampler, fragment.uv * draw.detail.xy), (draw.flags.y & 128u) != 0u);
+    let texel = select(vec4<f32>(1.0), base_texel, (draw.flags.y & 1u) != 0u);
+    let uv_dx = dpdx(fragment.uv);
+    let uv_dy = dpdy(fragment.uv);
+    let coverage = fibre_coverage(fragment);
+    let lit = mesh_lit(fragment, front, texel, normal_texel, occlusion_texel, detail_texel, uv_dx, uv_dy, 1.0);
+    return vec4<f32>(lit.rgb * coverage, coverage);
+}
+
 struct ShadowOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -2176,8 +2537,8 @@ fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> Shado
     var world = (posed.matrix * vec4<f32>(posed.position, 1.0)).xyz;
     if (draw.flags.x == 5u) {
         // the ribbon as the camera sees it, as the CPU painter's posed vertices are
-        let direction = safe_normalize((posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz);
-        world = strand_vertex(world, direction, input.uv, draw.strand.xy).world;
+        let clamped = clamped_strand(world, safe_normalize((posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz));
+        world = strand_vertex(clamped.centre, clamped.direction, input.uv, draw.strand.xy).world;
     }
     out.clip = scene.shadows[view_index].view_proj * vec4<f32>(world, 1.0);
     out.uv = input.uv;

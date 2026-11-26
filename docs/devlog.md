@@ -3041,3 +3041,38 @@ SLOWER (~5.5 µs) — the deopt had been dropping the whole walk onto the VM, wh
 calls were cheap; native code paid a crossing a step. Guard: `jit_get_vector_test` (arms stay
 native, zero deopts; sabotaged red in both contract modes). Run: `make test` 2711/2711, the
 touched files both ways, `nest check` and `--strict`, clippy on CI's flags.
+2026-11-26. **A contact's ring sized by what skin can squash, `:only`; soft flesh lagging its
+bones, `:loose` (ADR-805, ADR-812).** womanblend's wall crouch swelled her thighs: one part driven
+deep through the floor sized the floor's ring; the ring now goes by the press capped at
+`MAX_SQUASH`. `:only [j …]` presses one limb's skin alone (a plane between her thighs). A draw's
+`:loose {:palette j :amount a}` draws its soft skin toward a palette of damped followers the game
+keeps (b3d-loose), by softness: no renderer state, alike on both painters. Run: the GPU/CPU
+contact and scene tests (154/154), the new parity test on both adapters.
+
+2026-11-26. **Hair at its real width: `:fibres` (ADR-813).** womanblend's chosen E1 hair into main:
+exact coverage at a strand's real width (ShortCut, the nearest three a pixel lit), Karis 2016's
+lobes varied strand by strand (`:strand`), a baked self-shadow (`:visibility`, `:density`), light
+through hair only from a light whose shadow map knows what is in the way (the shadowless fill lit
+the back of her hair white through her head), and `:clamp-planes` laying strands on glass. The
+trial's env knobs became the material's `:density`. Run: the GUI suites, the fibre and clamp
+parity tests on both adapters.
+
+2026-11-26. **Skinning that blends rotations (ADR-814).** Le & Hodgins 2016's optimized centres of
+rotation: `host::gui::centres` (walked over the surface's points, so seams do not crack),
+`gui/skin-centres`, a mesh's `:centres`, both painters blending quaternions and stretches about
+each vertex's centre, `gui/posed-positions` for probes. On womanblend: arms-up armpit squeezed
+92% → 67%, collarbones 37% → 20%, the mat squat's bottom 40% → 29%.
+
+2026-11-26. **Skin wrap light and cast shadows (ADR-815); contacts `:within` (ADR-816); hair fibres
+tinted by their own colour (ADR-813 amended).** The light under the skin near the terminator takes a
+cast shadow looked up just off the skin; a contact can act on one side of a plane only (womanblend's
+knee meeting behind the knee, not over the kneecap); `:fibres`' self-shadow tints by each fibre's
+transmittance from its colour, so hair colours no longer all read orange by a lamp. Run: the GUI
+suites (164), parity of `:within` on both adapters.
+
+2026-11-26. **An eye's limbal ring and scattering white (ADR-796); expression wrinkles and `:data`
+textures (ADR-817).** The limbus a soft ring at the iris's edge on both sides, `:limbus [0.45 0.1]`
+by default; the white lit by the skin model's scattering. A skin's `:wrinkles` lays two normal maps
+by eight zones' masks and weights; textures that are numbers upload `:data` (raw, never
+premultiplied). Both painters alike to the pixel (the wrinkle test: 139 against 211 on the CPU and
+both adapters).

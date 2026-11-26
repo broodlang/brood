@@ -336,7 +336,8 @@ impl CpuTexture {
                 h,
                 Some(crate::host::gui::mesh::COVERAGE_CUTOFF),
             ),
-            TextureFilter::Nearest => Vec::new(),
+            // (data is read at its own size: no mip chain, ADR-817)
+            TextureFilter::Nearest | TextureFilter::Data => Vec::new(),
         };
         CpuTexture {
             w,

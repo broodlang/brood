@@ -377,10 +377,11 @@ fn texture_filter(heap: &Heap, given: Value) -> Result<crate::host::gui::Texture
         Value::Keyword(name) if value::symbol_name_ref(name) == "coverage" => {
             Ok(TextureFilter::Coverage)
         }
+        Value::Keyword(name) if value::symbol_name_ref(name) == "data" => Ok(TextureFilter::Data),
         other => Err(LispError::wrong_type(
             heap,
             "%gui-texture",
-            "a filter, :nearest, :smooth or :coverage",
+            "a filter, :nearest, :smooth, :coverage or :data",
             other,
         )),
     }
@@ -1508,7 +1509,8 @@ fn emitter_spec(
 /// [r g b a]` (0 … 1, transparent by default), `:ambient-occlusion {:radius m :strength s}`
 /// (or `true`: folds and corners darken the ambient light — off by default), `:palettes`
 /// (joint matrices, 16 numbers each: a vector of numbers or f32 bytes per skeleton) and `:draws [{:mesh h :model [16] :palette i
-/// :morphs [[target weight] …] :material {…}} …]`. Colours and light are linear. A key of the
+/// :morphs [[target weight] …] :material {…} :loose {:palette j :amount a}} …]` (`:loose`: a `:deform`
+/// draw's soft skin drawn toward palette j by its softness × a, ADR-812). Colours and light are linear. A key of the
 /// wrong shape keeps its default and a draw without a mesh handle is dropped — except the
 /// lights, `:ambient-sh`, and a material's `:cast-shadow`, `:lobes`, `:scatter` and `:detail`
 /// keys (ADR-797) and its `:eye` (ADR-796), where a mistake would light the scene wrongly
@@ -1522,8 +1524,8 @@ fn scene_spec(
     num: &dyn Fn(Value) -> f32,
 ) -> Result<Option<crate::host::gui::mesh::Scene>, String> {
     use crate::host::gui::mesh::{
-        AmbientOcclusion, DEFAULT_OCCLUSION_RADIUS, Draw, MAX_DETAIL_SCALE, MAX_DETAIL_STRENGTH,
-        MAX_EMITTERS, MAX_SCATTER, Material, SPECULAR_TO_F0, Scene, Surface,
+        AmbientOcclusion, DEFAULT_OCCLUSION_RADIUS, Draw, Loose, MAX_DETAIL_SCALE,
+        MAX_DETAIL_STRENGTH, MAX_EMITTERS, MAX_SCATTER, Material, SPECULAR_TO_F0, Scene, Surface,
     };
     let Value::Map(map) = spec else {
         return Ok(None);
@@ -1617,10 +1619,11 @@ fn scene_spec(
                 "cutout" => Surface::Cutout,
                 "blend" => Surface::Blend,
                 "hair" => Surface::Hair,
-                "strands" => Surface::Strands,
+                "strands" | "fibres" => Surface::Strands,
                 "eye" => Surface::Eye,
                 _ => Surface::Standard,
             };
+            material.fibres = value::symbol_name_ref(surface) == "fibres";
         }
         material.base = handle("base");
         material.normal = handle("normal");
@@ -1633,6 +1636,58 @@ fn scene_spec(
             Some(given) => {
                 return Err(format!(
                     "a material's :detail is a texture handle (a whole number, 0 or more), not {}",
+                    crate::syntax::printer::print(heap, given)
+                ));
+            }
+        };
+        // a skin's expression wrinkles (ADR-817): `{:compress h :stretch h :masks [h h] :weights
+        // [8 numbers from -1 to 1]}`, refused whole when any part is wrong
+        material.wrinkles = match get(material_map, "wrinkles") {
+            None | Some(Value::Nil) => None,
+            Some(Value::Map(wrinkles)) => {
+                let texture = |key: &str| match get(wrinkles, key) {
+                    Some(Value::Int(given)) => u32::try_from(given).ok(),
+                    _ => None,
+                };
+                let masks: Option<Vec<u32>> = match get(wrinkles, "masks") {
+                    Some(Value::Vector(masks_id)) if heap.vector(masks_id).len() == 2 => heap
+                        .vector(masks_id)
+                        .iter()
+                        .map(|item| match item {
+                            Value::Int(given) => u32::try_from(*given).ok(),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => None,
+                };
+                let weights = numbers(get(wrinkles, "weights"), 8)
+                    .filter(|weights| weights.iter().all(|weight| (-1.0..=1.0).contains(weight)));
+                let uv = match get(wrinkles, "uv") {
+                    None | Some(Value::Nil) => Some(0u32),
+                    Some(Value::Int(set @ (0 | 1))) => Some(set as u32),
+                    _ => None,
+                };
+                match (texture("compress"), texture("stretch"), masks, weights, uv) {
+                    (Some(compress), Some(stretch), Some(masks), Some(weights), Some(uv)) => {
+                        Some(crate::host::gui::mesh::Wrinkles {
+                            compress,
+                            stretch,
+                            masks: [masks[0], masks[1]],
+                            weights: std::array::from_fn(|zone| weights[zone]),
+                            uv,
+                        })
+                    }
+                    _ => {
+                        return Err(format!(
+                            "a material's :wrinkles is {{:compress h :stretch h :masks [h h] :weights [8 numbers from -1 to 1] :uv 0 or 1}} (texture handles; :uv the UV set, 0 by default), not {}",
+                            crate::syntax::printer::print(heap, Value::Map(wrinkles))
+                        ));
+                    }
+                }
+            }
+            Some(given) => {
+                return Err(format!(
+                    "a material's :wrinkles is a map {{:compress :stretch :masks :weights}}, not {}",
                     crate::syntax::printer::print(heap, given)
                 ));
             }
@@ -1758,6 +1813,77 @@ fn scene_spec(
             matches!(get(material_map, "double-sided"), Some(Value::Bool(true)));
         // its skin pressed by the scene's `:contacts` (ADR-805)
         material.deform = matches!(get(material_map, "deform"), Some(Value::Bool(true)));
+        // a `:fibres` surface's `:density`: how much of its baked hair count dims its light (a
+        // number from 0; 0.4 without it); refused when not, as a wrong one would light hair
+        // wrongly without a word
+        material.fibre_density = match get(material_map, "density") {
+            None => 0.4,
+            Some(item) if is_number(item) && num(item).is_finite() && num(item) >= 0.0 => num(item),
+            Some(other) => {
+                return Err(format!(
+                    "a material's :density is a number from 0, not {}",
+                    crate::syntax::printer::print(heap, other)
+                ));
+            }
+        };
+        // planes its strands never pass (ADR-813): `[[px py pz nx ny nz] …]`, a point on
+        // each and its normal toward the side the strands keep to; refused when malformed, so
+        // hair is never left passing glass without a word
+        material.clamp_planes = match get(material_map, "clamp-planes") {
+            None => Vec::new(),
+            Some(Value::Vector(planes_id)) => {
+                let planes = heap.vector(planes_id).to_vec();
+                if planes.len() > crate::host::gui::mesh::MAX_CLAMP_PLANES {
+                    return Err(format!(
+                        "a material's :clamp-planes holds at most {} planes",
+                        crate::host::gui::mesh::MAX_CLAMP_PLANES
+                    ));
+                }
+                let mut read = Vec::with_capacity(planes.len());
+                for plane in planes {
+                    let numbers: Vec<f32> = match plane {
+                        Value::Vector(plane_id) => heap
+                            .vector(plane_id)
+                            .iter()
+                            .filter(|item| is_number(**item))
+                            .map(|item| num(*item))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    let length = numbers.get(3..6).map_or(0.0, |normal| {
+                        (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2])
+                            .sqrt()
+                    });
+                    if numbers.len() != 6
+                        || numbers.iter().any(|number| !number.is_finite())
+                        || length < 1e-6
+                    {
+                        return Err(format!(
+                            "a material's :clamp-planes are each [px py pz nx ny nz], a point and a normal, not {}",
+                            crate::syntax::printer::print(heap, plane)
+                        ));
+                    }
+                    let normal = [
+                        numbers[3] / length,
+                        numbers[4] / length,
+                        numbers[5] / length,
+                    ];
+                    read.push([
+                        normal[0],
+                        normal[1],
+                        normal[2],
+                        normal[0] * numbers[0] + normal[1] * numbers[1] + normal[2] * numbers[2],
+                    ]);
+                }
+                read
+            }
+            Some(other) => {
+                return Err(format!(
+                    "a material's :clamp-planes is a vector of [px py pz nx ny nz], not {}",
+                    crate::syntax::printer::print(heap, other)
+                ));
+            }
+        };
         material.cast_shadow = match get(material_map, "cast-shadow") {
             None | Some(Value::Bool(true)) => true,
             Some(Value::Bool(false)) => false,
@@ -1820,7 +1946,25 @@ fn scene_spec(
                     _ => Vec::new(),
                 };
                 morphs.sort_by(|left, right| right.1.abs().total_cmp(&left.1.abs()));
+                // `:loose {:palette i :amount a}`: its soft flesh lagging its bones (ADR-812)
+                let loose = match get(*draw_map, "loose") {
+                    Some(Value::Map(settings)) => {
+                        match (get(settings, "palette"), get(settings, "amount")) {
+                            (Some(Value::Int(index)), Some(amount))
+                                if is_number(amount) && num(amount).is_finite() =>
+                            {
+                                usize::try_from(index).ok().map(|palette| Loose {
+                                    palette,
+                                    amount: num(amount).max(0.0),
+                                })
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
                 Some(Ok(Draw {
+                    loose,
                     mesh,
                     model: matrix(get(*draw_map, "model")).unwrap_or([
                         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
@@ -1899,6 +2043,8 @@ fn scene_spec(
     let mut contact_skips = Vec::new();
     // and the one limb whose skin alone each presses (`:only [j …]`, up to four)
     let mut contact_onlys = Vec::new();
+    // and the side of a plane each acts on (`:within [px py pz nx ny nz]`, ADR-816), or everywhere
+    let mut contact_withins = Vec::new();
     if let Some(given) = get(map, "contacts") {
         let Value::Vector(list) = given else {
             return Err(":contacts is a vector of contact maps".into());
@@ -1938,6 +2084,22 @@ fn scene_spec(
                 }
             }
             contact_onlys.push(only);
+            contact_withins.push(match numbers(get(contact, "within"), 6) {
+                None => [0.0; 4],
+                Some(within) => {
+                    let length = (within[3] * within[3] + within[4] * within[4] + within[5] * within[5]).sqrt();
+                    if length < 1e-6 {
+                        return Err("a contact's :within is [px py pz nx ny nz], a point on the plane and its normal toward the side it acts on".into());
+                    }
+                    let normal = [within[3] / length, within[4] / length, within[5] / length];
+                    [
+                        normal[0],
+                        normal[1],
+                        normal[2],
+                        normal[0] * within[0] + normal[1] * within[1] + normal[2] * within[2],
+                    ]
+                }
+            });
             use crate::host::gui::mesh::Contact;
             let contact = if let Some(plane) = numbers(get(contact, "plane"), 4) {
                 let length =
@@ -1987,6 +2149,7 @@ fn scene_spec(
         contact_drags,
         contact_skips,
         contact_onlys,
+        contact_withins,
     }))
 }
 
@@ -2385,6 +2548,29 @@ fn eye_spec(
             ));
         }
     };
+    // `:limbus [strength width]`: the dark ring where iris meets white (strength 0 … 1, width in
+    // iris radii, above 0 and at most 1), or the defaults
+    let (limbus, limbus_width) = match heap.map_get(map, value::kw("limbus")) {
+        None | Some(Value::Nil) => (
+            crate::host::gui::mesh::DEFAULT_LIMBUS,
+            crate::host::gui::mesh::DEFAULT_LIMBUS_WIDTH,
+        ),
+        Some(Value::Vector(pair_id))
+            if heap.vector(pair_id).len() == 2
+                && heap.vector(pair_id).iter().all(|item| is_number(*item))
+                && (0.0..=1.0).contains(&num(heap.vector(pair_id)[0]))
+                && num(heap.vector(pair_id)[1]) > 0.0
+                && num(heap.vector(pair_id)[1]) <= 1.0 =>
+        {
+            (num(heap.vector(pair_id)[0]), num(heap.vector(pair_id)[1]))
+        }
+        Some(given) => {
+            return Err(format!(
+                "an :eye's :limbus is [strength width], how dark the ring where iris meets white is (0 … 1) and how wide (iris radii, above 0 and at most 1), not {}",
+                print(given)
+            ));
+        }
+    };
     Ok(Some(Eye {
         eyes,
         up,
@@ -2396,6 +2582,8 @@ fn eye_spec(
         iris_uv_radius,
         pupil,
         concavity,
+        limbus,
+        limbus_width,
     }))
 }
 
@@ -2848,6 +3036,7 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         positions: mesh_bytes(heap, map, "positions")?,
         normals: mesh_bytes(heap, map, "normals")?,
         uvs: mesh_bytes(heap, map, "uvs")?,
+        uvs2: mesh_bytes(heap, map, "uvs2")?,
         tangents: mesh_bytes(heap, map, "tangents")?,
         joints: mesh_bytes(heap, map, "joints")?,
         joints_wide,
@@ -2856,6 +3045,9 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         indices_wide,
         morphs: Vec::new(),
         softness: mesh_bytes(heap, map, "softness")?,
+        strand: mesh_bytes(heap, map, "strand")?,
+        visibility: mesh_bytes(heap, map, "visibility")?,
+        centres: mesh_bytes(heap, map, "centres")?,
     };
     if let Some(Value::Vector(morphs)) = heap.map_get(map, value::kw("morphs")) {
         let targets = heap.vector(morphs).to_vec();
@@ -2877,6 +3069,131 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         .map_err(|why| LispError::runtime(format!("%gui-mesh: {why}")))?;
     crate::host::gui::mesh(id, handle, std::sync::Arc::new(mesh)).map_err(LispError::runtime)?;
     Ok(Value::nil())
+}
+
+/// `(%gui-skin-centres spec)` — each vertex's centre of rotation for skinning that blends
+/// rotations (ADR-814, `host::gui::centres`), from a `%gui-mesh` spec's `:positions`,
+/// `:indices`, `:joints` and `:weights` at rest: little-endian f32 bytes, three a vertex, the
+/// spec's `:centres`. Worked out on every core; a game caches it beside its model.
+pub(in crate::builtins) fn gui_skin_centres(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let Value::Map(map) = arg(args, 0) else {
+        return Err(LispError::wrong_type(
+            heap,
+            "%gui-skin-centres",
+            "a mesh spec map",
+            arg(args, 0),
+        ));
+    };
+    let keyword_is = |heap: &Heap, key: &str, wanted: &str| matches!(heap.map_get(map, value::kw(key)), Some(Value::Keyword(found)) if value::symbol_name_ref(found) == wanted);
+    let parts = crate::host::gui::mesh::MeshParts {
+        positions: mesh_bytes(heap, map, "positions")?,
+        joints: mesh_bytes(heap, map, "joints")?,
+        joints_wide: keyword_is(heap, "joint-type", "u16"),
+        weights: mesh_bytes(heap, map, "weights")?,
+        indices: mesh_bytes(heap, map, "indices")?,
+        indices_wide: keyword_is(heap, "index-type", "u32"),
+        ..crate::host::gui::mesh::MeshParts::default()
+    };
+    let mesh = crate::host::gui::mesh::Mesh::from_parts(parts)
+        .map_err(|why| LispError::runtime(format!("%gui-skin-centres: {why}")))?;
+    let workers = std::thread::available_parallelism().map_or(1, |count| count.get());
+    let found = crate::host::gui::centres::centres(
+        &mesh.positions,
+        &mesh.indices,
+        &mesh.joints,
+        &mesh.weights,
+        workers,
+    );
+    let bytes: Vec<u8> = found
+        .iter()
+        .flat_map(|centre| centre.iter().flat_map(|value| value.to_le_bytes()))
+        .collect();
+    Ok(heap.alloc_bytes(crate::core::blob::SharedBlob::new(&bytes)))
+}
+
+/// `(%gui-posed-positions spec palette)` — the vertices of the mesh `spec` describes (as
+/// `%gui-mesh` takes it; its `:centres` if given) posed by `palette` (16 numbers a joint, a vector
+/// or f32 bytes) exactly as the CPU painter skins them (`mesh::skin_matrix`, ADR-814), no morphs:
+/// little-endian f32 bytes, three a vertex. For probes that measure skinning; nothing is drawn.
+pub(in crate::builtins) fn gui_posed_positions(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let Value::Map(map) = arg(args, 0) else {
+        return Err(LispError::wrong_type(
+            heap,
+            "%gui-posed-positions",
+            "a mesh spec map",
+            arg(args, 0),
+        ));
+    };
+    let palette: Vec<f32> = match arg(args, 1) {
+        Value::Vector(numbers_id) => heap
+            .vector(numbers_id)
+            .iter()
+            .map(|item| match item {
+                Value::Int(n) => *n as f32,
+                Value::Float(f) => *f as f32,
+                _ => 0.0,
+            })
+            .collect(),
+        Value::Bytes(bytes_id) => heap
+            .bytes(bytes_id)
+            .as_bytes()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| f32::from_le_bytes(*word))
+            .collect(),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%gui-posed-positions",
+                "a palette (a vector of numbers or f32 bytes)",
+                other,
+            ));
+        }
+    };
+    let palette = &palette[..palette.len() / 16 * 16];
+    let keyword_is = |heap: &Heap, key: &str, wanted: &str| matches!(heap.map_get(map, value::kw(key)), Some(Value::Keyword(found)) if value::symbol_name_ref(found) == wanted);
+    let parts = crate::host::gui::mesh::MeshParts {
+        positions: mesh_bytes(heap, map, "positions")?,
+        joints: mesh_bytes(heap, map, "joints")?,
+        joints_wide: keyword_is(heap, "joint-type", "u16"),
+        weights: mesh_bytes(heap, map, "weights")?,
+        indices: mesh_bytes(heap, map, "indices")?,
+        indices_wide: keyword_is(heap, "index-type", "u32"),
+        centres: mesh_bytes(heap, map, "centres")?,
+        ..crate::host::gui::mesh::MeshParts::default()
+    };
+    let mesh = crate::host::gui::mesh::Mesh::from_parts(parts)
+        .map_err(|why| LispError::runtime(format!("%gui-posed-positions: {why}")))?;
+    let rotations =
+        (!mesh.centres.is_empty()).then(|| crate::host::gui::mesh::joint_rotations(palette));
+    let mut bytes = Vec::with_capacity(mesh.positions.len() * 12);
+    for (index, position) in mesh.positions.iter().enumerate() {
+        let posed = match crate::host::gui::mesh::skin_matrix(
+            &mesh,
+            Some(palette),
+            rotations.as_ref(),
+            index,
+        ) {
+            Some(skin) => {
+                let moved = crate::host::gui::mesh::transform(&skin, *position, 1.0);
+                [moved[0], moved[1], moved[2]]
+            }
+            None => *position,
+        };
+        for value in posed {
+            bytes.extend(value.to_le_bytes());
+        }
+    }
+    Ok(heap.alloc_bytes(crate::core::blob::SharedBlob::new(&bytes)))
 }
 
 /// `(%gui-mesh-free id handle)` — forget mesh `handle` of window `id`.
@@ -3948,6 +4265,39 @@ mod gui_scene_light_tests {
         assert_eq!(within.lights.len(), 2);
         let error = scene_with("[]", "{:cast-shadow :no}").expect_err("cast-shadow");
         assert!(error.contains(":cast-shadow is true or false"), "{error}");
+    }
+
+    /// ADR-813: a hair material's `:density` and `:clamp-planes` are read (each plane as its unit
+    /// normal and `normal · point`), and a wrong one is refused, never drawn wrongly in silence.
+    #[test]
+    fn a_hair_materials_density_and_clamp_planes_are_read_or_refused() {
+        let scene = scene_with(
+            "[]",
+            "{:surface :fibres :density 0.7 :clamp-planes [[3.2 1.0 1.894 0 0 -2]]}",
+        )
+        .expect("reads");
+        let material = &scene.draws[0].material;
+        assert!(material.fibres);
+        assert!((material.fibre_density - 0.7).abs() < 1e-6);
+        assert_eq!(material.clamp_planes.len(), 1);
+        let plane = material.clamp_planes[0];
+        assert!(
+            (plane[2] + 1.0).abs() < 1e-6 && (plane[3] + 1.894).abs() < 1e-5,
+            "{plane:?}"
+        );
+        assert!(
+            (scene_with("[]", "{:surface :fibres}").expect("reads").draws[0]
+                .material
+                .fibre_density
+                - 0.4)
+                .abs()
+                < 1e-6
+        );
+        let error = scene_with("[]", "{:surface :fibres :density -1}").expect_err("density");
+        assert!(error.contains(":density is a number from 0"), "{error}");
+        let error = scene_with("[]", "{:surface :fibres :clamp-planes [[0 0 0 0 0 0]]}")
+            .expect_err("no normal");
+        assert!(error.contains(":clamp-planes are each"), "{error}");
     }
 
     #[test]

@@ -689,16 +689,16 @@ afterwards wins. Needs --features gui. Returns nil.
       tex)))
 
 (defn texture-filter (opts)
-  "The sampling filter a texture options map asks for — `:smooth`, `:coverage` (smooth, its mip levels keeping as many texels above half alpha as at full size, for hair strands and other alpha-tested textures seen small) or `:nearest`, the default when `:filter` is absent — checked: anything else is an error naming them, never a silent nearest. What gui/texture and `editor/frontend/display-texture` hand on with the upload (ADR-783).
+  "The sampling filter a texture options map asks for — `:smooth`, `:coverage` (smooth, its mip levels keeping as many texels above half alpha as at full size, for hair strands and other alpha-tested textures seen small), `:data` (numbers, not a picture: read bilinear at its own size, every channel raw, alpha never premultiplied, for wrinkle maps and zone masks, ADR-817) or `:nearest`, the default when `:filter` is absent — checked: anything else is an error naming them, never a silent nearest. What gui/texture and `editor/frontend/display-texture` hand on with the upload (ADR-783).
 
     (gui/texture-filter {})                   ;=> :nearest
     (gui/texture-filter {:filter :smooth})    ;=> :smooth
     (gui/texture-filter {:filter :coverage})  ;=> :coverage
     (try (gui/texture-filter {:filter :linear}) (catch e :refused))   ;=> :refused"
   (let (filter (get opts :filter :nearest))
-    (if (contains? #{:nearest :smooth :coverage} filter)
+    (if (contains? #{:nearest :smooth :coverage :data} filter)
       filter
-      (error "gui/texture: :filter must be :nearest, :smooth or :coverage, got " filter))))
+      (error "gui/texture: :filter must be :nearest, :smooth, :coverage or :data, got " filter))))
 
 (defn alloc-texture (w h)
   "Allocate a texture handle for a `w`×`h` upload and remember the size under it — the Brood half of gui/texture, on its own for an app that uploads through a DISPLAY map's `:texture` (a window it did not open, or a thin client's over the wire — `editor/frontend/display-texture`) rather than a window id. The handle is process-wide and never reused, so it can name a texture in any window.
@@ -784,20 +784,31 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; `:ambient-occlusion {:radius m :strength s}`, or `true` for 3 cm at full strength), an
 ;; `:exposure`, a `:background` ([r g b a], transparent by default), the skeletons' joint
 ;; `:palettes` (16 numbers a joint, or f32 bytes), and the `:draws` — each `{:mesh handle
-;; :model [16] :palette i :morphs [[target weight] …] :material {…}}`. A material is the fixed
+;; :model [16] :palette i :morphs [[target weight] …] :material {…}}`, and on a `:deform` draw
+;; `:loose {:palette j :amount a}`: its soft skin drawn toward palette j (the same skeleton, each
+;; joint where a damped follower of it is, kept by the game) by its softness × a, bone staying on
+;; its bones (ADR-812). A material is the fixed
 ;; shading model's parameters: `:surface` (:skin, :standard, :cutout, :blend, :eye — an eyeball
 ;; drawn by optics, with its `:eye`, below — :hair — strands
-;; lit along the bitangent, their alpha coverage — or :strands, ribbons turned to the camera, a
-;; pixel wide at least, `:width [root tip]` metres; on either, `:shift [first second]` the two
+;; lit along the bitangent, their alpha coverage — :strands, ribbons turned to the camera, a
+;; pixel wide at least, `:width [root tip]` metres — or :fibres, strands at their real width
+;; with exact coverage, the nearest three a pixel lit as Karis 2016, a light without a shadow map
+;; lighting them by reflection only, `:density` (0.4) how much of the mesh's baked hair count
+;; dims their light, ADR-813; on :strands and :fibres `:clamp-planes [[px py pz nx ny nz] …]`
+;; (at most 4): planes the strands are laid on, never through, the normal toward their side; on either, `:shift [first second]` the two
 ;; highlights' shifts and `:sheen [r g b]` the second's colour, the hair's own by default), `:base`, `:normal` and `:occlusion` (texture
 ;; handles), `:color`, `:roughness`, `:specular`, `:lobes`, `:scatter` (light under the skin,
 ;; below), `:detail` with `:detail-scale`, `:detail-strength` and `:detail-cavity` (a tiled
 ;; micro-relief, below), `:coat` (a clear wet layer, below), `:cutoff`, `:double-sided`,
-;; `:cast-shadow` (true by default), `:deform` (its skin pressed by the scene's `:contacts`).
+;; `:cast-shadow` (true by default), `:deform` (its skin pressed by the scene's `:contacts`), and on a
+;; `:skin` `:wrinkles {:compress h :stretch h :masks [h h] :weights [8]}` (expression wrinkles: two
+;; tangent-space normal maps laid over its own by eight zones' masks times their weights, above 0 the
+;; compress map, below the stretch map; all four textures uploaded `:data`, ADR-817).
 ;; `:contacts [{:plane [nx ny nz d]} {:sphere [x y z r]} {:capsule [ax ay az bx by bz r]} …]`
 ;; (at most 64, world space; each may carry `:drag [x y z]`, the skin dragged along it by
 ;; friction, `:skip [j …]`, the joints of its own limb, whose skin it never presses, and `:only
-;; [j …]`, the one limb whose skin alone it presses) press the skin of the `:deform` draws: laid onto what presses it,
+;; [j …]`, the one limb whose skin alone it presses, and `:within [px py pz nx ny nz]`, the side of a
+;; plane it acts on, faded in over 2 cm, ADR-816) press the skin of the `:deform` draws: laid onto what presses it,
 ;; soft flesh rising in a ring round it by the mesh's `:softness` (f32 0 … 1 a vertex in its
 ;; spec; 0, bone or a pressing limb, never pressed; none: soft throughout), ADR-805.
 ;; A glTF loader, a skeleton's maths, a camera — policy above this, in the engine. Both window
@@ -947,12 +958,24 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
   (table/incr *meshes* :next))
 
 (defn mesh (id spec)
-  "Upload a mesh to window id for its [:scene …] ops and return its handle (an int). The spec is a map of little-endian bytes, the way a glTF buffer holds a mesh's attributes, so a loader slices them straight out of the file: :positions (3 f32 a vertex — required), :normals (3 f32), :uvs (2 f32), :tangents (4 f32, for a normal map), :joints (4 a vertex, with :joint-type :u8 or :u16) and :weights (4 f32) to skin it, :indices (with :index-type :u16 or :u32) and :morphs, a vector of {:positions bytes :normals bytes} targets. Errors when a byte count is not whole entries for every vertex or an index names no vertex. Pair with gui/free-mesh.
+  "Upload a mesh to window id for its [:scene …] ops and return its handle (an int). The spec is a map of little-endian bytes, the way a glTF buffer holds a mesh's attributes, so a loader slices them straight out of the file: :positions (3 f32 a vertex — required), :normals (3 f32), :uvs (2 f32), :tangents (4 f32, for a normal map), :joints (4 a vertex, with :joint-type :u8 or :u16) and :weights (4 f32) to skin it, :indices (with :index-type :u16 or :u32) and :morphs, a vector of {:positions bytes :normals bytes} targets; :softness (1 f32, ADR-805), and for strands :strand (1 f32, constant along a strand, varying its look) and :visibility (4 f32 [a bx by bz], its baked self-shadow: max(0, a + b·L) hairs toward L, ADR-813), and :centres (3 f32, each vertex's centre of rotation from gui/skin-centres: a skinned vertex then turns about it by its joints' blended rotation, ADR-814). Errors when a byte count is not whole entries for every vertex or an index names no vertex. Pair with gui/free-mesh.
 
     (try (gui/mesh 0 {:positions [1 2 3]}) (catch e :refused))   ;=> :refused   ; not a whole vertex (and no window 0)"
   (let (handle (alloc-mesh))
     (%gui-mesh id handle spec)
     handle))
+
+(defn skin-centres (spec)
+  "Each vertex's centre of rotation for skinning that blends rotations (ADR-814), from a mesh spec's :positions, :indices, :joints and :weights at rest (as gui/mesh takes them): little-endian f32 bytes, three a vertex, for the spec's :centres. A vertex on one joint is its own centre. Pure, and worked out on every core: seconds for a body, so a game keeps it beside its model.
+
+    (try (gui/skin-centres {:positions [1 2 3]}) (catch e :refused))   ;=> :refused   ; not a whole vertex"
+  (%gui-skin-centres spec))
+
+(defn posed-positions (spec palette)
+  "The vertices of the mesh spec describes (as gui/mesh takes it, its :centres if given) posed by palette (16 numbers a joint) exactly as the CPU painter skins them, no morphs: little-endian f32 bytes, three a vertex. For probes that measure skinning (ADR-814).
+
+    (try (gui/posed-positions {:positions [1 2 3]} []) (catch e :refused))   ;=> :refused"
+  (%gui-posed-positions spec palette))
 
 (defn free-mesh (id handle)
   "Forget mesh handle of window id; a later draw naming it in a [:scene …] draws nothing. Idempotent. Returns nil.

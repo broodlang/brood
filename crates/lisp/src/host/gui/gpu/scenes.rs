@@ -13,7 +13,7 @@ use crate::host::gui::mesh::{
 
 /// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4,
 /// curvature 1.
-pub(super) const VERTEX_FLOATS: usize = 21;
+pub(super) const VERTEX_FLOATS: usize = 26;
 /// The `SceneU` uniform (3744 bytes: each shadow view says where its map is kept, ADR-800),
 /// padded to the dynamic-offset alignment.
 pub(super) const SCENE_BYTES: u64 = 3840;
@@ -23,7 +23,7 @@ pub(super) const DRAW_BYTES: u64 = 512;
 /// The samples a pixel the scene is drawn with where the adapter cannot do eight (ADR-799).
 const FALLBACK_SAMPLES: u32 = 4;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+pub(super) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// Premultiplied alpha over what is there: a blended surface (hair) onto the scene.
 const PREMULTIPLIED_OVER: wgpu::BlendState = wgpu::BlendState {
@@ -49,6 +49,8 @@ pub(super) struct GpuMesh {
     morphs: Vec<Morph>,
     has_tangents: bool,
     skinned: bool,
+    /// Its vertices turn about their centres of rotation (ADR-814): it has `:centres`.
+    turning: bool,
     /// Where its vertices can be, to fit shadow maps as the CPU painter fits them.
     bounds: MeshBounds,
     /// Its softness a vertex (ADR-805), when it has one.
@@ -67,6 +69,8 @@ pub(super) struct SceneTarget {
     shadow: Option<ShadowTarget>,
     /// Its contact buffers (ADR-805), while it presses any skin.
     contacts: Option<ContactTarget>,
+    /// Its fibre buffers (ADR-813), made the first frame it has `:fibres` and kept at its size.
+    fibres: Option<super::fibres::FibreTarget>,
 }
 
 /// A scene's contact buffers (ADR-805): its pressed vertices posed (three vec4 each: world
@@ -79,16 +83,16 @@ struct ContactTarget {
     depths: wgpu::Buffer,
 }
 
-/// A scene's `:contacts` as the shader's `ContactList` holds them (ADR-805): how many, then five
-/// vec4 each (the third its `:drag`, the fourth its `:skip` joints, the fifth its `:only`), `[x y z kind]` and `[x y z w]`: a plane's normal and offset (kind 0), a sphere's
+/// A scene's `:contacts` as the shader's `ContactList` holds them (ADR-805): how many, then six
+/// vec4 each (the third its `:drag`, the fourth its `:skip` joints, the fifth its `:only`, the sixth its `:within`), `[x y z kind]` and `[x y z w]`: a plane's normal and offset (kind 0), a sphere's
 /// centre and radius (1), a capsule's start, end and radius (2).
 fn contact_words(scene: &Scene) -> Vec<u8> {
     use crate::host::gui::mesh::{Contact, MAX_CONTACTS};
     let contacts = &scene.contacts[..scene.contacts.len().min(MAX_CONTACTS)];
     let mut bytes = words_bytes(&[contacts.len() as u32, 0, 0, 0]);
-    let mut floats = vec![0.0f32; MAX_CONTACTS * 20];
+    let mut floats = vec![0.0f32; MAX_CONTACTS * 24];
     for (slot, contact) in contacts.iter().enumerate() {
-        let at = slot * 20;
+        let at = slot * 24;
         let [first, second] = match *contact {
             Contact::Plane { normal, offset } => [
                 [normal[0], normal[1], normal[2], 0.0],
@@ -135,6 +139,10 @@ fn contact_words(scene: &Scene) -> Vec<u8> {
                 f32::from(*joint)
             };
         }
+        // the sixth: the side of a plane it acts on (`:within`, ADR-816; all zero: everywhere)
+        if let Some(within) = scene.contact_withins.get(slot) {
+            floats[at + 20..at + 24].copy_from_slice(within);
+        }
     }
     bytes.extend(floats_bytes(&floats));
     bytes
@@ -161,6 +169,12 @@ pub(super) struct MeshGpu {
     /// The hair's depth pass and its front pass, one-sided and double-sided (ADR-802).
     hair_depth_pipelines: [wgpu::RenderPipeline; 2],
     hair_front_pipelines: [wgpu::RenderPipeline; 2],
+    /// The fibres' scene group layout, their layer and front passes, and their full-screen passes
+    /// (ADR-813: `fibres.rs`).
+    fibre_scene_layout: wgpu::BindGroupLayout,
+    fibre_layers_pipelines: [wgpu::RenderPipeline; 2],
+    fibre_front_pipelines: [wgpu::RenderPipeline; 2],
+    fibre_full: super::fibres::FibreFullScreen,
     scene_layout: wgpu::BindGroupLayout,
     /// Depth only, both faces, alpha-tested: what renders a shadow map (ADR-788).
     shadow_pipeline: wgpu::RenderPipeline,
@@ -404,32 +418,50 @@ impl MeshGpu {
             count: None,
         };
         // the colour passes read the scene's shadow maps; the passes that render them cannot
+        let scene_entries = [
+            uniform(0, true),
+            storage(1),
+            shadow_maps(2),
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
+            // the skin table, loaded texel by texel: no sampler, so not filterable
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            shadow_maps(5),
+        ];
         let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh scene"),
-            entries: &[
-                uniform(0, true),
-                storage(1),
-                shadow_maps(2),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                    count: None,
-                },
-                // the skin table, loaded texel by texel: no sampler, so not filterable
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                shadow_maps(5),
-            ],
+            entries: &scene_entries,
         });
+        // the fibres' scene group (ADR-813): the scene's, and the pixels' three nearest fibre depths
+        let mut fibre_scene_entries = scene_entries.to_vec();
+        fibre_scene_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 6,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        });
+        let fibre_scene_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("fibre scene"),
+                entries: &fibre_scene_entries,
+            });
         let shadow_scene_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("mesh shadow scene"),
@@ -494,6 +526,12 @@ impl MeshGpu {
                 texture(3),
                 // the detail tile (ADR-797), through the same repeating sampler
                 texture(4),
+                // the expression wrinkles (ADR-817): the compress and stretch maps, the two zone masks
+                // (13 on: the contact passes hold 8 … 12 of this group in the same module)
+                texture(13),
+                texture(14),
+                texture(15),
+                texture(16),
             ],
         });
         let layouts = [
@@ -517,7 +555,9 @@ impl MeshGpu {
                 3 => Float32x4,
                 4 => Uint32x4,
                 5 => Float32x4,
-                6 => Float32
+                6 => Float32,
+                7 => Float32x3,
+                8 => Float32x2
             ],
         });
         // a colour pipeline: its faces, whether it blends, and its fragment entry, depth state and
@@ -611,6 +651,82 @@ impl MeshGpu {
                 wgpu::ColorWrites::ALL,
             )
         });
+        // the fibres' two passes (ADR-813, `fibres.rs`), one-sided and double-sided: single-sample,
+        // against the fibres' own depth, never writing it
+        let fibre_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fibre"),
+            bind_group_layouts: &[
+                Some(&fibre_scene_layout),
+                Some(&draw_layout),
+                Some(&morph_layout),
+                Some(&material_layout),
+            ],
+            immediate_size: 0,
+        });
+        let make_fibre = |double_sided: bool,
+                          entry: &str,
+                          depth_compare: wgpu::CompareFunction,
+                          target: wgpu::ColorTargetState| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&fibre_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_mesh"),
+                    compilation_options: Default::default(),
+                    buffers: std::slice::from_ref(&vertex_layout),
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: if double_sided {
+                        None
+                    } else {
+                        Some(wgpu::Face::Back)
+                    },
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(depth_compare),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[
+                            ("SAMPLES", f64::from(samples)),
+                            ("HAIR_TRIAL", f64::from(hair_trial())),
+                        ],
+                        ..Default::default()
+                    },
+                    targets: &[Some(target)],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let fibre_layers_pipelines = [false, true].map(|double_sided| {
+            make_fibre(
+                double_sided,
+                "fs_fibre_layers",
+                wgpu::CompareFunction::Less,
+                super::fibres::transmit_target(),
+            )
+        });
+        let fibre_front_pipelines = [false, true].map(|double_sided| {
+            make_fibre(
+                double_sided,
+                "fs_fibre_front",
+                wgpu::CompareFunction::LessEqual,
+                super::fibres::accum_target(),
+            )
+        });
+        let fibre_full = super::fibres::FibreFullScreen::new(device, COLOR_FORMAT);
         let pipelines = [
             make(false, false),
             make(false, true),
@@ -719,6 +835,10 @@ impl MeshGpu {
             pipelines,
             hair_depth_pipelines,
             hair_front_pipelines,
+            fibre_scene_layout,
+            fibre_layers_pipelines,
+            fibre_front_pipelines,
+            fibre_full,
             shadow_pipeline,
             shadow_scene_layout,
             shadow_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
@@ -812,6 +932,12 @@ impl MeshGpu {
             vertices.extend(words_bytes(&joints.map(u32::from)));
             vertices.extend(floats_bytes(&weights));
             vertices.extend(mesh.curvature[index].to_le_bytes());
+            // its centre of rotation (ADR-814; its own place when it has none, unread then)
+            vertices.extend(floats_bytes(
+                mesh.centres.get(index).unwrap_or(&mesh.positions[index]),
+            ));
+            // its second UV set (ADR-817)
+            vertices.extend(floats_bytes(&mesh.uvs2[index]));
         }
         let vertex_buffer = buffer(
             device,
@@ -851,6 +977,7 @@ impl MeshGpu {
                 morphs: mesh.morphs.clone(),
                 has_tangents: mesh.tangents.is_some(),
                 skinned: !mesh.joints.is_empty(),
+                turning: !mesh.centres.is_empty(),
                 bounds: mesh.bounds.clone(),
                 softness,
             },
@@ -892,7 +1019,13 @@ impl MeshGpu {
         };
         let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT;
         let color = texture("scene colour", COLOR_FORMAT, self.samples, attachment);
-        let depth = texture("scene depth", DEPTH_FORMAT, self.samples, attachment);
+        // (readable: the fibres' passes take its nearest sample, ADR-813)
+        let depth = texture(
+            "scene depth",
+            DEPTH_FORMAT,
+            self.samples,
+            attachment | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
         let resolve = texture(
             "scene picture",
             COLOR_FORMAT,
@@ -921,6 +1054,7 @@ impl MeshGpu {
             composite,
             shadow: None,
             contacts: None,
+            fibres: None,
         };
         if index < self.targets.len() {
             self.targets[index] = target;
@@ -1032,7 +1166,11 @@ impl MeshGpu {
             let mut palette_starts = Vec::with_capacity(scene.palettes.len());
             for palette in &scene.palettes {
                 palette_starts.push((palette_floats.len() / 16) as u32);
-                palette_floats.extend_from_slice(palette);
+                // whole matrices only, so its joints' rotations below start where the shader
+                // looks for them, a palette's joint count on (ADR-814)
+                let whole = &palette[..palette.len() / 16 * 16];
+                palette_floats.extend_from_slice(whole);
+                palette_floats.extend(joint_rotation_floats(whole));
             }
             let mut plan = Vec::new();
             for draw in scene.draw_order() {
@@ -1066,12 +1204,26 @@ impl MeshGpu {
                     Surface::Strands => 5,
                     Surface::Eye => 6,
                 };
+                // and 512 for a `:fibres` strand (ADR-813): drawn at its real width, its coverage exact
                 let bits = texture_bits(
                     [base, normal, occlusion, detail].map(|texture| {
                         texture.map(|texture| texture.filter != TextureFilter::Nearest)
                     }),
                     mesh.has_tangents,
-                );
+                ) | if material.fibres { 512 } else { 0 }
+                    // and 1024 for a skin's expression wrinkles (ADR-817): on a mesh with tangents,
+                    // all four of its textures there, as the CPU's `wrinkle_textures`
+                    | if mesh.has_tangents
+                        && material.surface == Surface::Skin
+                        && material.wrinkles.as_ref().is_some_and(|wrinkles| {
+                            [wrinkles.compress, wrinkles.stretch, wrinkles.masks[0], wrinkles.masks[1]]
+                                .iter()
+                                .all(|handle| textures.contains_key(handle))
+                        }) {
+                        1024
+                    } else {
+                        0
+                    };
                 // its morphs blended here, sparse, into one offset a vertex (none when no target
                 // it names moves anything, or the frame's offsets would pass the binding limit)
                 let vertex_count = mesh.vertex_count as usize;
@@ -1085,10 +1237,26 @@ impl MeshGpu {
                     add_morphs_packed(&mesh.morphs, &draw.morphs, &mut morph_offsets[span..]);
                 }
                 let (palette_start, palette_joints) = palette.unwrap_or((0, 0));
-                let skinned = u32::from(mesh.skinned && palette_joints > 0);
+                // (2: its vertices turn about their centres, ADR-814)
+                let skinned = match (mesh.skinned && palette_joints > 0, mesh.turning) {
+                    (false, _) => 0u32,
+                    (true, false) => 1,
+                    (true, true) => 2,
+                };
                 // `DrawU::deform` (ADR-805): pressed by the scene's contacts, where its posed vertices
                 // start in the scene's posed buffer, whether it has a softness, how many vertices
-                let pressed = !scene.contacts.is_empty() && crate::host::gui::mesh::pressed(draw);
+                // `DrawU::loose` (ADR-812): its flesh lagging its bones, where the lagging palette
+                // starts and how many joints it holds (a skinned draw only, as the CPU poses it)
+                let loose = crate::host::gui::mesh::loose_palette(scene, draw)
+                    .filter(|_| skinned != 0)
+                    .and_then(|(joints, amount)| {
+                        let start = palette_starts.get(draw.loose?.palette)?;
+                        Some([amount, *start as f32, (joints.len() / 16) as f32, 0.0])
+                    });
+                // posed once by the compute passes: pressed by contacts, or loose (with no contacts
+                // the passes only pose it)
+                let pressed = (!scene.contacts.is_empty() || loose.is_some())
+                    && crate::host::gui::mesh::pressed(draw);
                 let deform = if pressed {
                     let start = pressed_vertices;
                     pressed_vertices += mesh.vertex_count;
@@ -1111,6 +1279,7 @@ impl MeshGpu {
                         morph_start,
                     ],
                     deform,
+                    loose.unwrap_or([0.0; 4]),
                 );
                 bytes.resize(DRAW_BYTES as usize, 0);
                 let at = draw_bytes.len() / DRAW_BYTES as usize;
@@ -1123,6 +1292,7 @@ impl MeshGpu {
                     casts: material.cast_shadow,
                     surface: material.surface,
                     pressed,
+                    fibres: material.fibres,
                 });
             }
             plans.push(plan);
@@ -1206,7 +1376,7 @@ impl MeshGpu {
                         contacts: buffer(
                             device,
                             "contacts",
-                            16 + crate::host::gui::mesh::MAX_CONTACTS as u64 * 80,
+                            16 + crate::host::gui::mesh::MAX_CONTACTS as u64 * 96,
                             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                         ),
                         depths: buffer(
@@ -1220,6 +1390,26 @@ impl MeshGpu {
                 if let Some(contacts) = &target.contacts {
                     queue.write_buffer(&contacts.contacts, 0, &contact_words(scene));
                 }
+            }
+            // its fibre buffers (ADR-813): only for a scene that draws `:fibres`, so a scene without
+            // hair costs nothing for them
+            let size = scene.pixel_size();
+            let target = &mut self.targets[index];
+            if plans[index].iter().any(|draw| draw.fibres) {
+                if target
+                    .fibres
+                    .as_ref()
+                    .is_none_or(|fibres| fibres.size != size)
+                {
+                    target.fibres = Some(super::fibres::FibreTarget::new(
+                        device,
+                        queue,
+                        size,
+                        self.samples,
+                    ));
+                }
+            } else {
+                target.fibres = None;
             }
         }
         // a scene the frame no longer draws gives its target back
@@ -1304,6 +1494,12 @@ impl MeshGpu {
                     let occlusion = view(draw.material.occlusion).unwrap_or(&self.white);
                     // no tile: a flat, open texel (the normal map's stand-in is one)
                     let detail = view(draw.material.detail_texture()).unwrap_or(&self.flat);
+                    // its wrinkle maps and masks (ADR-817): flat maps and open masks where none
+                    let wrinkles = draw.material.wrinkles.as_ref();
+                    let compress = view(wrinkles.map(|w| w.compress)).unwrap_or(&self.flat);
+                    let stretch = view(wrinkles.map(|w| w.stretch)).unwrap_or(&self.flat);
+                    let first_mask = view(wrinkles.map(|w| w.masks[0])).unwrap_or(&self.white);
+                    let second_mask = view(wrinkles.map(|w| w.masks[1])).unwrap_or(&self.white);
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("mesh material"),
                         layout: &self.material_layout,
@@ -1327,6 +1523,22 @@ impl MeshGpu {
                             wgpu::BindGroupEntry {
                                 binding: 4,
                                 resource: wgpu::BindingResource::TextureView(detail),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 13,
+                                resource: wgpu::BindingResource::TextureView(compress),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 14,
+                                resource: wgpu::BindingResource::TextureView(stretch),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 15,
+                                resource: wgpu::BindingResource::TextureView(first_mask),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 16,
+                                resource: wgpu::BindingResource::TextureView(second_mask),
                             },
                         ],
                     })
@@ -1526,7 +1738,12 @@ impl MeshGpu {
                     view: &target.depth,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
+                        // kept for the fibres' passes when the scene has them (ADR-813)
+                        store: if target.fibres.is_some() {
+                            wgpu::StoreOp::Store
+                        } else {
+                            wgpu::StoreOp::Discard
+                        },
                     }),
                     stencil_ops: None,
                 }),
@@ -1542,7 +1759,7 @@ impl MeshGpu {
             // it is the hair in front: every layer of wisps behind is rejected before shading
             if prepass {
                 for (draw, material) in plans[index].iter().zip(&materials) {
-                    if !is_hair(draw) {
+                    if !is_hair(draw) || draw.fibres {
                         continue;
                     }
                     let mesh = &self.meshes[&draw.mesh];
@@ -1556,6 +1773,10 @@ impl MeshGpu {
                 }
             }
             for (draw, material) in plans[index].iter().zip(&materials) {
+                // (a `:fibres` draw is drawn by the fibre passes after this one, ADR-813)
+                if draw.fibres {
+                    continue;
+                }
                 let mesh = &self.meshes[&draw.mesh];
                 // each draw's own time on the card, under BROOD_GUI_GPU_TIMES=draws (ADR-801)
                 let stamp = self.timer.as_mut().and_then(|timer| {
@@ -1584,6 +1805,155 @@ impl MeshGpu {
                 .and_then(|timer| timer.draws_end_stamp(index));
             if let (Some(query), Some(timer)) = (end, &self.timer) {
                 pass.write_timestamp(timer.query_set(), query);
+            }
+            drop(pass);
+            // the scene's `:fibres` (ADR-813: `fibres.rs`): after its colour pass, over it
+            let Some(fibre_target) = &target.fibres else {
+                continue;
+            };
+            let full = &self.fibre_full;
+            let full_group = fibre_target.group(device, full, &target.depth);
+            let fibre_scene_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("fibre scene"),
+                layout: &self.fibre_scene_layout,
+                entries: &[
+                    scene_uniform_entry(),
+                    palette_entry(),
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(shadow_maps),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&self.skin_table),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(smaller_shadow_maps),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: fibre_target.layers.as_entire_binding(),
+                    },
+                ],
+            });
+            encoder.clear_buffer(&fibre_target.layers, 0, None);
+            let depth_attachment = |load| {
+                Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &fibre_target.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                })
+            };
+            fn colour_attachment(
+                view: &wgpu::TextureView,
+                load: wgpu::LoadOp<wgpu::Color>,
+            ) -> Option<wgpu::RenderPassColorAttachment<'_>> {
+                Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })
+            }
+            let fibre_draws: Vec<_> = plans[index]
+                .iter()
+                .zip(&materials)
+                .filter(|(draw, _)| draw.fibres)
+                .collect();
+            // 1. the nearest of the scene's depth samples, the fibres' own depth
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fibre depth copy"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: depth_attachment(wgpu::LoadOp::Clear(1.0)),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&full.depth_copy);
+                pass.set_bind_group(0, &full_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            // 2. each fibre fragment's depth among its pixel's nearest three, its coverage out
+            //    of the pixel's transmittance; then 4. the nearest three shaded: one geometry pass
+            //    each, the same draws
+            let geometry = |encoder: &mut wgpu::CommandEncoder,
+                            label: &str,
+                            view: &wgpu::TextureView,
+                            clear: wgpu::Color,
+                            pipelines: &[wgpu::RenderPipeline; 2]| {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(label),
+                    color_attachments: &[colour_attachment(view, wgpu::LoadOp::Clear(clear))],
+                    depth_stencil_attachment: depth_attachment(wgpu::LoadOp::Load),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_bind_group(0, &fibre_scene_group, &[scene_offset]);
+                for (draw, material) in &fibre_draws {
+                    let mesh = &self.meshes[&draw.mesh];
+                    pass.set_pipeline(&pipelines[draw.double_sided as usize]);
+                    pass.set_bind_group(1, &draw_group, &[(draw.at as u64 * DRAW_BYTES) as u32]);
+                    pass.set_bind_group(2, &morph_group, &[]);
+                    pass.set_bind_group(3, *material, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+            };
+            geometry(
+                encoder,
+                "fibre layers",
+                &fibre_target.transmit,
+                wgpu::Color::WHITE,
+                &self.fibre_layers_pipelines,
+            );
+            // 3. the third nearest depth, where a pixel has three
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fibre third depth"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: depth_attachment(wgpu::LoadOp::Load),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&full.kth);
+                pass.set_bind_group(0, &full_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            geometry(
+                encoder,
+                "fibre front",
+                &fibre_target.accum,
+                wgpu::Color::TRANSPARENT,
+                &self.fibre_front_pipelines,
+            );
+            // 5. the fibres over the scene's picture
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fibre resolve"),
+                    color_attachments: &[colour_attachment(&target.resolve, wgpu::LoadOp::Load)],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&full.resolve);
+                pass.set_bind_group(0, &full_group, &[]);
+                pass.draw(0..3, 0..1);
             }
         }
         if let Some(timer) = &mut self.timer {
@@ -1619,6 +1989,7 @@ pub(super) fn draw_uniform(
     flags: [u32; 4],
     morph_info: [u32; 4],
     deform: [u32; 4],
+    loose: [f32; 4],
 ) -> Vec<u8> {
     let material = &draw.material;
     let mut floats = Vec::with_capacity(32);
@@ -1628,7 +1999,13 @@ pub(super) fn draw_uniform(
     // strength and roughness (ADR-795; 0: none)
     let [coat_strength, coat_roughness] = material.coat.unwrap_or([0.0, 0.0]);
     floats.extend_from_slice(&[material.scatter_scale(), coat_strength, coat_roughness, 0.0]);
-    floats.extend_from_slice(&[material.roughness, material.specular, 0.0, material.cutoff]);
+    // (the third: a `:fibres` surface's `:density`, how much of its baked hair count dims its light)
+    floats.extend_from_slice(&[
+        material.roughness,
+        material.specular,
+        material.fibre_density,
+        material.cutoff,
+    ]);
     let lobes = material.lobes();
     floats.extend_from_slice(&[lobes[0], lobes[1], lobes[2], material.f0()]);
     let mut bytes = floats_bytes(&floats);
@@ -1656,6 +2033,32 @@ pub(super) fn draw_uniform(
     // `DrawU::deform`: pressed by the scene's contacts, its first posed vertex, whether it has a
     // softness, its vertex count (ADR-805)
     bytes.extend(words_bytes(&deform));
+    // `DrawU::loose`: its flesh lagging its bones, the amount (0 none), its lagging palette's
+    // offset and joint count (ADR-812)
+    bytes.extend(floats_bytes(&loose));
+    // `DrawU::clamp_info` and `clamps`: the planes its strands keep to (ADR-813)
+    let planes = &material.clamp_planes[..material
+        .clamp_planes
+        .len()
+        .min(crate::host::gui::mesh::MAX_CLAMP_PLANES)];
+    // (and the UV set its `:wrinkles` read by, ADR-817)
+    let wrinkle_uv = material
+        .wrinkles
+        .as_ref()
+        .map_or(0.0, |wrinkles| wrinkles.uv as f32);
+    bytes.extend(floats_bytes(&[planes.len() as f32, wrinkle_uv, 0.0, 0.0]));
+    let mut clamps = [0.0f32; crate::host::gui::mesh::MAX_CLAMP_PLANES * 4];
+    for (slot, plane) in planes.iter().enumerate() {
+        clamps[slot * 4..slot * 4 + 4].copy_from_slice(plane);
+    }
+    bytes.extend(floats_bytes(&clamps));
+    // `DrawU::wrinkles`: its eight wrinkle zones' weights (ADR-817), zero without
+    bytes.extend(floats_bytes(
+        &material
+            .wrinkles
+            .as_ref()
+            .map_or([0.0; 8], |wrinkles| wrinkles.weights),
+    ));
     bytes
 }
 
@@ -1686,6 +2089,9 @@ fn eye_floats(material: &crate::host::gui::mesh::Material) -> [f32; 32] {
     floats[28] = eye.iris_uv_radius;
     floats[29] = eye.pupil;
     floats[30] = eye.concavity;
+    // the limbal ring (`eye_iris.w`, `eye_axes[1].w`: two spare floats)
+    floats[31] = eye.limbus;
+    floats[15] = eye.limbus_width;
     floats
 }
 
@@ -1702,6 +2108,8 @@ struct DrawPlan {
     /// Pressed by the scene's contacts (ADR-805): its vertices posed and deformed by the compute
     /// passes, read from the scene's posed buffer.
     pressed: bool,
+    /// A `:fibres` draw (ADR-813): drawn by the fibre passes after the colour pass, not in it.
+    fibres: bool,
 }
 
 /// `scene`'s `SceneU` uniform (the WGSL struct in `MESH_SRC`), padded to [`SCENE_BYTES`].
@@ -1735,6 +2143,7 @@ pub(super) fn scene_uniform_len() -> usize {
         contact_drags: Vec::new(),
         contact_skips: Vec::new(),
         contact_onlys: Vec::new(),
+        contact_withins: Vec::new(),
         draws: Vec::new(),
     };
     scene_words(&scene, &shadow_plan(&scene, None), &emitter_plan(&scene)).len() * 4
@@ -1899,4 +2308,21 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan, emitters: &EmitterPlan) -> V
         }
     }
     words
+}
+
+/// A palette's joints as rotations for the shader (ADR-814, `mesh::joint_rotations`): sixteen
+/// floats a joint, laid after the palette's own matrices so a joint's are at `start + joint
+/// count + joint` — its unit quaternion `[x y z w]`, then its stretch's three columns, each
+/// padded to four.
+pub(super) fn joint_rotation_floats(palette: &[f32]) -> Vec<f32> {
+    let rotations = crate::host::gui::mesh::joint_rotations(palette);
+    let mut floats = Vec::with_capacity(rotations.quaternions.len() * 16);
+    for (quaternion, stretch) in rotations.quaternions.iter().zip(&rotations.stretches) {
+        floats.extend_from_slice(quaternion);
+        for column in 0..3 {
+            floats.extend_from_slice(&stretch[column * 3..column * 3 + 3]);
+            floats.push(0.0);
+        }
+    }
+    floats
 }

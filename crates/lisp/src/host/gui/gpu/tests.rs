@@ -106,10 +106,10 @@ fn the_mesh_shader_validates() {
     use crate::host::gui::mesh::{MAX_LIGHTS, MAX_SHADOW_VIEWS};
     assert!(MESH_SRC.contains(&format!("lights: array<Light, {MAX_LIGHTS}>")));
     assert!(MESH_SRC.contains(&format!("shadows: array<ShadowView, {MAX_SHADOW_VIEWS}>")));
-    // ADR-805/810: the contact list and its depths, sized by the constant the CPU packs to (five
+    // ADR-805/810/816: the contact list and its depths, sized by the constant the CPU packs to (six
     // vec4 a contact), and both loops bounded by it — the WGSL spells them as literals
     use crate::host::gui::mesh::MAX_CONTACTS;
-    assert!(MESH_SRC.contains(&format!("shapes: array<vec4<f32>, {}>", MAX_CONTACTS * 5)));
+    assert!(MESH_SRC.contains(&format!("shapes: array<vec4<f32>, {}>", MAX_CONTACTS * 6)));
     assert!(MESH_SRC.contains(&format!(
         "contact_depths: array<atomic<u32>, {MAX_CONTACTS}>"
     )));
@@ -162,12 +162,17 @@ fn the_mesh_shader_validates() {
         scenes::skin_table_bytes().len(),
         SKIN_TABLE_WIDTH * SKIN_TABLE_HEIGHT * 16
     );
-    assert_eq!(scenes::VERTEX_FLOATS, 21, "a vertex carries its curvature");
+    assert_eq!(
+        scenes::VERTEX_FLOATS,
+        26,
+        "a vertex carries its curvature, its centre of rotation and its second UV set"
+    );
     assert!(MESH_SRC.contains("@location(6) curvature: f32"));
     // ADR-797: `draw_uniform` packs exactly the struct the shader declares, the detail tile's
     // settings four floats before an eye's optics; the shader's flat texel is the CPU painter's
     use crate::host::gui::mesh::{DETAIL_FLAT, Draw, Material};
     let draw = Draw {
+        loose: None,
         mesh: 1,
         model: [0.0; 16],
         palette: None,
@@ -180,7 +185,7 @@ fn the_mesh_shader_validates() {
             ..Material::default()
         },
     };
-    let packed = scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4]);
+    let packed = scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4], [0.0; 4]);
     assert_eq!(
         packed.len() as u64,
         draw_declared,
@@ -234,7 +239,7 @@ fn the_mesh_shader_validates() {
         },
         ..draw
     };
-    let packed = scenes::draw_uniform(&coated, [0; 4], [0; 4], [0; 4]);
+    let packed = scenes::draw_uniform(&coated, [0; 4], [0; 4], [0; 4], [0.0; 4]);
     let floats: Vec<f32> = packed[80..112]
         .as_chunks::<4>()
         .0
@@ -245,7 +250,8 @@ fn the_mesh_shader_validates() {
         floats[..4],
         [Material::default().scatter_scale(), 0.5, 0.15, 0.0]
     );
-    assert_eq!(floats[6], 0.0, "the rim is gone");
+    // (where the rim was: a `:fibres` surface's `:density` now, its default on any other, ADR-813)
+    assert_eq!(floats[6], Material::default().fibre_density);
     assert!(MESH_SRC.contains("coat = draw.skin.yz;"));
     // ADR-796: an eye's optics are `DrawU`'s last eight vec4s, zeros for any other surface; the
     // shader's numbers are the CPU painter's; the vertices carry the eye's frame
@@ -272,9 +278,12 @@ fn the_mesh_shader_validates() {
         iris_uv_radius: 0.1,
         pupil: 0.3,
         concavity: 0.5,
+        limbus: 0.3,
+        limbus_width: 0.12,
     };
     let eye_floats = |surface: Surface| -> Vec<f32> {
         let eyed = Draw {
+            loose: None,
             mesh: 1,
             model: [0.0; 16],
             palette: None,
@@ -285,7 +294,7 @@ fn the_mesh_shader_validates() {
                 ..Material::default()
             },
         };
-        let packed = scenes::draw_uniform(&eyed, [0; 4], [0; 4], [0; 4]);
+        let packed = scenes::draw_uniform(&eyed, [0; 4], [0; 4], [0; 4], [0.0; 4]);
         assert_eq!(packed.len() as u64, draw_declared);
         packed[192..192 + 32 * 4]
             .as_chunks::<4>()
@@ -298,21 +307,24 @@ fn the_mesh_shader_validates() {
         eye_floats(Surface::Eye),
         [
             1.0, 2.0, 3.0, 2.0, -1.0, 2.0, 3.0, 0.0, // the centres, and how many
-            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, // the axes
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0,
+            0.12, // the axes (the second's fourth: the limbal ring's width)
             0.0, 1.0, 0.0, 1.4, // up, the index
             0.012, 0.006, 0.008, 0.003, // the shape
             0.3, 0.7, 0.7, 0.2, // the irises in the texture
-            0.1, 0.3, 0.5, 0.0, // the iris's radius there, the pupil, the bowl's slope
+            0.1, 0.3, 0.5,
+            0.3, // the iris's radius there, the pupil, the bowl's slope, the limbal ring's strength
         ]
     );
     assert_eq!(eye_floats(Surface::Cutout), [0.0; 32], "no other surface");
     assert_eq!(
-        draw_declared, 352,
-        "the eye's fields, then a hair's `:sheen` (ADR-799), then `deform` (ADR-805)"
+        draw_declared, 480,
+        "the eye's fields, then a hair's `:sheen` (ADR-799), `deform` (ADR-805), `loose` (ADR-812), the clamp planes (ADR-813), then the wrinkle weights (ADR-817)"
     );
     // a hair surface's `:sheen` last, its fourth float 1 when given; its `:shift` in the
     // strand vector's spare two (ADR-799)
     let hair = Draw {
+        loose: None,
         mesh: 1,
         model: [0.0; 16],
         palette: None,
@@ -324,15 +336,15 @@ fn the_mesh_shader_validates() {
             ..Material::default()
         },
     };
-    let floats: Vec<f32> = scenes::draw_uniform(&hair, [0; 4], [0; 4], [0; 4])
+    let floats: Vec<f32> = scenes::draw_uniform(&hair, [0; 4], [0; 4], [0; 4], [0.0; 4])
         .as_chunks::<4>()
         .0
         .iter()
         .map(|word| f32::from_le_bytes(*word))
         .collect();
-    // `sheen`, then the four words of `deform` (ADR-805)
+    // `sheen`, then the four words of `deform` (ADR-805) and the four floats of `loose` (ADR-812)
     assert_eq!(
-        floats[floats.len() - 8..floats.len() - 4],
+        floats[floats.len() - 40..floats.len() - 36],
         [0.5, 0.25, 0.125, 1.0]
     );
     assert_eq!(
