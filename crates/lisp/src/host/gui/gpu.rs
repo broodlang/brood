@@ -135,7 +135,7 @@ struct GpuTexture {
 /// straight alpha after the filter has mixed it, for a smooth one (ADR-783).
 fn sprite_mode(filter: TextureFilter) -> u32 {
     match filter {
-        TextureFilter::Nearest => 0,
+        TextureFilter::Nearest | TextureFilter::Data => 0,
         TextureFilter::Smooth | TextureFilter::Coverage => 5,
     }
 }
@@ -418,7 +418,9 @@ impl GpuWindow {
     ) -> (wgpu::Texture, wgpu::BindGroup) {
         let sampler = match filter {
             TextureFilter::Nearest => &self.sampler,
-            TextureFilter::Smooth | TextureFilter::Coverage => &self.smooth_sampler,
+            TextureFilter::Smooth | TextureFilter::Coverage | TextureFilter::Data => {
+                &self.smooth_sampler
+            }
         };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -497,7 +499,8 @@ impl GpuWindow {
             return;
         }
         match filter {
-            TextureFilter::Nearest => {
+            // (data, ADR-817: its numbers as given, one level, read through the linear sampler)
+            TextureFilter::Nearest | TextureFilter::Data => {
                 let (texture, bind_group) = self.create_texture(w, h, filter, 1);
                 self.write_rgba(&texture, 0, 0, rgba, w, h);
                 self.keep_texture(tex, texture, bind_group, filter);

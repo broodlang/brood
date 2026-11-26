@@ -377,10 +377,11 @@ fn texture_filter(heap: &Heap, given: Value) -> Result<crate::host::gui::Texture
         Value::Keyword(name) if value::symbol_name_ref(name) == "coverage" => {
             Ok(TextureFilter::Coverage)
         }
+        Value::Keyword(name) if value::symbol_name_ref(name) == "data" => Ok(TextureFilter::Data),
         other => Err(LispError::wrong_type(
             heap,
             "%gui-texture",
-            "a filter, :nearest, :smooth or :coverage",
+            "a filter, :nearest, :smooth, :coverage or :data",
             other,
         )),
     }
@@ -1635,6 +1636,52 @@ fn scene_spec(
             Some(given) => {
                 return Err(format!(
                     "a material's :detail is a texture handle (a whole number, 0 or more), not {}",
+                    crate::syntax::printer::print(heap, given)
+                ));
+            }
+        };
+        // a skin's expression wrinkles (ADR-817): `{:compress h :stretch h :masks [h h] :weights
+        // [8 numbers from -1 to 1]}`, refused whole when any part is wrong
+        material.wrinkles = match get(material_map, "wrinkles") {
+            None | Some(Value::Nil) => None,
+            Some(Value::Map(wrinkles)) => {
+                let texture = |key: &str| match get(wrinkles, key) {
+                    Some(Value::Int(given)) => u32::try_from(given).ok(),
+                    _ => None,
+                };
+                let masks: Option<Vec<u32>> = match get(wrinkles, "masks") {
+                    Some(Value::Vector(masks_id)) if heap.vector(masks_id).len() == 2 => heap
+                        .vector(masks_id)
+                        .iter()
+                        .map(|item| match item {
+                            Value::Int(given) => u32::try_from(*given).ok(),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => None,
+                };
+                let weights = numbers(get(wrinkles, "weights"), 8)
+                    .filter(|weights| weights.iter().all(|weight| (-1.0..=1.0).contains(weight)));
+                match (texture("compress"), texture("stretch"), masks, weights) {
+                    (Some(compress), Some(stretch), Some(masks), Some(weights)) => {
+                        Some(crate::host::gui::mesh::Wrinkles {
+                            compress,
+                            stretch,
+                            masks: [masks[0], masks[1]],
+                            weights: std::array::from_fn(|zone| weights[zone]),
+                        })
+                    }
+                    _ => {
+                        return Err(format!(
+                            "a material's :wrinkles is {{:compress h :stretch h :masks [h h] :weights [8 numbers from -1 to 1]}} (texture handles), not {}",
+                            crate::syntax::printer::print(heap, Value::Map(wrinkles))
+                        ));
+                    }
+                }
+            }
+            Some(given) => {
+                return Err(format!(
+                    "a material's :wrinkles is a map {{:compress :stretch :masks :weights}}, not {}",
                     crate::syntax::printer::print(heap, given)
                 ));
             }

@@ -699,6 +699,7 @@ struct DrawU {
     loose: vec4<f32>,           // its flesh lagging its bones (ADR-812): the amount (0 none), its lagging palette's offset, its joint count
     clamp_info: vec4<f32>,      // x: how many `:clamp-planes` its strands keep to (ADR-813)
     clamps: array<vec4<f32>, 4>,  // each plane: its unit normal toward the strands' side, `normal · point`
+    wrinkles: array<vec4<f32>, 2>,  // a skin's eight wrinkle zones' weights (ADR-817; zero: none)
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
@@ -959,6 +960,21 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
 // a material's `:detail` tile (ADR-797): a tangent-space normal's x and y in red and green
 // about DETAIL_FLAT, the cavity in blue; a flat, open texel where the material has none
 @group(3) @binding(4) var detail_texture: texture_2d<f32>;
+// a skin's expression wrinkles (ADR-817): the compress and stretch maps and the zones' two masks
+@group(3) @binding(13) var wrinkle_compress: texture_2d<f32>;
+@group(3) @binding(14) var wrinkle_stretch: texture_2d<f32>;
+@group(3) @binding(15) var wrinkle_mask_first: texture_2d<f32>;
+@group(3) @binding(16) var wrinkle_mask_second: texture_2d<f32>;
+
+// `mesh::wrinkle_tilt`: each zone's mask times its weight, summed apart for the compress map
+// (weights above 0) and the stretch map (below), times each map's tilt
+fn wrinkle_tilt(compress: vec4<f32>, stretch: vec4<f32>, first: vec4<f32>, second: vec4<f32>) -> vec2<f32> {
+    let low = draw.wrinkles[0];
+    let high = draw.wrinkles[1];
+    let pushed = dot(first, max(low, vec4<f32>(0.0))) + dot(second, max(high, vec4<f32>(0.0)));
+    let drawn = dot(first, max(-low, vec4<f32>(0.0))) + dot(second, max(-high, vec4<f32>(0.0)));
+    return detail_tilt(compress) * pushed + detail_tilt(stretch) * drawn;
+}
 
 struct VertexIn {
     @builtin(vertex_index) index: u32,
@@ -2338,6 +2354,19 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
         let tilt = detail_tilt(detail_texel);
         if (tilt.x != 0.0 || tilt.y != 0.0) {
             local = detail_normal(local, tilt, draw.detail.z);
+            framed = true;
+        }
+    }
+    // her expression's wrinkles (ADR-817, the CPU's `fill_triangle`): the compress and stretch
+    // maps' tilts by the zones' masks and weights, laid over the rest
+    if ((draw.flags.y & 1024u) != 0u) {
+        let tilt = wrinkle_tilt(
+            textureSampleGrad(wrinkle_compress, texture_sampler, fragment.uv, uv_dx, uv_dy),
+            textureSampleGrad(wrinkle_stretch, texture_sampler, fragment.uv, uv_dx, uv_dy),
+            textureSampleGrad(wrinkle_mask_first, texture_sampler, fragment.uv, uv_dx, uv_dy),
+            textureSampleGrad(wrinkle_mask_second, texture_sampler, fragment.uv, uv_dx, uv_dy));
+        if (tilt.x != 0.0 || tilt.y != 0.0) {
+            local = detail_normal(local, tilt, 1.0);
             framed = true;
         }
     }

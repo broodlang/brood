@@ -925,6 +925,9 @@ pub struct Material {
     /// A `:fibres` surface's `:density`: how much of its baked hair count (`_VISIBILITY`) tints
     /// and dims the light reaching a strand, 0 none; 0.4 by default (ADR-813).
     pub fibre_density: f32,
+    /// A skin's expression wrinkles (`:wrinkles`, ADR-817): normal maps laid over its own by eight
+    /// zones' masks and weights ([`Wrinkles`]), or none.
+    pub wrinkles: Option<Wrinkles>,
 }
 
 impl Default for Material {
@@ -955,6 +958,7 @@ impl Default for Material {
             fibres: false,
             clamp_planes: Vec::new(),
             fibre_density: 0.4,
+            wrinkles: None,
         }
     }
 }
@@ -2218,6 +2222,41 @@ pub fn detail_normal(surface: [f32; 3], tilt: [f32; 2], strength: f32) -> [f32; 
         surface[1] * upright + tilt[1] * strength * surface[2],
         surface[2] * upright,
     ]
+}
+
+/// A skin's expression wrinkles (`:wrinkles {:compress h :stretch h :masks [h h] :weights [8]}`,
+/// ADR-817): two tangent-space normal maps on its UVs, the folds of skin pushed together
+/// (`compress`) and the smoothing of skin drawn tight (`stretch`), and two RGBA masks marking
+/// eight zones (the first's red the first zone … the second's alpha the eighth). Each zone's
+/// weight a frame: above 0 lays that much of the compress map's folds over the zone, below 0 that
+/// much of the stretch map's. The game drives the weights from what her face does.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wrinkles {
+    pub compress: u32,
+    pub stretch: u32,
+    pub masks: [u32; 2],
+    pub weights: [f32; 8],
+}
+
+/// The tilt the wrinkle maps lay over a skin's normal at one texel ([`Wrinkles`], ADR-817): each
+/// zone's mask times its weight, summed apart for the compress map (weights above 0) and the
+/// stretch map (below), times each map's tilt ([`detail_tilt`]). Laid over the normal as the
+/// detail tile's is ([`detail_normal`], strength 1). The shader's `wrinkle_tilt` is the same.
+pub fn wrinkle_tilt(
+    compress: [f32; 4],
+    stretch: [f32; 4],
+    masks: [[f32; 4]; 2],
+    weights: &[f32; 8],
+) -> [f32; 2] {
+    let (mut pushed, mut drawn) = (0.0f32, 0.0f32);
+    for (zone, weight) in weights.iter().enumerate() {
+        let mask = masks[zone / 4][zone % 4];
+        pushed += mask * weight.max(0.0);
+        drawn += mask * (-weight).max(0.0);
+    }
+    let folds = detail_tilt(compress);
+    let smooth = detail_tilt(stretch);
+    [0, 1].map(|axis| folds[axis] * pushed + smooth[axis] * drawn)
 }
 
 /// How much of the specular (and the rim) a detail texel's `cavity` (its blue channel: 1 the
@@ -3772,6 +3811,36 @@ pub fn mip_chain(rgba: &[u8], w: u32, h: u32, coverage: Option<f32>) -> Vec<MipL
 }
 
 /// A texel bilinearly filtered at `(u, v)` (repeating), each channel 0 … 1, still encoded.
+
+/// `texture` at `u, v` as numbers (ADR-817, a `:data` texture: wrinkle maps, zone masks): bilinear
+/// at its own size, every channel raw (its alpha a fourth number, nothing premultiplied), as the
+/// GPU's linear sampler reads a `:data` texture stored as given.
+fn sample_raw(texture: &TextureRef, u: f32, v: f32) -> [f32; 4] {
+    if texture.w == 0 || texture.h == 0 || texture.rgba.len() < (texture.w * texture.h * 4) as usize
+    {
+        return [1.0; 4];
+    }
+    let (width, height) = (texture.w as i64, texture.h as i64);
+    let across = u.rem_euclid(1.0) * width as f32 - 0.5;
+    let down = v.rem_euclid(1.0) * height as f32 - 0.5;
+    let (left, top) = (across.floor(), down.floor());
+    let (fraction_x, fraction_y) = (across - left, down - top);
+    let texel = |column: i64, row: i64| {
+        let column = column.rem_euclid(width) as usize;
+        let row = row.rem_euclid(height) as usize;
+        let start = (row * texture.w as usize + column) * 4;
+        std::array::from_fn::<f32, 4, _>(|channel| texture.rgba[start + channel] as f32 / 255.0)
+    };
+    let (left, top) = (left as i64, top as i64);
+    let (top_left, top_right) = (texel(left, top), texel(left + 1, top));
+    let (bottom_left, bottom_right) = (texel(left, top + 1), texel(left + 1, top + 1));
+    std::array::from_fn(|channel| {
+        let upper = top_left[channel] + (top_right[channel] - top_left[channel]) * fraction_x;
+        let lower =
+            bottom_left[channel] + (bottom_right[channel] - bottom_left[channel]) * fraction_x;
+        upper + (lower - upper) * fraction_y
+    })
+}
 fn sample(texture: &TextureRef, u: f32, v: f32) -> [f32; 4] {
     if texture.w == 0 || texture.h == 0 || texture.rgba.len() < (texture.w * texture.h * 4) as usize
     {
@@ -4246,6 +4315,8 @@ struct DrawContext<'a> {
     detail_texture: Option<TextureRef<'a>>,
     /// Whether the detail tile's normal tilts the surface's: only on a mesh with tangents.
     detail_tilts: bool,
+    /// Its wrinkle maps (compress, stretch) and zone masks (ADR-817): on a skin with tangents.
+    wrinkle_textures: Option<[TextureRef<'a>; 4]>,
     /// How many canvas pixels a side make one of the picture's: a soft shadow's noise is the
     /// picture pixel's, as the GPU's is.
     supersample: usize,
@@ -4539,6 +4610,29 @@ fn fill_triangle(canvas: &mut Canvas, context: &DrawContext, corners: [&ClipVert
                     material.detail_strength,
                 )),
                 None => mapped,
+            };
+            // her expression's wrinkles (ADR-817): the compress and stretch maps' tilts by the
+            // zones' masks and weights, laid over the rest
+            let local = match (
+                context.wrinkle_textures.as_ref(),
+                material.wrinkles.as_ref(),
+            ) {
+                (Some([compress, stretch, first, second]), Some(wrinkles)) => {
+                    // (`:data` textures, read raw at their own size)
+                    let read = |texture: &TextureRef| sample_raw(texture, uv[0], uv[1]);
+                    let tilt = wrinkle_tilt(
+                        read(compress),
+                        read(stretch),
+                        [read(first), read(second)],
+                        &wrinkles.weights,
+                    );
+                    if tilt[0] != 0.0 || tilt[1] != 0.0 {
+                        Some(detail_normal(local.unwrap_or([0.0, 0.0, 1.0]), tilt, 1.0))
+                    } else {
+                        local
+                    }
+                }
+                _ => local,
             };
             let specular_kept = detail.map_or(1.0, |texel| {
                 detail_specular(texel[2], material.detail_cavity)
@@ -5167,6 +5261,19 @@ pub fn rasterize<'t>(
             detail_texture: material.detail_texture().and_then(textures),
             detail_tilts: item.mesh.tangents.is_some(),
             supersample,
+            // (its wrinkle maps and masks, on a skin with tangents, all four or none: ADR-817)
+            wrinkle_textures: material
+                .wrinkles
+                .as_ref()
+                .filter(|_| item.mesh.tangents.is_some() && material.surface == Surface::Skin)
+                .and_then(|wrinkles| {
+                    Some([
+                        textures(wrinkles.compress)?,
+                        textures(wrinkles.stretch)?,
+                        textures(wrinkles.masks[0])?,
+                        textures(wrinkles.masks[1])?,
+                    ])
+                }),
             shadows: &shadows,
             shadow_maps: &shadow_maps,
             emitters: &emitters,
@@ -9463,5 +9570,36 @@ mod tests {
             1.0,
             "none at strength 0"
         );
+    }
+
+    /// ADR-817: a zone's mask times its weight lays the compress map's tilt where the weight is
+    /// above 0 and the stretch map's where it is below; another zone's mask does nothing for it.
+    #[test]
+    fn wrinkles_lay_each_zones_map_by_its_mask_and_weight() {
+        let flat = [DETAIL_FLAT; 4];
+        // the compress map tilted along +u, the stretch along −v
+        let compress = [DETAIL_FLAT + 0.25, DETAIL_FLAT, 1.0, 1.0];
+        let stretch = [DETAIL_FLAT, DETAIL_FLAT - 0.25, 1.0, 1.0];
+        let zone_one = [[1.0, 0.0, 0.0, 0.0], [0.0; 4]];
+        let mut weights = [0.0f32; 8];
+        weights[0] = 0.5;
+        let folded = wrinkle_tilt(compress, stretch, zone_one, &weights);
+        assert!(
+            (folded[0] - 0.25).abs() < 1e-6 && folded[1].abs() < 1e-6,
+            "{folded:?}"
+        );
+        weights[0] = -1.0;
+        let smoothed = wrinkle_tilt(compress, stretch, zone_one, &weights);
+        assert!(
+            smoothed[0].abs() < 1e-6 && (smoothed[1] + 0.5).abs() < 1e-6,
+            "{smoothed:?}"
+        );
+        // the weight is zone one's; a texel only in zone two's mask is untouched
+        let zone_two = [[0.0, 1.0, 0.0, 0.0], [0.0; 4]];
+        assert_eq!(
+            wrinkle_tilt(compress, stretch, zone_two, &weights),
+            [0.0, 0.0]
+        );
+        assert_eq!(wrinkle_tilt(flat, flat, zone_one, &[1.0; 8]), [0.0, 0.0]);
     }
 }

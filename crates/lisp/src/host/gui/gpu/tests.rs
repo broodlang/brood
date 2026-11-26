@@ -318,8 +318,8 @@ fn the_mesh_shader_validates() {
     );
     assert_eq!(eye_floats(Surface::Cutout), [0.0; 32], "no other surface");
     assert_eq!(
-        draw_declared, 448,
-        "the eye's fields, then a hair's `:sheen` (ADR-799), `deform` (ADR-805), `loose` (ADR-812), then the clamp planes (ADR-813)"
+        draw_declared, 480,
+        "the eye's fields, then a hair's `:sheen` (ADR-799), `deform` (ADR-805), `loose` (ADR-812), the clamp planes (ADR-813), then the wrinkle weights (ADR-817)"
     );
     // a hair surface's `:sheen` last, its fourth float 1 when given; its `:shift` in the
     // strand vector's spare two (ADR-799)
@@ -344,7 +344,7 @@ fn the_mesh_shader_validates() {
         .collect();
     // `sheen`, then the four words of `deform` (ADR-805) and the four floats of `loose` (ADR-812)
     assert_eq!(
-        floats[floats.len() - 32..floats.len() - 28],
+        floats[floats.len() - 40..floats.len() - 36],
         [0.5, 0.25, 0.125, 1.0]
     );
     assert_eq!(

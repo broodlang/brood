@@ -526,6 +526,12 @@ impl MeshGpu {
                 texture(3),
                 // the detail tile (ADR-797), through the same repeating sampler
                 texture(4),
+                // the expression wrinkles (ADR-817): the compress and stretch maps, the two zone masks
+                // (13 on: the contact passes hold 8 … 12 of this group in the same module)
+                texture(13),
+                texture(14),
+                texture(15),
+                texture(16),
             ],
         });
         let layouts = [
@@ -1201,7 +1207,20 @@ impl MeshGpu {
                         texture.map(|texture| texture.filter != TextureFilter::Nearest)
                     }),
                     mesh.has_tangents,
-                ) | if material.fibres { 512 } else { 0 };
+                ) | if material.fibres { 512 } else { 0 }
+                    // and 1024 for a skin's expression wrinkles (ADR-817): on a mesh with tangents,
+                    // all four of its textures there, as the CPU's `wrinkle_textures`
+                    | if mesh.has_tangents
+                        && material.surface == Surface::Skin
+                        && material.wrinkles.as_ref().is_some_and(|wrinkles| {
+                            [wrinkles.compress, wrinkles.stretch, wrinkles.masks[0], wrinkles.masks[1]]
+                                .iter()
+                                .all(|handle| textures.contains_key(handle))
+                        }) {
+                        1024
+                    } else {
+                        0
+                    };
                 // its morphs blended here, sparse, into one offset a vertex (none when no target
                 // it names moves anything, or the frame's offsets would pass the binding limit)
                 let vertex_count = mesh.vertex_count as usize;
@@ -1472,6 +1491,12 @@ impl MeshGpu {
                     let occlusion = view(draw.material.occlusion).unwrap_or(&self.white);
                     // no tile: a flat, open texel (the normal map's stand-in is one)
                     let detail = view(draw.material.detail_texture()).unwrap_or(&self.flat);
+                    // its wrinkle maps and masks (ADR-817): flat maps and open masks where none
+                    let wrinkles = draw.material.wrinkles.as_ref();
+                    let compress = view(wrinkles.map(|w| w.compress)).unwrap_or(&self.flat);
+                    let stretch = view(wrinkles.map(|w| w.stretch)).unwrap_or(&self.flat);
+                    let first_mask = view(wrinkles.map(|w| w.masks[0])).unwrap_or(&self.white);
+                    let second_mask = view(wrinkles.map(|w| w.masks[1])).unwrap_or(&self.white);
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("mesh material"),
                         layout: &self.material_layout,
@@ -1495,6 +1520,22 @@ impl MeshGpu {
                             wgpu::BindGroupEntry {
                                 binding: 4,
                                 resource: wgpu::BindingResource::TextureView(detail),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 13,
+                                resource: wgpu::BindingResource::TextureView(compress),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 14,
+                                resource: wgpu::BindingResource::TextureView(stretch),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 15,
+                                resource: wgpu::BindingResource::TextureView(first_mask),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 16,
+                                resource: wgpu::BindingResource::TextureView(second_mask),
                             },
                         ],
                     })
@@ -2003,6 +2044,13 @@ pub(super) fn draw_uniform(
         clamps[slot * 4..slot * 4 + 4].copy_from_slice(plane);
     }
     bytes.extend(floats_bytes(&clamps));
+    // `DrawU::wrinkles`: its eight wrinkle zones' weights (ADR-817), zero without
+    bytes.extend(floats_bytes(
+        &material
+            .wrinkles
+            .as_ref()
+            .map_or([0.0; 8], |wrinkles| wrinkles.weights),
+    ));
     bytes
 }
 

@@ -3054,3 +3054,10 @@ cast shadow looked up just off the skin; a contact can act on one side of a plan
 knee meeting behind the knee, not over the kneecap); `:fibres`' self-shadow tints by each fibre's
 transmittance from its colour, so hair colours no longer all read orange by a lamp. Run: the GUI
 suites (164), parity of `:within` on both adapters.
+
+2026-11-26. **An eye's limbal ring and scattering white (ADR-796); expression wrinkles and `:data`
+textures (ADR-817).** The limbus a soft ring at the iris's edge on both sides, `:limbus [0.45 0.1]`
+by default; the white lit by the skin model's scattering. A skin's `:wrinkles` lays two normal maps
+by eight zones' masks and weights; textures that are numbers upload `:data` (raw, never
+premultiplied). Both painters alike to the pixel (the wrinkle test: 139 against 211 on the CPU and
+both adapters).

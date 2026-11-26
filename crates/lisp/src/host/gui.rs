@@ -1539,6 +1539,10 @@ pub enum TextureFilter {
     Nearest,
     Smooth,
     Coverage,
+    /// Numbers, not a picture (ADR-817: wrinkle maps and zone masks): sampled bilinear at its own
+    /// size, every channel raw, its alpha a fourth number like the others, never premultiplied
+    /// (a mask's zone in red must survive an alpha of 0).
+    Data,
 }
 
 #[cfg(not(feature = "gui"))]

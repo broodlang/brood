@@ -114,17 +114,18 @@
   (test "an unknown :filter is refused by name, in both forms"
     (let (refusal (fn (thunk) (try (thunk) :no-error (catch e (error-message e)))))
       (is (includes? (refusal (fn () (gui/texture 999999 [1 2 3 4] 1 1 {:filter :linear})))
-            ":nearest, :smooth or :coverage"))
+            ":nearest, :smooth, :coverage or :data"))
       (is (includes? (refusal (fn ()
                                 (gui/texture 999999
                                   {:width 1 :height 1 :rgba [1 2 3 4]}
                                   {:filter :blur})))
-            ":nearest, :smooth or :coverage"))))
+            ":nearest, :smooth, :coverage or :data"))))
 
   (test "{:filter :smooth} passes validation and reaches the backend, in both forms"
     (let (refusal (fn (thunk) (try (thunk) :no-error (catch e (error-message e))))
           passed? (fn (msg)
-                    (or (= msg :no-error) (not (includes? msg ":nearest, :smooth or :coverage")))))
+                    (or (= msg :no-error)
+                      (not (includes? msg ":nearest, :smooth, :coverage or :data")))))
       (is (passed? (refusal (fn () (gui/texture 999999 [1 2 3 4] 1 1 {:filter :smooth})))))
       (is (passed? (refusal (fn ()
                               (gui/texture 999999

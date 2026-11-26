@@ -1275,3 +1275,137 @@ fn a_bent_tube_turns_about_its_centres_alike_on_both_painters() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// ADR-817: a skin quad facing the camera, lit from the side, with a hand-made compress map
+/// tilted along +u, a flat stretch map and a mask marking zone one: at zone one's weight 1 the
+/// tilt turns its shading, alike on both painters; at weight 0 it is drawn as without wrinkles.
+#[test]
+fn wrinkles_turn_the_skins_normal_alike_on_both_painters() {
+    use crate::host::gui::mesh::{TextureRef, Wrinkles};
+    let side = 64u32;
+    let positions = [
+        -0.5f32, -0.5, 0.5, 0.5, -0.5, 0.5, 0.5, 0.5, 0.5, -0.5, 0.5, 0.5,
+    ];
+    let normals = [0.0f32, 0.0, -1.0].repeat(4);
+    let uvs = [0.0f32, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0];
+    let tangents = [1.0f32, 0.0, 0.0, 1.0].repeat(4);
+    let quad = Arc::new(
+        Mesh::from_parts(MeshParts {
+            positions: bytes_of(&positions),
+            normals: bytes_of(&normals),
+            uvs: bytes_of(&uvs),
+            tangents: bytes_of(&tangents),
+            indices: [0u16, 1, 2, 0, 2, 3]
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect(),
+            ..MeshParts::default()
+        })
+        .expect("a quad"),
+    );
+    // 4 × 4 textures: the compress map tilted along +u (red 192: a tilt of 0.5), the stretch map
+    // flat, zone one's mask full, the second mask empty
+    let texture = |texel: [u8; 4]| texel.repeat(16);
+    let compress = texture([192, 128, 255, 255]);
+    let stretch = texture([128, 128, 255, 255]);
+    let first = texture([255, 0, 0, 0]);
+    let second = texture([0, 0, 0, 0]);
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    scene.lights = vec![Light::directional([0.8, 0.0, 0.6], [1.0, 1.0, 1.0])];
+    let shoot = |weight: f32| {
+        let mut scene = scene.clone();
+        let mut weights = [0.0f32; 8];
+        weights[0] = weight;
+        scene.draws = vec![Draw {
+            loose: None,
+            mesh: 1,
+            model: [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            palette: None,
+            morphs: vec![],
+            material: Material {
+                surface: Surface::Skin,
+                double_sided: true,
+                specular: 0.0,
+                color: [0.8, 0.8, 0.8, 1.0],
+                wrinkles: Some(Wrinkles {
+                    compress: 11,
+                    stretch: 12,
+                    masks: [13, 14],
+                    weights,
+                }),
+                ..Material::default()
+            },
+        }];
+        scene
+    };
+    let meshes = |handle: u32| (handle == 1).then(|| quad.clone());
+    let textures = |handle: u32| -> Option<TextureRef<'_>> {
+        let rgba: &[u8] = match handle {
+            11 => &compress,
+            12 => &stretch,
+            13 => &first,
+            14 => &second,
+            _ => return None,
+        };
+        Some(TextureRef {
+            w: 4,
+            h: 4,
+            rgba,
+            levels: &[],
+        })
+    };
+    let folded = shoot(1.0);
+    let still = shoot(0.0);
+    let (_, _, cpu_folded) = rasterize(&folded, &meshes, &textures);
+    let (_, _, cpu_still) = rasterize(&still, &meshes, &textures);
+    let centre = ((side / 2 * side + side / 2) * 4) as usize;
+    assert!(
+        cpu_folded[centre].abs_diff(cpu_still[centre]) > 8,
+        "the CPU painter: the wrinkle turns the light: {} against {}",
+        cpu_folded[centre],
+        cpu_still[centre]
+    );
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let mut frames = Vec::new();
+        for scene in [&folded, &still] {
+            let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+                continue;
+            };
+            gpu.upload_mesh(1, &quad);
+            for (handle, rgba) in [(11, &compress), (12, &stretch), (13, &first), (14, &second)] {
+                gpu.upload_texture(handle, rgba, 4, 4, crate::host::gui::TextureFilter::Data);
+            }
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            renderer.set_bg(Some([0, 0, 0]));
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            frames.push(gpu.read_pixels());
+        }
+        if frames.len() < 2 {
+            continue;
+        }
+        let at = ((side / 2 * side + side / 2) * 3) as usize;
+        eprintln!(
+            "{name}: centre red folded {} still {}; CPU folded {} still {}",
+            frames[0][at], frames[1][at], cpu_folded[centre], cpu_still[centre]
+        );
+        if frames[0][at].abs_diff(cpu_folded[centre]) > 6
+            || frames[1][at].abs_diff(cpu_still[centre]) > 6
+        {
+            failures.push(format!("{name}: GPU apart from the CPU at the centre"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

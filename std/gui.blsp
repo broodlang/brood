@@ -689,16 +689,16 @@ afterwards wins. Needs --features gui. Returns nil.
       tex)))
 
 (defn texture-filter (opts)
-  "The sampling filter a texture options map asks for — `:smooth`, `:coverage` (smooth, its mip levels keeping as many texels above half alpha as at full size, for hair strands and other alpha-tested textures seen small) or `:nearest`, the default when `:filter` is absent — checked: anything else is an error naming them, never a silent nearest. What gui/texture and `editor/frontend/display-texture` hand on with the upload (ADR-783).
+  "The sampling filter a texture options map asks for — `:smooth`, `:coverage` (smooth, its mip levels keeping as many texels above half alpha as at full size, for hair strands and other alpha-tested textures seen small), `:data` (numbers, not a picture: read bilinear at its own size, every channel raw, alpha never premultiplied, for wrinkle maps and zone masks, ADR-817) or `:nearest`, the default when `:filter` is absent — checked: anything else is an error naming them, never a silent nearest. What gui/texture and `editor/frontend/display-texture` hand on with the upload (ADR-783).
 
     (gui/texture-filter {})                   ;=> :nearest
     (gui/texture-filter {:filter :smooth})    ;=> :smooth
     (gui/texture-filter {:filter :coverage})  ;=> :coverage
     (try (gui/texture-filter {:filter :linear}) (catch e :refused))   ;=> :refused"
   (let (filter (get opts :filter :nearest))
-    (if (contains? #{:nearest :smooth :coverage} filter)
+    (if (contains? #{:nearest :smooth :coverage :data} filter)
       filter
-      (error "gui/texture: :filter must be :nearest, :smooth or :coverage, got " filter))))
+      (error "gui/texture: :filter must be :nearest, :smooth, :coverage or :data, got " filter))))
 
 (defn alloc-texture (w h)
   "Allocate a texture handle for a `w`×`h` upload and remember the size under it — the Brood half of gui/texture, on its own for an app that uploads through a DISPLAY map's `:texture` (a window it did not open, or a thin client's over the wire — `editor/frontend/display-texture`) rather than a window id. The handle is process-wide and never reused, so it can name a texture in any window.
@@ -800,7 +800,10 @@ carrying its op. Errors on a bad rate, channel count or an odd byte count.
 ;; handles), `:color`, `:roughness`, `:specular`, `:lobes`, `:scatter` (light under the skin,
 ;; below), `:detail` with `:detail-scale`, `:detail-strength` and `:detail-cavity` (a tiled
 ;; micro-relief, below), `:coat` (a clear wet layer, below), `:cutoff`, `:double-sided`,
-;; `:cast-shadow` (true by default), `:deform` (its skin pressed by the scene's `:contacts`).
+;; `:cast-shadow` (true by default), `:deform` (its skin pressed by the scene's `:contacts`), and on a
+;; `:skin` `:wrinkles {:compress h :stretch h :masks [h h] :weights [8]}` (expression wrinkles: two
+;; tangent-space normal maps laid over its own by eight zones' masks times their weights, above 0 the
+;; compress map, below the stretch map; all four textures uploaded `:data`, ADR-817).
 ;; `:contacts [{:plane [nx ny nz d]} {:sphere [x y z r]} {:capsule [ax ay az bx by bz r]} …]`
 ;; (at most 64, world space; each may carry `:drag [x y z]`, the skin dragged along it by
 ;; friction, `:skip [j …]`, the joints of its own limb, whose skin it never presses, and `:only
