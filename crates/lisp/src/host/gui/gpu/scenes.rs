@@ -1148,7 +1148,7 @@ impl MeshGpu {
         });
         // (and, for a mesh that can be pressed, what its squeezed skin is relaxed by, ADR-822)
         let ring = if softness.is_some() {
-            mesh_ring(device, queue, &mesh)
+            mesh_ring(device, queue, mesh)
         } else {
             None
         };
