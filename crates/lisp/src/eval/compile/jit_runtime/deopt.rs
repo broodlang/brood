@@ -504,14 +504,14 @@ fn reset_arm_untried(heap: &Heap, arm: &CompiledArm) {
     if let Some(key) = arm.share_key {
         heap.jit_shared_retract(key);
     }
+    // (read before the reset nulls them: the links to drop are the links to THIS code)
+    let codes = arm_codes(arm);
     reset_native_state(arm);
     // This process's native→native links to the arm still hold the old pointer and never
     // consult `jit_code` (the inline swap's situation exactly): drop them, so the callers
     // re-probe. A peer's links are its own to drop — see the swap's soundness note in
     // `jit_tier`; the old code is valid, only slower.
-    if let Some(sym) = arm.dbg_name {
-        heap.invalidate_fast_links_for(sym);
-    }
+    unlink_arm(heap, arm, codes);
 }
 
 /// Put an arm's native state back to "untried, already proven hot": the ONE reset, shared
@@ -597,6 +597,7 @@ pub(crate) fn jit_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
                 arm.dbg_opcodes()
             );
         }
+        let codes = arm_codes(arm);
         arm.latch_bailed(&format!(
             "deopt-thrash-latched:{}",
             DeoptReason::describe(heap.jit_deopt_reason())
@@ -605,9 +606,7 @@ pub(crate) fn jit_deopt_feedback(heap: &Heap, arm: &CompiledArm) {
         // `vm_fast_link_clear_site`), so a JIT'd caller holding a link would keep
         // entering the latched native — and deopting — on every call. Clear them, as the
         // untried reset does; the callers re-probe and find BAILED.
-        if let Some(sym) = arm.dbg_name {
-            heap.invalidate_fast_links_for(sym);
-        }
+        unlink_arm(heap, arm, codes);
     }
 }
 
@@ -665,4 +664,31 @@ pub(crate) fn frame_size_for_code(arm: &CompiledArm, code: *mut u8) -> usize {
     } else {
         arm.nslots
     }
+}
+
+/// The native code `arm` holds now: its own and its inlined upgrade's, as the addresses a
+/// [fast link](crate::core::heap::FastLink) to either would carry.
+fn arm_codes(arm: &CompiledArm) -> [u64; 2] {
+    use std::sync::atomic::Ordering::Acquire;
+    [
+        arm.jit_code.load(Acquire) as u64,
+        arm.inline_code.load(Acquire) as u64,
+    ]
+}
+
+/// Drop this process's native-to-native links to `arm`, whose code was `codes` until it was
+/// reset or latched: by the name the arm was defined under, and by the code itself.
+///
+/// The name alone missed every caller that reaches the function by ANOTHER name — a link
+/// records the symbol its call site spells, and a module-qualified alias or an imported bare
+/// name is not the symbol the definition carries (`b3d-math/mat4-multiply` at the call,
+/// `b3d/b3d-math/mat4-multiply` on the arm). Such a caller kept entering the code that had
+/// just been taken away: a re-tier's fresh trial counted the OLD code's deopts and latched
+/// before the new code was in, and after the latch every call still entered the latched
+/// native, deopted, and re-ran on the VM (5.5 µs a call where the function takes 0.3).
+fn unlink_arm(heap: &Heap, arm: &CompiledArm, codes: [u64; 2]) {
+    if let Some(sym) = arm.dbg_name {
+        heap.invalidate_fast_links_for(sym);
+    }
+    heap.invalidate_fast_links_to_code(codes);
 }

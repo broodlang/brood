@@ -1717,6 +1717,21 @@ impl Heap {
         }
     }
 
+    /// Clear this process's [`FastLink`] slots that point at either of `codes` (an arm's
+    /// native code and its inlined upgrade's, as addresses; 0 names none): the links to an
+    /// arm whose code is being taken away, whatever name each call site reaches it by.
+    /// [`Self::invalidate_fast_links_for`] finds a link by the symbol its call site spells,
+    /// which is not the arm's own name when the call goes through an alias.
+    #[cfg(feature = "jit")]
+    pub(crate) fn invalidate_fast_links_to_code(&self, codes: [u64; 2]) {
+        let mut fls = self.vm_fast_links.borrow_mut();
+        for fl in fls.iter_mut() {
+            if fl.code != 0 && codes.contains(&fl.code) {
+                *fl = FastLink::EMPTY;
+            }
+        }
+    }
+
     /// Clear ONE call site's [`FastLink`] mirror slot (relative `site`, resolved against
     /// the current IC base like every probe). For the suspend-host latch: a latched arm's
     /// `jit_code` goes `BAILED`, but the mirror's hit path — and the raw load emitted into

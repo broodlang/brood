@@ -3183,3 +3183,21 @@ docstring stays leading). Found with `BROOD_DEFER_DBG`, which names an anonymous
 parameters and body since 16b8cb088. Guard: `tests/vm_closures_test.blsp` "a closure whose body
 starts with a collection literal" (what such closures answer; that they compile is read off
 `BROOD_DEFER_DBG`, the perf counters being a build feature).
+
+2026-11-27. **A reset or latched arm's native links are dropped by the code they point at.** A
+JIT'd caller's fast link records the symbol its call site spells; a re-tier and the thrash
+latch dropped links by the arm's OWN name, so a caller reaching the function through an alias
+(`b3d-math/mat4-multiply` at the call, `b3d/b3d-math/mat4-multiply` on the arm; an imported bare
+name) kept entering the code that had been taken away. A re-tier's fresh trial then counted the
+old code's deopts and latched before the new code was in, and after the latch every call still
+entered the latched native, deopted and re-ran on the VM: 5.5 µs a call where the function
+takes 0.27, in 9 runs of 12 of a matrix-multiply loop (1 of 12 after, and that one at VM speed,
+not deopting). womanblend's `womanblend-face/wanted` deopted on every call of every frame
+(12,290 in a 520-frame run; none after). `Heap::invalidate_fast_links_to_code`, called with the
+arm's code and its inlined upgrade's from `reset_arm_untried` and the latch
+(`jit_runtime/deopt.rs` `unlink_arm`). Found with `BROOD_JIT_BAIL_TRACE`: the latch line's
+`deopts=` kept counting past 16. Guard:
+`a_callee_reached_only_through_native_links_still_gets_its_inlined_upgrade` drops its links by
+code now. Still open: the same loop's first lowering guesses integers for floats read out of a
+vector in about half its runs, and the float-context re-lowering that follows runs at 1 µs a
+call where a first lowering that guessed right runs at 0.27.

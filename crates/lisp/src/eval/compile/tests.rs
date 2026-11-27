@@ -2878,12 +2878,26 @@ fn a_callee_reached_only_through_native_links_still_gets_its_inlined_upgrade() {
     // upgrade's lowering instead.
     interp.eval_str("(def unrelated 1)").expect("def");
     interp.eval_str("(warm 200)").expect("warm");
+    // (the code the links to drop point at, read before the reset nulls it)
+    let codes = [
+        arm.jit_code.load(Acquire) as u64,
+        arm.inline_code.load(Acquire) as u64,
+    ];
     crate::eval::compile::reset_native_state(&arm);
     // The links `warm` holds still name the old inlined pointer at the live epoch; drop them
-    // so its next call reaches the re-tiered arm, as a reset's epoch move would.
-    interp
-        .heap
-        .invalidate_fast_links_for(crate::core::value::intern("sum-sq"));
+    // so its next call reaches the re-tiered arm, as a reset's epoch move would. By the CODE
+    // they point at, as a reset and a latch drop them: a link records the name its call site
+    // spells, which need not be the arm's own (an alias), and one left behind kept entering
+    // the code that was taken away.
+    interp.heap.invalidate_fast_links_to_code(codes);
+    assert!(
+        interp
+            .heap
+            .vm_fast_links_published()
+            .iter()
+            .all(|(_, link)| !codes.contains(&link.code)),
+        "a link to the reset arm's code survived being dropped by code"
+    );
     wait_for_tier(
         || arm.inline_installed.load(Acquire),
         || upgrade_queued(&arm),
