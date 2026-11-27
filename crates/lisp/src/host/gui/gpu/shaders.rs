@@ -736,7 +736,7 @@ struct DrawU {
     model: mat4x4<f32>,
     color: vec4<f32>,
     skin: vec4<f32>,            // a `:skin` surface: its curvature (1 / mesh units) to 1 / mm, times `:scatter`; the `:coat`'s strength, its roughness
-    material: vec4<f32>,        // roughness, specular, a `:fibres` surface's `:density`, cutoff
+    material: vec4<f32>,        // roughness, specular, z by texture bit 512: a `:fibres` surface's `:density`, any other's `:see-through` (ADR-842); cutoff
     lobes: vec4<f32>,           // roughness times a, times b, mix of a, F0
     flags: vec4<u32>,           // surface, texture bits (`scenes::texture_bits`), palette offset, skinned
     morph_info: vec4<u32>,      // morphed (0 or 1), vertex count, palette joint count, first offset

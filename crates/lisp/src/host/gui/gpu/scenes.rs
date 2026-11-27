@@ -223,8 +223,9 @@ pub(super) struct SceneTarget {
     depth: wgpu::TextureView,
     resolve: wgpu::TextureView,
     /// What the colour pass drew before its see-through draws (ADR-842), resolved: the colour
-    /// they are mixed toward. Written only on a frame that has one.
-    behind: wgpu::TextureView,
+    /// they are mixed toward. Made the first frame the scene has one and kept at its size, so a
+    /// scene that never has one costs nothing for it.
+    behind: Option<wgpu::TextureView>,
     /// The resolved picture bound for the textured pipeline.
     pub(super) composite: wgpu::BindGroup,
     /// Its shadow maps, kept while their number and size stay (ADR-788).
@@ -1616,13 +1617,6 @@ impl MeshGpu {
             1,
             attachment | wgpu::TextureUsages::TEXTURE_BINDING,
         );
-        // (what lies behind the see-through draws, ADR-842: the first part's resolve)
-        let behind = texture(
-            "scene behind the see-through",
-            COLOR_FORMAT,
-            1,
-            attachment | wgpu::TextureUsages::TEXTURE_BINDING,
-        );
         let composite = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene picture"),
             layout: tex_layout,
@@ -1642,7 +1636,7 @@ impl MeshGpu {
             color,
             depth,
             resolve,
-            behind,
+            behind: None,
             composite,
             shadow: None,
             contacts: None,
@@ -2001,6 +1995,7 @@ impl MeshGpu {
                     pressed,
                     fibres: material.fibres,
                     see_through: see_through_share(material) > 0.0,
+                    garment: material.garment,
                     hair_bounds: if material.fibres && material.cast_shadow {
                         draw_bounds(scene, draw, &mesh.bounds)
                     } else {
@@ -2146,6 +2141,28 @@ impl MeshGpu {
                 }
             } else {
                 target.fibres = None;
+            }
+            // what lies behind its see-through draws (ADR-842): the first time it has one
+            if target.behind.is_none() && plans[index].iter().any(|draw| draw.see_through) {
+                target.behind = Some(
+                    device
+                        .create_texture(&wgpu::TextureDescriptor {
+                            label: Some("scene behind the see-through"),
+                            size: wgpu::Extent3d {
+                                width: size.0,
+                                height: size.1,
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: COLOR_FORMAT,
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                                | wgpu::TextureUsages::TEXTURE_BINDING,
+                            view_formats: &[],
+                        })
+                        .create_view(&wgpu::TextureViewDescriptor::default()),
+                );
             }
         }
         // a scene the frame no longer draws gives its target back
@@ -2711,9 +2728,11 @@ impl MeshGpu {
             // the colour pass split where its see-through draws begin (ADR-842): everything else
             // that is opaque first, resolved into `behind`, then the see-through draws and what
             // blends over them, mixed toward it. A scene without one is one pass, as before.
-            let split = plans[index]
-                .iter()
-                .any(|draw| draw.see_through && !draw.fibres);
+            let behind = target.behind.as_ref().unwrap_or(&self.no_behind);
+            let split = target.behind.is_some()
+                && plans[index]
+                    .iter()
+                    .any(|draw| draw.see_through && !draw.fibres);
             let scene_group = scene_group_over(&self.no_behind);
             let background = scene.background;
             let opacity = background[3].clamp(0.0, 1.0);
@@ -2733,7 +2752,11 @@ impl MeshGpu {
             // which part of a split colour pass a draw is in (ADR-842): the first, what lies
             // behind the see-through draws (opaque, not hair); the second, those and everything
             // that is drawn over them (blended, hair). Unsplit, every draw is in the one part.
-            let in_first = |draw: &DrawPlan| !draw.see_through && !draw.blended && !is_hair(draw);
+            // (the first: what lies under the garments, her skin and the room; every garment is in
+            // the second, so its hems and cords are never what shows through a panel)
+            let in_first = |draw: &DrawPlan| {
+                !draw.see_through && !draw.garment && !draw.blended && !is_hair(draw)
+            };
             let parts: &[bool] = if split { &[true, false] } else { &[true] };
             for &first in parts {
                 let last = !split || !first;
@@ -2755,11 +2778,7 @@ impl MeshGpu {
                         view: &target.color,
                         depth_slice: None,
                         // (the first part of a split resolves into what the second reads)
-                        resolve_target: Some(if last {
-                            &target.resolve
-                        } else {
-                            &target.behind
-                        }),
+                        resolve_target: Some(if last { &target.resolve } else { behind }),
                         ops: wgpu::Operations {
                             load: if first {
                                 wgpu::LoadOp::Clear(clear)
@@ -2796,7 +2815,7 @@ impl MeshGpu {
                     multiview_mask: None,
                 });
                 if split && !first {
-                    part_group = scene_group_over(&target.behind);
+                    part_group = scene_group_over(behind);
                     pass.set_bind_group(0, &part_group, &[scene_offset]);
                 } else {
                     pass.set_bind_group(0, &scene_group, &[scene_offset]);
@@ -3273,6 +3292,8 @@ struct DrawPlan {
     /// A see-through draw (ADR-842): drawn after the colour pass is split, opaque, mixed toward
     /// what the first part drew at its pixel.
     see_through: bool,
+    /// A garment (ADR-839): never in what shows through a see-through draw (ADR-842).
+    garment: bool,
     /// A casting `:fibres` draw's world bounds this frame (ADR-827): the shadow views it is in
     /// (`seen_by`) are the only ones it is drawn into for its opacity maps.
     hair_bounds: Option<Bounds>,

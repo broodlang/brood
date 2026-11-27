@@ -1853,12 +1853,13 @@ fn a_normal_maps_green_tilts_toward_the_images_up_whatever_the_tangents_w_on_the
 }
 
 #[test]
-fn a_see_through_draw_shows_what_is_behind_it_never_another_see_through_draw_on_the_gpu() {
+fn a_see_through_draw_shows_what_is_behind_it_never_another_garment_on_the_gpu() {
     // seen from above, lit straight down: a red floor, over it a green see-through card, over that
     // a smaller blue one (ADR-842: both `:see-through 0.5`). Where the blue card lies over the
     // green, what shows through it is the red floor, never the green card between: the pixel is
-    // the same as with no green card at all. Where the green card alone lies, the floor shows
-    // through it. With a share of 0 both cards are opaque, as any draw. The GPU painter only.
+    // the same as with no green card at all, and the same again when the green card is an opaque
+    // garment (a hem under a panel). Where the green card alone lies, the floor shows through it.
+    // With a share of 0 both cards are opaque, as any draw. The GPU painter only.
     let side = 128u32;
     let floor = Arc::new(square(0.0, 2.0));
     let middle = Arc::new(square(0.01, 0.2));
@@ -1899,6 +1900,11 @@ fn a_see_through_draw_shows_what_is_behind_it_never_another_see_through_draw_on_
     top_alone.draws = vec![draw(1, red, 0.0), draw(3, blue, 0.5)];
     let mut opaque = scene.clone();
     opaque.draws = vec![draw(1, red, 0.0), draw(2, green, 0.0), draw(3, blue, 0.0)];
+    // (and an opaque garment between, a hem under a panel: never what shows through it either)
+    let mut garment_between = scene.clone();
+    let mut hem = draw(2, green, 0.0);
+    hem.material.garment = true;
+    garment_between.draws = vec![draw(1, red, 0.0), hem, draw(3, blue, 0.5)];
     let adapters = hardware_adapters();
     if adapters.is_empty() {
         eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
@@ -1927,7 +1933,15 @@ fn a_see_through_draw_shows_what_is_behind_it_never_another_see_through_draw_on_
             gpu.read_pixels()
         };
         let (both, top_alone, opaque) = (paint(&both), paint(&top_alone), paint(&opaque));
+        let garment_between = paint(&garment_between);
         let centre = (at(&both, 64), at(&top_alone, 64), at(&opaque, 64));
+        let under_garment = at(&garment_between, 64);
+        if (0..3).any(|channel| (under_garment[channel] - centre.1[channel]).abs() > 2) {
+            failures.push(format!(
+                "{name}: an opaque garment shows through the see-through card: {under_garment:?} against {:?} without it",
+                centre.1
+            ));
+        }
         let green_alone = (at(&both, 102), at(&opaque, 102));
         eprintln!(
             "{name}: centre (both, top alone, opaque) {centre:?}; green alone (see-through, opaque) {green_alone:?}"
