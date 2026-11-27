@@ -2473,6 +2473,15 @@ fn karis_hair(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: ve
 // not go under: `normal` and `surface_normal` but for an `:eye` under its cornea, ADR-796)
 fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>, curvature: f32, specular_kept: f32, diffuse_normal: vec3<f32>, mirror_surface: vec3<f32>, under_cornea: vec4<f32>) -> vec3<f32> {
     var out = base * ambient(diffuse_normal) * occlusion;
+    // a `:fibres` strand's ambient through the hair round it, as a light's comes (ADR-828): the
+    // bake's mean crossings over every direction (its constant term), each fibre passing its own
+    // colour's share and scattering a little away. A grey exp(-0.05 crossings) let inner strands
+    // keep nearly all of it: the gaps between locks never went dark (her brown hair's shade
+    // quartile L* 21 against a photograph's 13, womanblend-39)
+    if ((draw.flags.y & 512u) != 0u && dot(fibre_visibility, fibre_visibility) > 0.0) {
+        let crossed = draw.material.z * max(fibre_visibility.x, 0.0);
+        out = out * pow(fibre_transmittance(base), vec3<f32>(crossed)) * exp(-0.03 * crossed);
+    }
     let f0 = draw.lobes.w;
     // a `:hair` surface's highlights: as sharp as its roughness asks
     let exponent = shininess(surface_roughness());
@@ -2873,8 +2882,7 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
     }
     // the ambient's occlusion: its map's, times the scene's screen-space ambient occlusion
     let occlusion = select(1.0, occlusion_texel.r, (draw.flags.y & 16u) != 0u)
-        * ambient_occlusion(fragment.world, surface_normal)
-        * select(1.0, exp(-0.05 * max(fibre_visibility.x, 0.0)), fibres);
+        * ambient_occlusion(fragment.world, surface_normal);
     // a soft shadow's taps turned by the pixel's noise, the CPU painter's at the same pixel
     let turn = 6.28318531 * pixel_noise(floor(fragment.clip.xy));
     // a hair's strand: the bitangent, as its UV v runs
