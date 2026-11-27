@@ -10,6 +10,13 @@
 (def *cgc-scale* 10)
 (defn cgc-step (x) (+ x 1))
 
+;; (the globals the `def` test rebinds are its own: tests of a file run side by side)
+(def *cgc-late-scale* 10)
+(defn cgc-late-step (x) (+ x 1))
+
+(defn- cgc-late-sum (offset items)
+  (fold items 0 (fn (sum item) (+ sum (* *cgc-late-scale* (cgc-late-step (+ item offset)))))))
+
 (defn- cgc-sum (offset items)
   ;; the closure captures `offset`; `cgc-step` and `*cgc-scale*` are globals read inside it
   (fold items 0 (fn (sum item) (+ sum (* *cgc-scale* (cgc-step (+ item offset)))))))
@@ -29,14 +36,14 @@
     (assert= (fold (range 3000) 0 (fn (_ _) (cgc-sum 1 [1 2 3]))) 120))
 
   (test "see a def made after they were cached"
-    (assert= (cgc-sum 0 [1 2]) 50)
-    (reflect/eval '(def closure-global-cache-test/*cgc-scale* 2))
-    (assert= (cgc-sum 0 [1 2]) 10)
-    (reflect/eval '(defn closure-global-cache-test/cgc-step (x) (+ x 5)))
-    (assert= (cgc-sum 0 [1 2]) 26)
-    (reflect/eval '(def closure-global-cache-test/*cgc-scale* 10))
-    (reflect/eval '(defn closure-global-cache-test/cgc-step (x) (+ x 1)))
-    (assert= (cgc-sum 0 [1 2]) 50))
+    (assert= (cgc-late-sum 0 [1 2]) 50)
+    (reflect/eval '(def closure-global-cache-test/*cgc-late-scale* 2))
+    (assert= (cgc-late-sum 0 [1 2]) 10)
+    (reflect/eval '(defn closure-global-cache-test/cgc-late-step (x) (+ x 5)))
+    (assert= (cgc-late-sum 0 [1 2]) 26)
+    (reflect/eval '(def closure-global-cache-test/*cgc-late-scale* 10))
+    (reflect/eval '(defn closure-global-cache-test/cgc-late-step (x) (+ x 1)))
+    (assert= (cgc-late-sum 0 [1 2]) 50))
 
   (test "a local of the same name wins over the global"
     (assert= (cgc-shadowed [1 2]) [101 201])
