@@ -535,7 +535,7 @@ pub(super) fn hair_trial() -> u32 {
     std::env::var("BROOD_GUI_HAIR_TRIAL")
         .ok()
         .and_then(|text| text.trim().parse::<u32>().ok())
-        .filter(|trial| *trial <= 16)
+        .filter(|trial| *trial <= 18)
         .unwrap_or(0)
 }
 

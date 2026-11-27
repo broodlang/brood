@@ -2550,6 +2550,18 @@ fn fibre_dual(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: ve
     if (HAIR_TRIAL == 7u || HAIR_TRIAL == 9u) {
         colour = clamp(fibre_transmittance_at(base, 0.3), vec3<f32>(1e-4), vec3<f32>(1.0));
     }
+    if (HAIR_TRIAL == 17u || HAIR_TRIAL == 18u) {
+        // (Chiang's absorption a channel at a time at radial roughness 0.3, no melanin fit: what
+        // Cycles' Principled Hair does with a colour, 39's reference)
+        let b = 0.3;
+        let b2 = b * b;
+        let denominator = 5.969 - 0.215 * b + 2.532 * b2 - 10.73 * b2 * b + 5.574 * b2 * b2 + 0.245 * b2 * b2 * b;
+        let ratio = log(clamp(base, vec3<f32>(1e-4), vec3<f32>(1.0))) / denominator;
+        colour = exp(-2.0 * ratio * ratio);
+        if (HAIR_TRIAL == 18u) {
+            colour = colour * colour;
+        }
+    }
     if (HAIR_TRIAL == 15u) {
         colour = clamp(colour * vec3<f32>(1.08, 1.0, 0.92), vec3<f32>(1e-4), vec3<f32>(1.0));
     }
