@@ -1120,6 +1120,21 @@ pub(super) mod codegen {
             && !has_inline_vec
             && !has_self_loop
         {
+            // An arm whose calls the leaf inliner takes ALL of is not call-mediated once it
+            // is upgraded: its spliced body (`LeafInline::resume`) holds no call at all. The
+            // upgrade only ever follows a first lowering, so refusing that left such an arm
+            // on the VM for good: a three-line `smoothstep` over `math/clamp` ran at 559 ns a
+            // call where its spliced body takes 4. Admit it; the cost model above is about
+            // calls that remain.
+            #[cfg(feature = "jit")]
+            if arm.leaf.as_ref().is_some_and(|leaf| {
+                leaf.resume
+                    .chunk
+                    .as_ref()
+                    .is_some_and(|spliced| non_tail_call_count(&spliced.code) == 0)
+            }) {
+                return Ok(());
+            }
             return Err(record_bail(BailReason::CallMediatedBoxed));
         }
         Ok(())

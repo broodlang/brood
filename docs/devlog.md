@@ -3238,3 +3238,14 @@ pairs (the prelude's `%assoc-vec-pairs` is it now), and `%vector-splice` / `seq/
 run of items in from an index in one copy, where two `subvec`s and two `into`s made three
 (b3d-skeleton's `spliced`). Guard: `tests/vectors_test.blsp` "many items of a vector replaced
 at once".
+
+2026-11-27. **The JIT's cost gate admits an arm whose calls all inline away.** The
+`call-mediated-boxed` gate refuses a first lowering to a named function holding a call and no
+vector op or loop, and the leaf-inlined upgrade only follows a first lowering: a function
+whose calls the inliner would have taken ALL of stayed on the VM for good. b3d-math's
+`smoothstep` (three lines over `math/clamp`) took 559 ns a call; its spliced body takes 26.
+`plan_general_lowering` now admits an arm whose `LeafInline::resume` chunk holds no non-tail
+call. In womanblend's viewer 10 hot functions moved to native code (277 refused → 266); the
+other 266 hold calls that remain, which is what the gate's cost model is about (§7.1 of
+compute-frontier.md stands). Not measured on brood's benchmark rows: this machine does not
+run them. Guard: `tests/jit_leaf_admit_test.blsp`.
