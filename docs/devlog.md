@@ -3392,3 +3392,14 @@ since d9c8d1d75, and eight direct-mapped slots thrashed. womanblend's serial tic
 million instructions (three runs each, ±1.5); CI's `ab`: nbody −8.1%, no row slower.
 `process_floor`'s floor 2 620 → 2 640: set that afternoon from ONE reading, the probe moves by
 ±15 B between runs, main reads 2 601–2 610, and the arena's pointer adds 8.
+
+2026-11-27. **Keyword and symbol constants are three words in native code; an arm handle is
+counted without atomics.** Every `(get m :key)` in native code called `brood_rt_const_load`
+for its key: a keyword or symbol is an interned id that never moves, so its words are now
+emitted as constants (native equality compares only the id's low 32 bits, so the zeroed high
+half matches a heap keyword). And native code's call to a closure cloned the callee's
+`ArmHandle` out of the computed-call memo and dropped it after, two atomic read-modify-writes
+a call — a third of `jit_dispatch_call`'s own time — on a count only the thread running the
+process touches: `ArmRef` counts in a `Cell` and is `Send`, not `Sync`, so a structure that
+would share one between threads does not compile. womanblend's serial tick about 1% lighter
+for each (three runs each); CI's `ab`: every row within noise.
