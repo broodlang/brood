@@ -514,7 +514,7 @@ pub(super) fn book_native_outcome(
 #[allow(clippy::too_many_arguments)]
 fn settle_native_frame(
     heap: &mut Heap,
-    cur_arm: &Arc<ArmHandle>,
+    cur_arm: &ArmRef,
     cur_base: usize,
     frame_nslots: usize,
     inlined_active: bool,
@@ -878,7 +878,7 @@ unsafe fn profile_frame_names(frames: *const (), stack: &mut Vec<value::Symbol>)
 
 pub(crate) fn vm_run_bc(
     heap: &mut Heap,
-    arm0: Arc<ArmHandle>,
+    arm0: ArmRef,
     args0: &[Value],
     genv0: EnvId,
     resume: Option<Box<Suspended>>,

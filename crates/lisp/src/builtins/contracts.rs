@@ -980,7 +980,7 @@ pub(crate) fn shim_call_site_arm(
     heap: &Heap,
     shim: Value,
     argc: usize,
-) -> Option<(std::sync::Arc<crate::eval::compile::ArmHandle>, EnvId)> {
+) -> Option<(crate::eval::compile::ArmRef, EnvId)> {
     let ValueRef::Fn(id) = shim.unpack() else {
         return None;
     };

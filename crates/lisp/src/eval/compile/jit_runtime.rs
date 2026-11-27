@@ -114,7 +114,7 @@ pub(crate) enum DirectNative {
 #[cfg(feature = "jit")]
 pub(crate) fn vm_call_native_direct(
     heap: &mut Heap,
-    arm: &Arc<ArmHandle>,
+    arm: &ArmRef,
     argc: usize,
     base: usize,
     callee_env: EnvId,

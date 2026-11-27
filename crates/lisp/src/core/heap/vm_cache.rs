@@ -106,7 +106,7 @@ pub(crate) struct ComputedCallEntry {
     argc: u32,
     epoch: u64,
     gc_runs: u64,
-    arm: Arc<crate::eval::compile::ArmHandle>,
+    arm: crate::eval::compile::ArmRef,
     env: EnvId,
     bases: (u32, u32),
 }
@@ -157,7 +157,7 @@ pub struct CallIcEntry {
     /// to a non-passthrough VM-eligible closure. Held as a process-local
     /// [`ArmHandle`](crate::eval::compile::ArmHandle) so the per-call probe clone is never
     /// contended when the arm is runtime-shared (KI-40).
-    arm: Option<Arc<crate::eval::compile::ArmHandle>>,
+    arm: Option<crate::eval::compile::ArmRef>,
     /// The arm's captured env. Meaningless when `arm` is `None`.
     env: EnvId,
     /// The callee arm's IC block in **this process** (resolved once at install via
@@ -178,7 +178,7 @@ impl CallIcEntry {
         argc: u32,
         epoch: u64,
         callee: Value,
-        arm: Option<(Arc<crate::eval::compile::ArmHandle>, EnvId)>,
+        arm: Option<(crate::eval::compile::ArmRef, EnvId)>,
     ) -> Option<CallIcEntry> {
         let (kind, callee_bits) = match callee {
             Value::Fn(id) => (CalleeKind::Fn, id.0),
@@ -214,7 +214,7 @@ impl CallIcEntry {
     }
 
     /// The callee's own arm — never a shim's original's (see [`CalleeKind::Shim`]).
-    fn arm(&self) -> Option<(&Arc<crate::eval::compile::ArmHandle>, EnvId)> {
+    fn arm(&self) -> Option<(&crate::eval::compile::ArmRef, EnvId)> {
         if self.kind == CalleeKind::Shim {
             return None;
         }
@@ -222,7 +222,7 @@ impl CallIcEntry {
     }
 
     /// A shim entry's original's arm.
-    fn contracted_arm(&self) -> Option<(&Arc<crate::eval::compile::ArmHandle>, EnvId)> {
+    fn contracted_arm(&self) -> Option<(&crate::eval::compile::ArmRef, EnvId)> {
         if self.kind != CalleeKind::Shim {
             return None;
         }
@@ -230,7 +230,7 @@ impl CallIcEntry {
     }
 
     /// Whichever arm the entry holds, for the install's own bookkeeping.
-    fn held_arm(&self) -> Option<(&Arc<crate::eval::compile::ArmHandle>, EnvId)> {
+    fn held_arm(&self) -> Option<(&crate::eval::compile::ArmRef, EnvId)> {
         self.arm.as_ref().map(|arm| (arm, self.env))
     }
 
@@ -327,7 +327,7 @@ pub struct VmCacheEntry {
     cc: Option<Arc<crate::eval::compile::CompiledClosure>>,
     /// `(argc, handle)`, memoized on first resolution. Inline for the arities a closure is
     /// actually called at — nearly always one, occasionally two.
-    handles: smallvec::SmallVec<[(u32, Option<Arc<crate::eval::compile::ArmHandle>>); 2]>,
+    handles: smallvec::SmallVec<[(u32, Option<crate::eval::compile::ArmRef>); 2]>,
 }
 
 impl VmCacheEntry {
@@ -380,7 +380,7 @@ impl Heap {
         callee: crate::core::value::ClosureId,
         argc: u32,
         epoch: u64,
-    ) -> Option<(Arc<crate::eval::compile::ArmHandle>, EnvId, (u32, u32))> {
+    ) -> Option<(crate::eval::compile::ArmRef, EnvId, (u32, u32))> {
         // A peer freeing a generation clears our body cache here, which drops the memo.
         self.sync_free_epoch();
         let slots = self.vm_cache.calls.take()?;
@@ -409,7 +409,7 @@ impl Heap {
         callee: crate::core::value::ClosureId,
         argc: u32,
         epoch: u64,
-        arm: &Arc<crate::eval::compile::ArmHandle>,
+        arm: &crate::eval::compile::ArmRef,
         env: EnvId,
         bases: (u32, u32),
     ) {
@@ -531,7 +531,7 @@ impl Heap {
         &self,
         k: VmCacheKey,
         argc: usize,
-    ) -> Option<Option<Arc<crate::eval::compile::ArmHandle>>> {
+    ) -> Option<Option<crate::eval::compile::ArmRef>> {
         self.sync_free_epoch();
         let mut cache = self.vm_cache.write_derived();
         let entry = cache.get_mut(&k)?;
@@ -1068,7 +1068,7 @@ impl Heap {
         epoch: u64,
     ) -> Option<(
         Value,
-        Option<(Arc<crate::eval::compile::ArmHandle>, EnvId, (u32, u32))>,
+        Option<(crate::eval::compile::ArmRef, EnvId, (u32, u32))>,
     )> {
         let t = self.vm_call_ics.borrow();
         let e = t.get((self.cur_ic_base.get() + site) as usize)?.as_ref()?;
@@ -1096,7 +1096,7 @@ impl Heap {
         epoch: u64,
     ) -> Option<(
         Value,
-        Option<(Arc<crate::eval::compile::ArmHandle>, EnvId, (u32, u32))>,
+        Option<(crate::eval::compile::ArmRef, EnvId, (u32, u32))>,
         bool,
     )> {
         let t = self.vm_call_ics.borrow();
@@ -1123,7 +1123,7 @@ impl Heap {
         argc: u32,
         epoch: u64,
         shim: Value,
-    ) -> Option<(Arc<crate::eval::compile::ArmHandle>, EnvId, (u32, u32))> {
+    ) -> Option<(crate::eval::compile::ArmRef, EnvId, (u32, u32))> {
         let t = self.vm_call_ics.borrow();
         let e = t.get((self.cur_ic_base.get() + site) as usize)?.as_ref()?;
         let same = matches!((e.callee(), shim), (Value::Fn(a), Value::Fn(b)) if a == b);
@@ -1620,7 +1620,7 @@ impl Heap {
         argc: u32,
         epoch: u64,
         callee: Value,
-        arm: Option<(Arc<crate::eval::compile::ArmHandle>, EnvId)>,
+        arm: Option<(crate::eval::compile::ArmRef, EnvId)>,
     ) {
         if self.is_dynamic(sym) {
             return;
@@ -1641,7 +1641,7 @@ impl Heap {
         argc: u32,
         epoch: u64,
         shim: Value,
-        original: (Arc<crate::eval::compile::ArmHandle>, EnvId),
+        original: (crate::eval::compile::ArmRef, EnvId),
     ) {
         if self.is_dynamic(sym) || !matches!(shim, Value::Fn(_)) {
             return;
@@ -1759,7 +1759,7 @@ impl Heap {
     /// Push a live compiled arm onto the execution-stack registry; returns its depth
     /// (the index to [`live_arm_truncate`](Self::live_arm_truncate) back to on return).
     /// See [`live_vm_arms`](Self::live_vm_arms).
-    pub fn live_arm_push(&mut self, arm: Arc<crate::eval::compile::ArmHandle>) -> usize {
+    pub fn live_arm_push(&mut self, arm: crate::eval::compile::ArmRef) -> usize {
         let i = self.live_vm_arms.len();
         self.live_vm_arms.push(arm);
         i
@@ -1767,7 +1767,7 @@ impl Heap {
 
     /// Replace the arm at depth `i` — a tail call into a different arm reuses the slot
     /// rather than growing the stack (the trampoline never recurses).
-    pub fn live_arm_set(&mut self, i: usize, arm: Arc<crate::eval::compile::ArmHandle>) {
+    pub fn live_arm_set(&mut self, i: usize, arm: crate::eval::compile::ArmRef) {
         self.live_vm_arms[i] = arm;
     }
 

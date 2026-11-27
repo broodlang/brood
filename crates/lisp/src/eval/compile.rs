@@ -184,8 +184,8 @@ mod ir;
 // `ArmHandle`, the process-local arm handle (KI-40), is named by `Heap`'s IC entry and
 // live-arm stack, so it is re-exported at the crate-visible `compile::` path too.
 pub use ir::{
-    ArmHandle, Chunk, CompiledArm, CompiledClosure, ConstVal, HandleKind, Inst, Node, PrimOp,
-    PrimOp1, PrimOp3, rewrite_arm_handles,
+    ArmHandle, ArmRef, Chunk, CompiledArm, CompiledClosure, ConstVal, HandleKind, Inst, Node,
+    PrimOp, PrimOp1, PrimOp3, rewrite_arm_handles,
 };
 
 // The pub(super) items of `ir` this module needs internally.
@@ -424,7 +424,7 @@ pub(crate) fn self_binding_stamp(heap: &Heap, epoch: u64) -> u64 {
 /// unwind them when it captures (a collection while parked relocates the *values* at
 /// those positions in place, keeping the indices good — ADR-100 §8).
 pub(crate) struct BcFrame {
-    arm: Arc<ArmHandle>,
+    arm: ArmRef,
     ip: usize,
     base: usize,
     env: EnvRoot,

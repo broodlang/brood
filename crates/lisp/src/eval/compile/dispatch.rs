@@ -488,7 +488,7 @@ fn fill_captures_from(heap: &mut Heap, arm: &CompiledArm, base: usize, cenv: Env
 /// with a compiled arm for that arity, plus the env it closed over. Everything else caches
 /// just the value (still skipping the lookup walk). Native code's dispatch deliberately
 /// caches a wrapper's own arm instead (ADR-408), so it does not use this.
-pub(super) fn call_site_arm(heap: &Heap, v: Value, argc: usize) -> Option<(Arc<ArmHandle>, EnvId)> {
+pub(super) fn call_site_arm(heap: &Heap, v: Value, argc: usize) -> Option<(ArmRef, EnvId)> {
     match v.unpack() {
         // A contract shim is the dispatcher's to enter (ADR-748), as a wrapper is its to
         // redirect: never cached as an arm the call would run directly.
@@ -609,7 +609,7 @@ pub(crate) fn push_frame(
 /// top-level form (`run`). The tree-walker (`BROOD_TIER=0`) is the remaining fallback.
 pub(crate) fn vm_apply(
     heap: &mut Heap,
-    compiled0: Arc<ArmHandle>,
+    compiled0: ArmRef,
     args: &[Value],
     genv0: EnvId,
 ) -> LispResult {
@@ -627,12 +627,7 @@ pub(crate) fn vm_apply(
 }
 
 /// [`vm_apply`]'s run, on whichever stack [`crate::stack::reenter`] chose.
-fn vm_apply_here(
-    heap: &mut Heap,
-    compiled0: Arc<ArmHandle>,
-    args: &[Value],
-    genv0: EnvId,
-) -> LispResult {
+fn vm_apply_here(heap: &mut Heap, compiled0: ArmRef, args: &[Value], genv0: EnvId) -> LispResult {
     // IC cursors (ADR-175 Phase A): `vm_run_bc`'s fresh entry installs the callee's
     // block; the CALLER (whose arm continues after this nested run) needs its own
     // block back, so save/restore around the run — the single chokepoint every
