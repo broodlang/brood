@@ -1161,10 +1161,25 @@ pub(super) mod codegen {
         // The unboxing signals that earn the general lowering:
         //   * a `VectorRef`/`MakeVector` (rules bintree/matmul back in — they lower and win), or
         //   * a self-tail loop (`fold--loop`, hence `reduce`/`pipeline`; `row-sum`).
+        // TRIAL (branch perf/lift-call-gate): an arm that does data work of its own (an
+        // arithmetic, comparison, map or vector primitive) is admitted with its calls; what
+        // stays refused is an arm that only forwards calls.
+        let has_work = code.iter().any(|i| {
+            matches!(
+                i,
+                Inst::Prim1 { .. }
+                    | Inst::Prim2 { .. }
+                    | Inst::Prim3 { .. }
+                    | Inst::Prim2SlotSlot { .. }
+                    | Inst::Prim2SlotInt { .. }
+                    | Inst::MakeMap(_)
+            )
+        });
         if arm.dbg_name.is_some()
             && non_tail_call_count(code) >= 1
             && !has_inline_vec
             && !has_self_loop
+            && !has_work
         {
             // An arm whose calls the leaf inliner takes ALL of is not call-mediated once it
             // is upgraded: its spliced body (`LeafInline::resume`) holds no call at all. The
