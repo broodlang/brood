@@ -887,6 +887,161 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
+// a pressed mesh's squeezed skin relaxed (ADR-822), from two buffers (the contact group may hold
+// only eight storage buffers): its indices (the point and vertex counts, each vertex's point, each
+// point's first vertex, each point's ring as `points + 1` offsets, then the rings) and its vec4s
+// (each point at rest: its offset from its ring's centroid along its normal and across its frame's
+// two tangents, its ring's mean edge length; then the frame's work, three a point: as posed with
+// its squeeze mask in w, then two halves relaxed between)
+@group(3) @binding(17) var<storage, read> ring_index: array<u32>;
+@group(3) @binding(18) var<storage, read_write> ring_data: array<vec4<f32>>;
+// each pass moves a squeezed point this share of the way to where its ring puts it
+const RELAX_STEP: f32 = 0.5;
+// the squeeze (its ring's edges posed against rest) the relax begins at, and is whole by
+const SQUEEZE_FROM: f32 = 0.95;
+const SQUEEZE_WHOLE: f32 = 0.75;
+// the furthest a point slides from where its bones put it (it carries the textures with it)
+const RELAX_SLIDE: f32 = 0.015;
+
+fn ring_point_count() -> u32 {
+    return ring_index[0];
+}
+
+fn ring_weld(vertex: u32) -> u32 {
+    return ring_index[2u + vertex];
+}
+
+fn ring_rep(point: u32) -> u32 {
+    return ring_index[2u + ring_index[1] + point];
+}
+
+fn ring_offset(at: u32) -> u32 {
+    return ring_index[2u + ring_index[1] + ring_index[0] + at];
+}
+
+fn ring_neighbour(slot: u32) -> u32 {
+    return ring_index[3u + ring_index[1] + 2u * ring_index[0] + slot];
+}
+
+// a point's place at rest (after the rest offsets)
+fn ring_rest_place(point: u32) -> vec3<f32> {
+    return ring_data[ring_point_count() + point].xyz;
+}
+
+// work slot `at` (0 … 3 points): as posed, then the two halves (after the rest places)
+fn ring_work(at: u32) -> vec4<f32> {
+    return ring_data[2u * ring_point_count() + at];
+}
+
+fn ring_set_work(at: u32, value: vec4<f32>) {
+    ring_data[2u * ring_point_count() + at] = value;
+}
+
+// a point's posed place and the normal its bones and keys carry there
+fn ring_posed(point: u32) -> vec3<f32> {
+    return posed_out[(draw.deform.y + ring_rep(point)) * 3u].xyz;
+}
+
+fn ring_carried(point: u32) -> vec3<f32> {
+    return safe_normalize(posed_out[(draw.deform.y + ring_rep(point)) * 3u + 1u].xyz);
+}
+
+// each point as posed, into the work and its first half
+@compute @workgroup_size(64)
+fn cs_relax_gather(@builtin(global_invocation_id) id: vec3<u32>) {
+    let count = ring_point_count();
+    if (id.x >= count) {
+        return;
+    }
+    let at = vec4<f32>(ring_posed(id.x), 0.0);
+    ring_set_work(id.x, at);
+    ring_set_work(count + id.x, at);
+}
+
+// each point's squeeze: its most squeezed ring edge, posed against that edge at rest (skin squeezed
+// one way is often stretched the other, so a mean stays near whole where it buckles), as a mask
+// rising from nothing at `SQUEEZE_FROM` to whole at `SQUEEZE_WHOLE`
+@compute @workgroup_size(64)
+fn cs_relax_mask(@builtin(global_invocation_id) id: vec3<u32>) {
+    let count = ring_point_count();
+    if (id.x >= count) {
+        return;
+    }
+    let start = ring_offset(id.x);
+    let end = ring_offset(id.x + 1u);
+    let rest = ring_data[id.x].w;
+    if (end <= start || rest <= 0.0) {
+        return;
+    }
+    let here = ring_work(id.x);
+    let home = ring_rest_place(id.x);
+    var squeeze = 1.0;
+    for (var slot = start; slot < end; slot = slot + 1u) {
+        let other = ring_neighbour(slot);
+        let at_rest = length(ring_rest_place(other) - home);
+        if (at_rest > 1e-6) {
+            squeeze = min(squeeze, length(ring_work(other).xyz - here.xyz) / at_rest);
+        }
+    }
+    ring_set_work(id.x, vec4<f32>(here.xyz, 1.0 - smoothstep(SQUEEZE_WHOLE, SQUEEZE_FROM, squeeze)));
+}
+
+// one relax pass from one half of the work into the other: a squeezed point moved toward its
+// ring's centroid plus its rest offset, turned into its posed frame, by its mask
+fn ring_relax(id: u32, read_half: u32, write_half: u32) {
+    let count = ring_point_count();
+    if (id >= count) {
+        return;
+    }
+    let here = ring_work(read_half * count + id).xyz;
+    let posed = ring_work(id);
+    let start = ring_offset(id);
+    let end = ring_offset(id + 1u);
+    if (posed.w <= 0.0 || end <= start) {
+        ring_set_work(write_half * count + id, vec4<f32>(here, 0.0));
+        return;
+    }
+    var centroid = vec3<f32>(0.0);
+    for (var slot = start; slot < end; slot = slot + 1u) {
+        centroid = centroid + ring_work(read_half * count + ring_neighbour(slot)).xyz;
+    }
+    centroid = centroid / f32(end - start);
+    let normal = ring_carried(id);
+    let toward = ring_work(read_half * count + ring_neighbour(start)).xyz - here;
+    let tangent = safe_normalize(toward - normal * dot(toward, normal));
+    let other = cross(normal, tangent);
+    let rest = ring_data[id];
+    let wanted = centroid + normal * rest.x + tangent * rest.y + other * rest.z;
+    let moved = here + (wanted - here) * (posed.w * RELAX_STEP);
+    let slide = moved - posed.xyz;
+    let far = length(slide);
+    var placed = moved;
+    if (far > RELAX_SLIDE) {
+        placed = posed.xyz + slide * (RELAX_SLIDE / far);
+    }
+    ring_set_work(write_half * count + id, vec4<f32>(placed, 0.0));
+}
+
+@compute @workgroup_size(64)
+fn cs_relax_even(@builtin(global_invocation_id) id: vec3<u32>) {
+    ring_relax(id.x, 1u, 2u);
+}
+
+@compute @workgroup_size(64)
+fn cs_relax_odd(@builtin(global_invocation_id) id: vec3<u32>) {
+    ring_relax(id.x, 2u, 1u);
+}
+
+// each vertex back at its point's relaxed place (the passes end in the first half)
+@compute @workgroup_size(64)
+fn cs_relax_scatter(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= draw.deform.w) {
+        return;
+    }
+    let count = ring_point_count();
+    posed_out[(draw.deform.y + id.x) * 3u] = vec4<f32>(ring_work(count + ring_weld(id.x)).xyz, 1.0);
+}
+
 // pass B: each posed vertex pressed (`mesh::deform_by_contacts`), its tangent kept square to its
 // new normal
 @compute @workgroup_size(64)

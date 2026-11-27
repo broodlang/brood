@@ -60,6 +60,151 @@ pub(super) struct GpuMesh {
     bounds: MeshBounds,
     /// Its softness a vertex (ADR-805), when it has one.
     softness: Option<wgpu::Buffer>,
+    /// For a mesh that can be pressed: what its squeezed skin is relaxed by (ADR-822).
+    ring: Option<MeshRing>,
+}
+
+/// How a pressed mesh's skin is relaxed where skinning squeezes it (ADR-822): its vertices
+/// welded into points, each point's ring of neighbours, and where it sits against them at rest.
+pub(super) struct MeshRing {
+    /// Its indices, u32: the point and vertex counts, then each vertex's point (its weld), each
+    /// point's first vertex (where its posed place is read), each point's ring as a span (`points
+    /// + 1` offsets) and the rings themselves (point indices). One buffer, as the contact group
+    /// may hold only eight storage buffers.
+    index: wgpu::Buffer,
+    /// Its vec4s: each point at rest (its offset from its ring's centroid along its normal and
+    /// across its frame's two tangents, and its ring's mean edge length), each point's rest place,
+    /// then the frame's work, three a point (as posed, w its squeeze mask; then two halves to relax between).
+    data: wgpu::Buffer,
+    points: u32,
+}
+
+/// How many relax passes a frame (ADR-822), each moving a squeezed point `RELAX_STEP` of the way: each
+/// reaches one ring further, so the 4 cm waves on her shoulder tops (a mesh of 3–4 mm) need tens; 48
+/// of 16, 48 and 96 filmed side by side (c8's pick for the user, 2026-11-27).
+pub(super) const RELAX_ITERATIONS: u32 = 48;
+
+/// A pressed mesh's relax data (ADR-822), built once from its rest shape.
+fn mesh_ring(device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Mesh) -> Option<MeshRing> {
+    let mut points: std::collections::HashMap<[i64; 3], u32> = std::collections::HashMap::new();
+    let mut reps: Vec<u32> = Vec::new();
+    let welds: Vec<u32> = mesh
+        .positions
+        .iter()
+        .enumerate()
+        .map(|(vertex, position)| {
+            let key = position.map(|axis| (axis as f64 * 1.0e6).round() as i64);
+            *points.entry(key).or_insert_with(|| {
+                reps.push(vertex as u32);
+                reps.len() as u32 - 1
+            })
+        })
+        .collect();
+    let count = reps.len();
+    if count == 0 {
+        return None;
+    }
+    let mut neighbours: Vec<Vec<u32>> = vec![Vec::new(); count];
+    for triangle in mesh.indices.as_chunks::<3>().0 {
+        let corners = triangle.map(|index| welds[index as usize]);
+        for slot in 0..3 {
+            let point = corners[slot] as usize;
+            for other in [corners[(slot + 1) % 3], corners[(slot + 2) % 3]] {
+                if other as usize != point && !neighbours[point].contains(&other) {
+                    neighbours[point].push(other);
+                }
+            }
+        }
+    }
+    let unit = |v: [f32; 3]| {
+        let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if length < 1.0e-20 {
+            [0.0, 0.0, 0.0]
+        } else {
+            v.map(|axis| axis / length)
+        }
+    };
+    let at = |point: usize| mesh.positions[reps[point] as usize];
+    let mut offsets = Vec::with_capacity(count + 1);
+    let mut ring = Vec::new();
+    let mut rest = Vec::with_capacity(count * 4);
+    for point in 0..count {
+        offsets.push(ring.len() as u32);
+        ring.extend_from_slice(&neighbours[point]);
+        let here = at(point);
+        // (the vertex's own normal, as the posed frame takes the normal its bones carry)
+        let normal = unit(mesh.normals[reps[point] as usize]);
+        let near = &neighbours[point];
+        if near.is_empty() {
+            rest.extend_from_slice(&[0.0, 0.0, 0.0, 0.0]);
+            continue;
+        }
+        let mut centroid = [0.0f32; 3];
+        let mut edges = 0.0f32;
+        for &other in near {
+            let there = at(other as usize);
+            for axis in 0..3 {
+                centroid[axis] += there[axis] / near.len() as f32;
+            }
+            let apart = [0, 1, 2].map(|axis| there[axis] - here[axis]);
+            edges += (apart[0] * apart[0] + apart[1] * apart[1] + apart[2] * apart[2]).sqrt();
+        }
+        // (its frame: the normal, the first neighbour's direction laid in the tangent plane, and
+        // their cross; the shader builds the same frame from the posed surface)
+        let first = at(near[0] as usize);
+        let toward = [0, 1, 2].map(|axis| first[axis] - here[axis]);
+        let lift = toward[0] * normal[0] + toward[1] * normal[1] + toward[2] * normal[2];
+        let tangent = unit([0, 1, 2].map(|axis| toward[axis] - normal[axis] * lift));
+        let other_tangent = [
+            normal[1] * tangent[2] - normal[2] * tangent[1],
+            normal[2] * tangent[0] - normal[0] * tangent[2],
+            normal[0] * tangent[1] - normal[1] * tangent[0],
+        ];
+        let offset = [0, 1, 2].map(|axis| here[axis] - centroid[axis]);
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        rest.extend_from_slice(&[
+            dot(offset, normal),
+            dot(offset, tangent),
+            dot(offset, other_tangent),
+            edges / near.len() as f32,
+        ]);
+    }
+    offsets.push(ring.len() as u32);
+    let store = |label: &str, bytes: &[u8]| {
+        let made = buffer(
+            device,
+            label,
+            bytes.len().max(16) as u64,
+            wgpu::BufferUsages::STORAGE,
+        );
+        queue.write_buffer(&made, 0, bytes);
+        made
+    };
+    let words = |values: &[u32]| {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<u8>>()
+    };
+    let mut index = vec![count as u32, welds.len() as u32];
+    index.extend_from_slice(&welds);
+    index.extend_from_slice(&reps);
+    index.extend_from_slice(&offsets);
+    index.extend_from_slice(&ring);
+    // (the rest, then room for the frame's work: three vec4 a point, written each frame)
+    // (the rest offsets, then each point's rest place (for each ring edge's own rest length), then
+    // room for the frame's work: three vec4 a point, written each frame)
+    let mut data = rest;
+    for point in 0..count {
+        let here = at(point);
+        data.extend_from_slice(&[here[0], here[1], here[2], 0.0]);
+    }
+    data.resize(count * 5 * 4, 0.0);
+    Some(MeshRing {
+        index: store("mesh ring index", &words(&index)),
+        data: store("mesh ring data", &floats_bytes(&data)),
+        points: count as u32,
+    })
 }
 
 /// What one scene renders into, at one size.
@@ -189,6 +334,10 @@ pub(super) struct MeshGpu {
     contact_layout: wgpu::BindGroupLayout,
     contact_depth_pipeline: wgpu::ComputePipeline,
     contact_deform_pipeline: wgpu::ComputePipeline,
+    /// The relax passes (ADR-822): gather, mask, even, odd, scatter.
+    contact_relax_pipelines: [wgpu::ComputePipeline; 5],
+    no_ring: wgpu::Buffer,
+    no_ring_work: wgpu::Buffer,
     no_posed: wgpu::Buffer,
     /// The scene group without the shadow maps, for the passes that render them.
     shadow_scene_layout: wgpu::BindGroupLayout,
@@ -515,6 +664,9 @@ impl MeshGpu {
                 compute_storage(10, false),
                 compute_storage(11, false),
                 compute_storage(12, true),
+                // (its squeezed skin relaxed, ADR-822: its ring index and its rest and work)
+                compute_storage(17, true),
+                compute_storage(18, false),
             ],
         });
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -829,15 +981,28 @@ impl MeshGpu {
         };
         let contact_depth_pipeline = contact_pipeline("cs_contact_depth");
         let contact_deform_pipeline = contact_pipeline("cs_contact_deform");
+        let contact_relax_pipelines = [
+            contact_pipeline("cs_relax_gather"),
+            contact_pipeline("cs_relax_mask"),
+            contact_pipeline("cs_relax_even"),
+            contact_pipeline("cs_relax_odd"),
+            contact_pipeline("cs_relax_scatter"),
+        ];
         // bound where a scene presses nothing: a posed vertex's worth of zeros
         let no_posed = buffer(device, "no posed vertices", 48, storage_usage);
+        // (bound for the relax of a pressed mesh that has none, ADR-822)
+        let no_ring = buffer(device, "no ring", 48, storage_usage);
+        let no_ring_work = buffer(device, "no ring work", 48, storage_usage);
         MeshGpu {
             samples,
             contact_morph_layout,
             contact_layout,
             contact_depth_pipeline,
             contact_deform_pipeline,
+            contact_relax_pipelines,
             no_posed,
+            no_ring,
+            no_ring_work,
             pipelines,
             hair_depth_pipelines,
             hair_front_pipelines,
@@ -981,6 +1146,12 @@ impl MeshGpu {
             queue.write_buffer(&softness, 0, &bytes);
             softness
         });
+        // (and, for a mesh that can be pressed, what its squeezed skin is relaxed by, ADR-822)
+        let ring = if softness.is_some() {
+            mesh_ring(device, queue, &mesh)
+        } else {
+            None
+        };
         self.meshes.insert(
             handle,
             GpuMesh {
@@ -994,6 +1165,7 @@ impl MeshGpu {
                 turning: !mesh.centres.is_empty(),
                 bounds: mesh.bounds.clone(),
                 softness,
+                ring,
             },
         );
     }
@@ -1570,6 +1742,16 @@ impl MeshGpu {
             // vertex posed once, each contact's deepest press found over them all; then pressed
             if let Some(contacts) = &target.contacts {
                 encoder.clear_buffer(&contacts.depths, 0, None);
+                fn ring_entry<'a>(
+                    binding: u32,
+                    buffer: Option<&'a wgpu::Buffer>,
+                    stand_in: &'a wgpu::Buffer,
+                ) -> wgpu::BindGroupEntry<'a> {
+                    wgpu::BindGroupEntry {
+                        binding,
+                        resource: buffer.unwrap_or(stand_in).as_entire_binding(),
+                    }
+                }
                 let pressed: Vec<_> = plans[index]
                     .iter()
                     .filter(|draw| draw.pressed)
@@ -1603,23 +1785,58 @@ impl MeshGpu {
                                         .unwrap_or(&self.no_posed)
                                         .as_entire_binding(),
                                 },
+                                // (its squeezed skin relaxed, ADR-822; stand-ins without it)
+                                ring_entry(
+                                    17,
+                                    mesh.ring.as_ref().map(|ring| &ring.index),
+                                    &self.no_ring,
+                                ),
+                                wgpu::BindGroupEntry {
+                                    binding: 18,
+                                    resource: mesh
+                                        .ring
+                                        .as_ref()
+                                        .map_or(&self.no_ring_work, |ring| &ring.data)
+                                        .as_entire_binding(),
+                                },
                             ],
                         });
-                        Some((draw.at, mesh.vertex_count, group))
+                        let points = mesh.ring.as_ref().map_or(0, |ring| ring.points);
+                        Some((draw.at, mesh.vertex_count, points, group))
                     })
                     .collect();
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("scene contacts"),
                     timestamp_writes: None,
                 });
-                for pipeline in [&self.contact_depth_pipeline, &self.contact_deform_pipeline] {
+                // (posed; then its squeezed skin relaxed, ADR-822: gathered by point, masked by its
+                // squeeze, relaxed `RELAX_ITERATIONS` times between two halves, scattered back to
+                // its vertices; then pressed)
+                let [gather, mask, even, odd, scatter] = &self.contact_relax_pipelines;
+                let mut steps: Vec<(&wgpu::ComputePipeline, bool)> = vec![
+                    (&self.contact_depth_pipeline, false),
+                    (gather, true),
+                    (mask, true),
+                ];
+                for iteration in 0..RELAX_ITERATIONS {
+                    steps.push((if iteration % 2 == 0 { even } else { odd }, true));
+                }
+                steps.push((scatter, false));
+                steps.push((&self.contact_deform_pipeline, false));
+                let last = steps.len() - 1;
+                for (step, (pipeline, by_point)) in steps.iter().enumerate() {
+                    let relaxing = step > 0 && step < last;
                     pass.set_pipeline(pipeline);
                     pass.set_bind_group(0, &shadow_scene_group, &[scene_offset]);
                     pass.set_bind_group(2, &contact_morph_group, &[]);
-                    for (at, vertex_count, group) in &pressed {
+                    for (at, vertex_count, points, group) in &pressed {
+                        if relaxing && *points == 0 {
+                            continue;
+                        }
                         pass.set_bind_group(1, &draw_group, &[(*at as u64 * DRAW_BYTES) as u32]);
                         pass.set_bind_group(3, group, &[]);
-                        pass.dispatch_workgroups(vertex_count.div_ceil(64), 1, 1);
+                        let count = if *by_point { *points } else { *vertex_count };
+                        pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
                     }
                 }
             }
