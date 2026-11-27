@@ -1717,6 +1717,22 @@ pub unsafe extern "C" fn brood_rt_trace_push(
     }
 }
 
+/// Record the call site of a builtin call native code made directly that came back with an
+/// error (`Heap::jit_error_site`), on the call's cold error branch, for the arm's error
+/// block (`brood_rt_trace_push`) to tag the error with that call's position, as the VM tags
+/// a builtin's error with its `Call`'s. The direct call's trampoline (`brood_rt_call_native_fl`)
+/// keeps its register-sized arguments; this runs only when the builtin refused.
+///
+/// # Safety
+/// `heap` must be a live `*mut Heap` from the JIT calling convention.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn brood_rt_note_error_site(heap: *mut Heap, site: u32) {
+    // SAFETY: `heap` is the live, exclusively used process heap (contract: heap).
+    unsafe {
+        (*heap).jit_error_site = site;
+    }
+}
+
 /// Record *why* the JIT is about to deopt. Called from the shared deopt block with a
 /// distinct id per guard, so a deopt can name the check that failed instead of only the
 /// checkpoint it resumes at.

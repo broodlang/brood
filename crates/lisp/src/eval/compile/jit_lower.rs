@@ -841,6 +841,7 @@ fn jit_lower_arm_inner(
         incall: callbacks.in_call_journal,
         callslow: callbacks.call_slow,
         natfl: callbacks.call_native_flat,
+        errsite: callbacks.note_error_site,
         flbase: callbacks.fastlink_base,
         fastframe: callbacks.fast_frame,
         xlatch: callbacks.xcall_latch,

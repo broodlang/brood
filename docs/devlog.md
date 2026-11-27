@@ -3403,3 +3403,12 @@ a call — a third of `jit_dispatch_call`'s own time — on a count only the thr
 process touches: `ArmRef` counts in a `Cell` and is `Send`, not `Sync`, so a structure that
 would share one between threads does not compile. womanblend's serial tick about 1% lighter
 for each (three runs each); CI's `ab`: every row within noise.
+
+2026-11-27. **A builtin's refusal in native code is located at the builtin's call.** Native
+code calls a builtin directly through `brood_rt_call_native_fl`, and when the builtin refused,
+nothing recorded which call it was: the error took the position of the call that entered the
+native function (7cdd9009e's tag from the pending VM callers), one line off from the VM's.
+`tests/jit_error_position_test.blsp` caught it as a flake in CI (whether the function had
+gone native in time). The call's cold error branch now records its site
+(`brood_rt_note_error_site`, so the hot trampoline keeps its register-sized arguments), and
+the arm's error block tags the error with that call's position, as the other call paths do.

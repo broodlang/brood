@@ -192,6 +192,8 @@ pub(super) struct Funcs {
     pub callslow: FuncRef,
     /// `brood_rt_call_native_fl` — direct builtin call for a native flat-cell hit.
     pub natfl: FuncRef,
+    /// `brood_rt_note_error_site` — a direct builtin call's site, on its error branch.
+    pub errsite: FuncRef,
     /// `brood_rt_fastlink_base` / `brood_rt_fast_frame` — the in-IR epoch-guarded fast link.
     pub flbase: FuncRef,
     pub fastframe: FuncRef,

@@ -420,7 +420,14 @@ pub(super) fn emit_call(
         let nst = b.inst_results(nfc)[0];
         let rb = super::emit::load_roots_base(b, heap);
         b.def_var(rb_var, rb);
-        b.ins().brif(nst, error, &[], cont, &[]);
+        // (refused: the call's site, for the error block to tag the error with its position
+        // — `brood_rt_note_error_site`)
+        let refused = b.create_block();
+        b.ins().brif(nst, refused, &[], cont, &[]);
+        b.switch_to_block(refused);
+        let site_value = b.ins().iconst(types::I32, site as i64);
+        b.ins().call(funcs.errsite, &[heap, site_value]);
+        b.ins().jump(error, &[]);
 
         b.switch_to_block(brood_blk);
         if funcs.xcall {

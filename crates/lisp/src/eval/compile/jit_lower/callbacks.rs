@@ -13,6 +13,7 @@ use cranelift_module::{FuncId, Linkage, Module};
 /// call path uses for `call_indirect`.
 pub(super) struct CallbackIds {
     note_deopt: FuncId,
+    note_error_site: FuncId,
     trace_push: FuncId,
     tick_n: FuncId,
     car: FuncId,
@@ -70,6 +71,7 @@ pub(super) struct CallbackIds {
 /// The callbacks imported into the function being built — what the emitters call.
 pub(super) struct CallbackRefs {
     pub(super) note_deopt: FuncRef,
+    pub(super) note_error_site: FuncRef,
     pub(super) trace_push: FuncRef,
     pub(super) tick_n: FuncRef,
     pub(super) car: FuncRef,
@@ -151,6 +153,13 @@ pub(super) fn declare_callbacks(module: &mut JITModule, pointer: Type) -> Option
     let note_deopt = import(
         module,
         "brood_rt_note_deopt",
+        &signature(module, &[pointer, i32], &[]),
+    )?;
+    // brood_rt_note_error_site(heap, site): the call site of a direct builtin call that came
+    // back with an error, for the error block to tag the error with its position.
+    let note_error_site = import(
+        module,
+        "brood_rt_note_error_site",
         &signature(module, &[pointer, i32], &[]),
     )?;
     // brood_rt_trace_push(heap, arm): records this arm in the parked error's `:trace` as the
@@ -395,6 +404,7 @@ pub(super) fn declare_callbacks(module: &mut JITModule, pointer: Type) -> Option
     )?;
     Some(CallbackIds {
         note_deopt,
+        note_error_site,
         trace_push,
         tick_n,
         car,
@@ -490,6 +500,7 @@ pub(super) fn import_callbacks(
     let xcall_cold = declare(ids.xcall_cold, b.func);
     let arm_function = b.import_signature(ids.arm_function.clone());
     let note_deopt = declare(ids.note_deopt, b.func);
+    let note_error_site = declare(ids.note_error_site, b.func);
     let trace_push = declare(ids.trace_push, b.func);
     let vector_ref = declare(ids.vector_ref, b.func);
     let table_has = declare(ids.table_has, b.func);
@@ -510,6 +521,7 @@ pub(super) fn import_callbacks(
     let const_load = declare(ids.const_load, b.func);
     CallbackRefs {
         note_deopt,
+        note_error_site,
         trace_push,
         tick_n,
         car,

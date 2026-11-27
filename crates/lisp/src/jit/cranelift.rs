@@ -140,6 +140,7 @@ fn callback_table() -> Vec<(&'static str, *const u8)> {
         brood_rt_global_ic,
         brood_rt_call_slow,
         brood_rt_note_deopt,
+        brood_rt_note_error_site,
         brood_rt_trace_push,
         brood_rt_fastlink_base,
         brood_rt_fast_frame,
