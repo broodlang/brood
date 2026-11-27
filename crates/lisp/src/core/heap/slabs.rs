@@ -93,8 +93,17 @@ pub(crate) enum VecStore {
 /// inlining four items in EVERY slot instead cost the rows that hold many small vectors).
 /// The chunks start small and double, so a process that makes one such vector pays for
 /// sixteen items, not a page.
+///
+/// One pointer until the first vector is bumped (`Chunks` is boxed): every green process
+/// carries a `Slabs`, most make no such vector, and its size is the floor a parked process
+/// costs (`tests/process_floor.rs`).
 #[derive(Default)]
 pub(super) struct VecArena {
+    state: Option<Box<Chunks>>,
+}
+
+#[derive(Default)]
+struct Chunks {
     chunks: Vec<Box<[std::mem::MaybeUninit<Value>]>>,
     /// Items handed out of the last chunk.
     used: usize,
@@ -111,24 +120,45 @@ impl VecArena {
     /// it (`reset_to`); chunks never move.
     #[inline]
     pub(super) fn alloc(&mut self, len: usize) -> *mut Value {
-        if let Some(chunk) = self.chunks.last_mut()
-            && chunk.len() - self.used >= len
+        let arena = self.state.get_or_insert_with(Box::default);
+        if let Some(chunk) = arena.chunks.last_mut()
+            && chunk.len() - arena.used >= len
         {
             // SAFETY: `used + len <= chunk.len()`, so the offset stays inside the chunk.
-            let at = unsafe { chunk.as_mut_ptr().add(self.used) };
-            self.used += len;
+            let at = unsafe { chunk.as_mut_ptr().add(arena.used) };
+            arena.used += len;
             return at.cast();
         }
-        self.grow(len)
+        arena.grow(len)
     }
 
+    /// Where the arena stands, for [`Self::reset_to`].
+    #[inline]
+    pub(super) fn mark(&self) -> (usize, usize) {
+        self.state
+            .as_ref()
+            .map_or((0, 0), |arena| (arena.chunks.len(), arena.used))
+    }
+
+    /// Give back everything bumped since `mark`. The vectors over it must be gone already.
+    pub(super) fn reset_to(&mut self, mark: (usize, usize)) {
+        if let Some(arena) = self.state.as_mut()
+            && mark.0 <= arena.chunks.len()
+        {
+            arena.chunks.truncate(mark.0);
+            arena.used = if mark.0 == 0 { 0 } else { mark.1 };
+        }
+    }
+}
+
+impl Chunks {
     #[cold]
     fn grow(&mut self, len: usize) -> *mut Value {
         let size = self
             .chunks
             .last()
-            .map_or(Self::FIRST_CHUNK, |chunk| {
-                (chunk.len() * 2).min(Self::LARGEST_CHUNK)
+            .map_or(VecArena::FIRST_CHUNK, |chunk| {
+                (chunk.len() * 2).min(VecArena::LARGEST_CHUNK)
             })
             .max(len);
         let mut chunk = Box::<[Value]>::new_uninit_slice(size);
@@ -136,20 +166,6 @@ impl VecArena {
         self.chunks.push(chunk);
         self.used = len;
         at.cast()
-    }
-
-    /// Where the arena stands, for [`Self::reset_to`].
-    #[inline]
-    pub(super) fn mark(&self) -> (usize, usize) {
-        (self.chunks.len(), self.used)
-    }
-
-    /// Give back everything bumped since `mark`. The vectors over it must be gone already.
-    pub(super) fn reset_to(&mut self, mark: (usize, usize)) {
-        if mark.0 <= self.chunks.len() {
-            self.chunks.truncate(mark.0);
-            self.used = if mark.0 == 0 { 0 } else { mark.1 };
-        }
     }
 }
 
