@@ -529,12 +529,12 @@ fn hair_covers_and_shines_on_the_gpu_as_on_the_cpu() {
         // covered it is lit. (Not the CPU's value itself: the GPU's tone curve is on luminance
         // since ADR-830, the frozen CPU painter's on each channel, so a bright saturated colour
         // differs by design: 255 against 242 here)
-        if let [half, whole] = gpu_reds[..] {
-            if half * 2 >= whole + 8 || half * 2 <= whole - 8 || whole < 128 {
-                failures.push(format!(
-                    "{name}: half covered {half} against whole {whole} (half as bright, lit)"
-                ));
-            }
+        if let [half, whole] = gpu_reds[..]
+            && (half * 2 >= whole + 8 || half * 2 <= whole - 8 || whole < 128)
+        {
+            failures.push(format!(
+                "{name}: half covered {half} against whole {whole} (half as bright, lit)"
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
