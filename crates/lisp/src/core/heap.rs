@@ -1587,9 +1587,8 @@ mod gc;
 // The collector's tuning knobs live with it (move f); re-imported so `heap.rs` and the
 // sibling children resolve them unqualified, as they did when they were defined here.
 use self::gc::{
-    DRAIN_REPORT_STRIDE, P1_LARGE_SEED, P1_REVALIDATE_STRIDE, P2_REVALIDATE_STRIDE,
-    WALKER_RED_ZONE, WALKER_STACK_CHUNK, budget_units, gc_floor, major_floor, nursery_byte_floor,
-    rt_gc_floor,
+    DRAIN_REPORT_STRIDE, P1_LARGE_SEED, P2_REVALIDATE_STRIDE, WALKER_RED_ZONE, WALKER_STACK_CHUNK,
+    budget_units, gc_floor, major_floor, nursery_byte_floor, p1_revalidation_due, rt_gc_floor,
 };
 mod gc_runtime;
 mod local_string;

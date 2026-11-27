@@ -3213,3 +3213,18 @@ self-call guard has since the `std/vt` grapheme loop. And `seq/find` called
 private `find-in`, vouched for once. `seq/find` over 36 items: 32 µs → 7 (womanblend's viewer
 calls it about 70 times a frame). Guard: `tests/contract_test.blsp` "a contracted function's
 self-loop tiers to native code" (red on 9beeb7d11 with contracts armed).
+
+2026-11-27. **A process that stays dirty in a drain backs off its Phase-1 re-walk.** The drain
+self-report's Phase 1 (roots, envs and LIVE ARMS) ran unthrottled for a small seed, on the
+assumption that a small seed is cheap; but the seed counts arms and Phase 1 walks each one's
+whole compiled tree, and a process whose loop never returns (a game's frame loop) runs the
+code it started with for its whole life, so it is dirty in every drain armed after its first
+redefinition. womanblend's viewer re-walked some twenty arms' trees every 64 safepoints for as
+long as it ran: `rewrite_node` was the dearest function of the process, the collector 19% of
+its game thread (`perf`, cpu-clock, a symbolised nest); `BROOD_RT_GC_FLOOR` raised out of reach
+took its frame from 24.6 ms to 19.5. A small seed now re-validates at every report for its first
+64 (so a process that stops running old code still acks at once), then at each power of two,
+then once every 4096 (`tuning::p1_revalidation_due`). The collector's share after: 3%. Guards:
+`p1_revalidation_tests`; `runtime_drain_completes`, `runtime_multigen`, `runtime_collector`
+green. (`runtime_drain`'s parked-process test fails on this machine with and without the
+change at load 20: a 5 s deadline.)

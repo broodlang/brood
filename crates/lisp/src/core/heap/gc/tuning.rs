@@ -191,6 +191,25 @@ pub(in crate::core::heap) const P1_REVALIDATE_STRIDE: u32 = 64;
 /// starts being cached between re-validations. See [`P1_REVALIDATE_STRIDE`].
 pub(in crate::core::heap) const P1_LARGE_SEED: usize = 4096;
 
+/// How many drain reports a **small-seed** process dirty via Phase 1 re-validates at one after
+/// another before it starts backing off (see [`P1_BACKOFF_REPORTS`]): long enough that a
+/// process which stops running draining-generation code acks at once, as it always has.
+pub(in crate::core::heap) const P1_PROMPT_REPORTS: u32 = 64;
+
+/// The longest a small-seed process still dirty via Phase 1 goes between re-validations, in
+/// drain reports (each [`DRAIN_REPORT_STRIDE`] safepoints): past [`P1_PROMPT_REPORTS`] it
+/// re-validates at each power of two and then once every this many.
+///
+/// The seed counts live ARMS, and Phase 1 walks each one's whole compiled tree
+/// (`push_live_arm_handles`), so "cheap while the seed is small" does not hold for a program
+/// of big functions. And a process whose loop never returns — a game's frame loop, a
+/// server's accept loop — runs the code it started with for its whole life, so it stays
+/// dirty in every drain armed after its first redefinition: womanblend's viewer re-walked
+/// some twenty arms' trees every 64 safepoints for as long as it ran, a fifth of its frame
+/// (`rewrite_node` the dearest function of the process, 2026-11-27). Sound as the other
+/// throttles are: a stale-dirty verdict only delays a drain's completion.
+pub(in crate::core::heap) const P1_BACKOFF_REPORTS: u32 = 4096;
+
 /// Live old-gen object count below which a **major** collection never fires —
 /// the old-gen counterpart of [`gc_floor`]. Crucially this is **not** zeroed by
 /// `BROOD_GC_STRESS`: stress makes *minor* collection fire at every safepoint
@@ -285,4 +304,53 @@ pub(in crate::core::heap) fn min_tenure() -> usize {
 pub(in crate::core::heap) fn gc_trace_default() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     crate::diagnostics::debug_flags::is_set(&ON, "BROOD_GC_TRACE")
+}
+
+/// Whether a process still dirty via Phase 1 re-walks its seed at its `report`th drain report
+/// since it was first found dirty in this epoch (1 for the first after that), or answers its
+/// stale-dirty verdict. A `large` seed: every [`P1_REVALIDATE_STRIDE`]th. A small one: every
+/// report up to [`P1_PROMPT_REPORTS`], then each power of two, then every
+/// [`P1_BACKOFF_REPORTS`]th.
+pub(in crate::core::heap) fn p1_revalidation_due(report: u32, large: bool) -> bool {
+    if large {
+        report.is_multiple_of(P1_REVALIDATE_STRIDE)
+    } else {
+        report <= P1_PROMPT_REPORTS
+            || report.is_power_of_two()
+            || report.is_multiple_of(P1_BACKOFF_REPORTS)
+    }
+}
+
+#[cfg(test)]
+mod p1_revalidation_tests {
+    use super::*;
+
+    /// A process that stops running old code acks at once: every one of its first reports
+    /// re-validates. One that never stops backs off to one walk in `P1_BACKOFF_REPORTS`.
+    #[test]
+    fn a_small_seed_revalidates_promptly_and_then_backs_off() {
+        assert!((1..=P1_PROMPT_REPORTS).all(|report| p1_revalidation_due(report, false)));
+        let walks_in = |from: u32, to: u32| {
+            (from..to)
+                .filter(|&report| p1_revalidation_due(report, false))
+                .count()
+        };
+        // 65..4096: only the powers of two (128, 256, 512, 1024, 2048).
+        assert_eq!(walks_in(P1_PROMPT_REPORTS + 1, P1_BACKOFF_REPORTS), 5);
+        // A long-running process: about one walk in every `P1_BACKOFF_REPORTS` reports.
+        let far = 100 * P1_BACKOFF_REPORTS;
+        assert!(walks_in(P1_BACKOFF_REPORTS, far) <= 100 + 12);
+        assert!(p1_revalidation_due(far, false));
+    }
+
+    /// A deeply recursing process keeps the stride it had.
+    #[test]
+    fn a_large_seed_keeps_its_fixed_stride() {
+        for report in 1..=4 * P1_REVALIDATE_STRIDE {
+            assert_eq!(
+                p1_revalidation_due(report, true),
+                report.is_multiple_of(P1_REVALIDATE_STRIDE)
+            );
+        }
+    }
 }

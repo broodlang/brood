@@ -838,10 +838,16 @@ impl Heap {
         let p1_seed =
             self.roots.len() + self.env_roots.len() + self.dynamics.len() + self.live_vm_arms.len();
         let p1_large = p1_seed > P1_LARGE_SEED;
-        if p1_large && self.p1_dirty_epoch.get() == epoch {
+        if self.p1_dirty_epoch.get() == epoch {
             let t = self.p1_dirty_tick.get().wrapping_add(1);
             self.p1_dirty_tick.set(t);
-            if !t.is_multiple_of(P1_REVALIDATE_STRIDE) {
+            // A large seed re-validates every `P1_REVALIDATE_STRIDE` reports from the first.
+            // A small one re-validates at every report for its first `P1_PROMPT_REPORTS`, so a
+            // process that stops running draining-generation code still acks at once; one
+            // that is STILL dirty after that is running old code it will not return from (a
+            // game's or a server's loop, its frames on the stack for the life of the process),
+            // and it backs off: at each power of two, then every `P1_BACKOFF_REPORTS`.
+            if !p1_revalidation_due(t, p1_large) {
                 return true; // stale-dirty: skip the O(depth) re-walk this safepoint
             }
         }
