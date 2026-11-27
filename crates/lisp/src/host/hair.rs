@@ -780,7 +780,16 @@ pub struct PlanConstants {
     pub most_steps: usize,
     pub drift: f64,
     pub clearance: f64,
+    /// her curls' stretch, `bounce-tuning`'s `[gain hertz damping]` (none without it), and how far
+    /// it may go (`*stretch*`) and how hard a push counts (`*bounce-most*`)
+    pub bounce: Option<[f64; 3]>,
+    pub stretch: f64,
+    pub bounce_most: f64,
 }
+
+/// A lock's curls' stretch (`:bounce`): how far they are stretched, how fast, and the root's
+/// velocity the last step (none on the first).
+pub type Bounce = (f64, f64, Option<Vector>);
 
 /// One lock as the state keeps it between frames: what `moved-plan` reads.
 #[derive(Clone, Debug)]
@@ -808,6 +817,8 @@ pub struct Held {
     /// its bend limits as groomed (`relaxed` here for how upright the head is)
     pub limits: Vec<f64>,
     pub thickness: Option<Vec<f64>>,
+    /// its curls' stretch the last frame (`:bounce`)
+    pub bounce: Option<Bounce>,
 }
 
 /// The frame every lock is planned in.
@@ -827,6 +838,52 @@ pub struct Planned {
     pub steps: usize,
     pub step: f64,
     pub fresh: bool,
+    /// its curls' stretch this frame (none without `bounce-tuning`, or with no time passed)
+    pub bounce: Option<Bounce>,
+}
+
+/// `bounced`: the lock's curls' stretch `dt` seconds on, its root gone from `from` to `to`; the
+/// spring each lock's own by its first joint (b3d-hair's spreads), in sub-steps of 1/rate s
+fn bounced(
+    held: &Held,
+    upright: f64,
+    tuning: [f64; 3],
+    from: Vector,
+    to: Vector,
+    dt: f64,
+    constants: &PlanConstants,
+) -> Bounce {
+    let [gain, hertz, damping] = tuning;
+    let (mut b, mut speed, before) = held.bounce.unwrap_or((0.0, 0.0, None));
+    let velocity = scale(subtract(to, from), 1.0 / dt.max(1.0e-6));
+    let mut asked = match before {
+        Some(before) => scale(subtract(velocity, before), 1.0 / dt.max(1.0e-6)),
+        None => [0.0, 0.0, 0.0],
+    };
+    let strength = size(asked);
+    if strength > constants.bounce_most {
+        asked = scale(asked, constants.bounce_most / strength);
+    }
+    let along = normalize(subtract(
+        *held.points.last().expect("a lock has points"),
+        held.points[0],
+    ));
+    let first_joint = held.joints.first().copied().unwrap_or(0) as f64;
+    let share = |factor: f64| {
+        let turn = factor * first_joint;
+        turn - turn.floor()
+    };
+    let omega = 2.0 * std::f64::consts::PI * hertz * (0.8 + 0.4 * share(0.618));
+    let gain = gain * (0.6 + 0.8 * share(0.381));
+    let damping = damping * (0.7 + 0.6 * share(0.755));
+    let drive = -(gain * upright * dot(asked, along));
+    let steps = (dt * constants.rate + 0.999).floor().max(1.0) as usize;
+    let step = dt / steps as f64;
+    for _ in 0..steps {
+        speed += step * (drive - omega * omega * b - 2.0 * damping * omega * speed);
+        b = (-constants.stretch).max(constants.stretch.min(b + step * speed));
+    }
+    (b, speed, Some(velocity))
 }
 
 fn translation(matrix: &Matrix) -> Vector {
@@ -1016,6 +1073,20 @@ pub fn plan(held: &Held, frame: &Frame, constants: &PlanConstants) -> Planned {
             .collect(),
     };
     let before = held.posed.clone().unwrap_or_else(|| now.clone());
+    // her curls' stretch, and the bones' lengths as stretched (`lengths-now`)
+    let bounce = constants.bounce.filter(|_| frame.dt > 0.0).map(|tuning| {
+        bounced(
+            held, upright, tuning, before[0], now[0], frame.dt, constants,
+        )
+    });
+    let lengths = match bounce {
+        Some((b, _, _)) if 1.0 + b != 1.0 => held
+            .lengths
+            .iter()
+            .map(|length| (1.0 + b) * length)
+            .collect(),
+        _ => held.lengths.clone(),
+    };
     let steps = (constants.most_steps as f64)
         .min((frame.dt * constants.rate + 0.999).floor().max(1.0)) as usize;
     let step = frame.dt / steps as f64;
@@ -1056,7 +1127,7 @@ pub fn plan(held: &Held, frame: &Frame, constants: &PlanConstants) -> Planned {
             damping: held.damping.clone(),
             upright,
             holds: held.holds.clone(),
-            lengths: held.lengths.clone(),
+            lengths,
             margins: held.margins.clone(),
             limits: relaxed(&held.limits, upright),
             thickness: held.thickness.clone(),
@@ -1064,6 +1135,7 @@ pub fn plan(held: &Held, frame: &Frame, constants: &PlanConstants) -> Planned {
         steps,
         step,
         fresh,
+        bounce,
     }
 }
 

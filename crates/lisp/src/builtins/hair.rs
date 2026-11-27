@@ -62,7 +62,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
             "constants",
             "plan-constants",
         ],
-        "Every lock of `locks` (b3d-hair's state locks, each with its :root-parent: the root joint's parent, nil for the skeleton's base) planned as b3d-hair's `moved-plan` plans it, from the frame's `worlds` (16 numbers a joint), `base`, the head's `twist` ([angle [x y z]] or nil), `dt` and whether the colliders `moved-shapes`, then its sub-steps taken against `shapes` (blended from `shapes-before`) as `%hair-moved` takes them, with b3d-hair's settings in `constants` and `plan-constants` (:rate :most-steps :drift :clearance): a vector of `[points previous now step fresh nears]` a lock. b3d-hair's plan and sub-steps for a whole frame natively, in one call (ADR-821 amended).",
+        "Every lock of `locks` (b3d-hair's state locks, each with its :root-parent: the root joint's parent, nil for the skeleton's base) planned as b3d-hair's `moved-plan` plans it, from the frame's `worlds` (16 numbers a joint), `base`, the head's `twist` ([angle [x y z]] or nil), `dt` and whether the colliders `moved-shapes`, then its sub-steps taken against `shapes` (blended from `shapes-before`) as `%hair-moved` takes them, with b3d-hair's settings in `constants` and `plan-constants` (:rate :most-steps :drift :clearance): a vector of `[points previous now step fresh nears bounce]` a lock (its curls' stretch planned too, from `plan-constants`' :bounce :stretch :bounce-most). b3d-hair's plan and sub-steps for a whole frame natively, in one call (ADR-821 amended).",
         hair_advance,
     );
 }
@@ -135,7 +135,33 @@ fn held_of(heap: &Heap, map: Value, count: usize) -> Result<crate::host::hair::H
         margins: numbers(heap, field(heap, map, "margins"), ":margins")?,
         limits: numbers(heap, field(heap, map, "limits"), ":limits")?,
         thickness: optional_numbers(heap, field(heap, map, "thickness"), ":thickness")?,
+        bounce: bounce_of(heap, field(heap, map, "bounce"))?,
     })
+}
+
+/// A lock's `:bounce`, `[b speed root-velocity]` (the velocity nil on the first frame), or nil.
+fn bounce_of(heap: &Heap, value: Value) -> Result<Option<crate::host::hair::Bounce>, String> {
+    if matches!(value, Value::Nil) {
+        return Ok(None);
+    }
+    let parts = items(heap, value, ":bounce")?;
+    match parts.as_slice() {
+        [b, speed, velocity] => {
+            let velocity = match velocity {
+                Value::Nil => None,
+                value => match numbers(heap, *value, ":bounce's velocity")?.as_slice() {
+                    [x, y, z] => Some([*x, *y, *z]),
+                    _ => return Err(":bounce's velocity is not [x y z]".into()),
+                },
+            };
+            Ok(Some((
+                number(heap, *b, ":bounce")?,
+                number(heap, *speed, ":bounce")?,
+                velocity,
+            )))
+        }
+        _ => Err(":bounce is not [b speed velocity]".into()),
+    }
 }
 
 /// `(%hair-advance locks worlds base twist dt moved-shapes shapes shapes-before constants plan-constants)`
@@ -185,6 +211,15 @@ fn hair_advance(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         most_steps: setting("most-steps").map_err(fail)? as usize,
         drift: setting("drift").map_err(fail)?,
         clearance: setting("clearance").map_err(fail)?,
+        bounce: match field(heap, settings, "bounce") {
+            Value::Nil => None,
+            value => match numbers(heap, value, ":bounce").map_err(fail)?.as_slice() {
+                [gain, hertz, damping] => Some([*gain, *hertz, *damping]),
+                _ => return Err(fail(":bounce is not [gain hertz damping]".into())),
+            },
+        },
+        stretch: setting("stretch").map_err(fail)?,
+        bounce_most: setting("bounce-most").map_err(fail)?,
     };
     let held = items(heap, arg(args, 0), "the locks")
         .map_err(fail)?
@@ -247,6 +282,19 @@ fn hair_advance(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             })
             .collect();
         let nears = heap.alloc_vector(nears);
+        // its curls' stretch, `[b speed root-velocity]`, or nil
+        let bounce = match planned.bounce {
+            None => Value::Nil,
+            Some((b, speed, velocity)) => {
+                let velocity = match velocity {
+                    None => Value::Nil,
+                    Some([x, y, z]) => {
+                        heap.alloc_vector(vec![Value::float(x), Value::float(y), Value::float(z)])
+                    }
+                };
+                heap.alloc_vector(vec![Value::float(b), Value::float(speed), velocity])
+            }
+        };
         out.push(heap.alloc_vector(vec![
             points,
             previous,
@@ -254,6 +302,7 @@ fn hair_advance(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             Value::float(planned.step),
             Value::Bool(planned.fresh),
             nears,
+            bounce,
         ]));
     }
     Ok(heap.alloc_vector(out))
