@@ -2323,6 +2323,9 @@ pub(super) fn draw_uniform(
             .as_ref()
             .map_or([0.0; 8], |wrinkles| wrinkles.weights),
     ));
+    // `DrawU::fibre_look` and `fibre_cut`: a `:fibres` surface's look (ADR-825)
+    bytes.extend(floats_bytes(&material.fibre_look));
+    bytes.extend(floats_bytes(&material.fibre_cut));
     bytes
 }
 

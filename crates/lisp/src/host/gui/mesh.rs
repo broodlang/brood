@@ -1125,6 +1125,15 @@ pub struct Material {
     /// transparent shadows), so thin hair casts a faint shadow and only overlapping layers a full one
     /// ([`DEFAULT_FIBRE_SHADOW_KEEP`] without one; ADR-813 d).
     pub fibre_shadow_keep: f32,
+    /// A `:fibres` surface's look (ADR-825), each a material key with these defaults:
+    /// `:scatter-strength` (1) the light scattered through many fibres; `:scatter-depth` (0.5) how much
+    /// darker and deeper in colour that light is where the strand is shaded (its colour raised to
+    /// depth times the shaded share); `:colour-spread` (0.2) each strand's lightness times 1 ± it;
+    /// `:tip-lighten` (0) its last third lightened toward its tip by up to it; `:cuticle-tilt`
+    /// (0.035 rad) where its highlights sit; `:roughness-spread` (0.3) each strand's roughness
+    /// within 1 ± half of it; `:absorption` (40 a metre) how fast light dims through hair.
+    pub fibre_look: [f32; 4],
+    pub fibre_cut: [f32; 4],
     /// A skin's expression wrinkles (`:wrinkles`, ADR-817): normal maps laid over its own by eight
     /// zones' masks and weights ([`Wrinkles`]), or none.
     pub wrinkles: Option<Wrinkles>,
@@ -1159,6 +1168,8 @@ impl Default for Material {
             clamp_planes: Vec::new(),
             fibre_density: 0.4,
             fibre_shadow_keep: DEFAULT_FIBRE_SHADOW_KEEP,
+            fibre_look: [1.0, 0.5, 0.2, 0.0],
+            fibre_cut: [0.035, 0.3, 40.0, 0.0],
             wrinkles: None,
         }
     }

@@ -1828,6 +1828,38 @@ fn scene_spec(
         };
         // a `:fibres` surface's `:shadow-keep`: the share of the light a strand blocks in its shadow, 0 … 1
         // (ADR-813 d); the default without one, refused when not a share
+        // a `:fibres` surface's look (ADR-825): each key a number in its range, its default without
+        for (slot, key, low, high) in [
+            (0usize, "scatter-strength", 0.0, 4.0),
+            (1, "scatter-depth", 0.0, 4.0),
+            (2, "colour-spread", 0.0, 0.5),
+            (3, "tip-lighten", 0.0, 1.0),
+        ] {
+            if let Some(item) = get(material_map, key) {
+                if !is_number(item) || !(low..=high).contains(&num(item)) {
+                    return Err(format!(
+                        "a material's :{key} is a number from {low} to {high}, not {}",
+                        crate::syntax::printer::print(heap, item)
+                    ));
+                }
+                material.fibre_look[slot] = num(item);
+            }
+        }
+        for (slot, key, low, high) in [
+            (0usize, "cuticle-tilt", 0.0, 0.2),
+            (1, "roughness-spread", 0.0, 1.0),
+            (2, "absorption", 0.0, 400.0),
+        ] {
+            if let Some(item) = get(material_map, key) {
+                if !is_number(item) || !(low..=high).contains(&num(item)) {
+                    return Err(format!(
+                        "a material's :{key} is a number from {low} to {high}, not {}",
+                        crate::syntax::printer::print(heap, item)
+                    ));
+                }
+                material.fibre_cut[slot] = num(item);
+            }
+        }
         material.fibre_shadow_keep = match get(material_map, "shadow-keep") {
             None => crate::host::gui::mesh::DEFAULT_FIBRE_SHADOW_KEEP,
             Some(item) if is_number(item) && (0.0..=1.0).contains(&num(item)) => num(item),
@@ -4389,6 +4421,29 @@ mod gui_scene_light_tests {
         );
         let error = keep("{:surface :fibres :shadow-keep 1.5}").expect_err("past whole");
         assert!(error.contains(":shadow-keep is a share"), "{error}");
+        // (ADR-825) its look keys: read, their defaults without, refused out of range
+        let look = |text: &str| {
+            scene_with("[]", text).map(|scene| {
+                (
+                    scene.draws[0].material.fibre_look,
+                    scene.draws[0].material.fibre_cut,
+                )
+            })
+        };
+        let (given, cut) =
+            look("{:surface :fibres :scatter-depth 1.2 :tip-lighten 0.15 :absorption 60}")
+                .expect("reads");
+        assert!(
+            (given[1] - 1.2).abs() < 1e-6
+                && (given[3] - 0.15).abs() < 1e-6
+                && (cut[2] - 60.0).abs() < 1e-4
+        );
+        assert_eq!(
+            look("{:surface :fibres}").expect("reads").0,
+            [1.0, 0.5, 0.2, 0.0]
+        );
+        let error = look("{:surface :fibres :colour-spread 0.9}").expect_err("too wide");
+        assert!(error.contains(":colour-spread is a number"), "{error}");
         let error = scene_with("[]", "{:surface :fibres :clamp-planes [[0 0 0 0 0 0]]}")
             .expect_err("no normal");
         assert!(error.contains(":clamp-planes are each"), "{error}");

@@ -700,6 +700,8 @@ struct DrawU {
     clamp_info: vec4<f32>,      // x: how many `:clamp-planes` its strands keep to (ADR-813); y: the UV set its `:wrinkles` read by (ADR-817); z: the strands a `:fibres` shadow stands for (ADR-813)
     clamps: array<vec4<f32>, 4>,  // each plane: its unit normal toward the strands' side, `normal · point`
     wrinkles: array<vec4<f32>, 2>,  // a skin's eight wrinkle zones' weights (ADR-817; zero: none)
+    fibre_look: vec4<f32>,      // a `:fibres` surface's scatter strength, scatter depth, colour spread, tip lighten (ADR-825)
+    fibre_cut: vec4<f32>,       // its cuticle tilt, roughness spread, absorption a metre (ADR-825)
 };
 @group(0) @binding(0) var<uniform> scene: SceneU;
 @group(0) @binding(1) var<storage, read> palette: array<mat4x4<f32>>;
@@ -1764,7 +1766,7 @@ fn hair_shadow(light: Light, world: vec3<f32>, turn: f32) -> f32 {
         let stored = stored_depth(at, floor(projected.at + offset));
         way = way + max(receiver - view_distance(view, perspective, stored), 0.0);
     }
-    return exp(-40.0 * way / 16.0);
+    return exp(-draw.fibre_cut.z * way / 16.0);
 }
 
 // `mesh::hair_light`: that light channel by channel, taking the hair's colour as it passes
@@ -2266,8 +2268,9 @@ fn hair_fresnel(cosine: f32) -> f32 {
 // shadowless fill behind her head lit the back of her hair near white through it)
 fn karis_hair(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: vec3<f32>, seen: f32, known: f32) -> vec3<f32> {
     let roughness = clamp(draw.material.x, 1.0 / 255.0, 1.0);
-    // each strand a little rougher or smoother than the next (`_STRAND`, ADR-813)
-    let width = roughness * roughness * (0.85 + 0.3 * fract(fibre_strand * 7.13));
+    // each strand a little rougher or smoother than the next (`_STRAND`, ADR-813; `:roughness-spread`)
+    let spread = draw.fibre_cut.y;
+    let width = roughness * roughness * (1.0 - 0.5 * spread + spread * fract(fibre_strand * 7.13));
     let sin_light = clamp(dot(tangent, to_light), -1.0, 1.0);
     let sin_view = clamp(dot(tangent, view), -1.0, 1.0);
     let cos_difference = cos(0.5 * abs(asin(sin_view) - asin(sin_light)));
@@ -2277,8 +2280,8 @@ fn karis_hair(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: ve
         * inverseSqrt(dot(light_across, light_across) * dot(view_across, view_across) + 1e-4);
     let cos_half_phi = sqrt(clamp(0.5 + 0.5 * cos_phi, 0.0, 1.0));
     // the cuticle's tilt (2°) and the index the fibre's cross-section shows (Karis's fit)
-    // (each strand's own, ±1°: `_STRAND`)
-    let tilt = 0.035 + (fract(fibre_strand) - 0.5) * 0.035;
+    // (each strand's own, ± half of it: `_STRAND`; `:cuticle-tilt`)
+    let tilt = draw.fibre_cut.x * (1.0 + (fract(fibre_strand) - 0.5));
     let index = 1.19 / cos_difference + 0.36 * cos_difference;
     let colour = max(base, vec3<f32>(1e-4));
     let along = sin_light + sin_view;
@@ -2303,9 +2306,12 @@ fn karis_hair(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: ve
     // light scattered through many fibres
     let facing = safe_normalize(view - tangent * sin_view);
     let wrapped = clamp((dot(facing, to_light) + 1.0) * 0.25, 0.0, 1.0);
-    let scatter = 0.31830989 * mix(wrapped, 1.0 - abs(sin_light), 0.33 * known);
-    let luminance = max(dot(colour, vec3<f32>(0.2126, 0.7152, 0.0722)), 1e-4);
-    let tint = pow(colour / luminance, vec3<f32>(1.0 - clamp(seen, 0.0, 1.0)));
+    let scatter = 0.31830989 * mix(wrapped, 1.0 - abs(sin_light), 0.33 * known) * draw.fibre_look.x;
+    // (in shade the light has come through more hair: darker and a little deeper in colour, its
+    // colour raised to `:scatter-depth` times the shaded share, ADR-825. Divided by its own
+    // luminance, as it was, the shade kept its brightness and red went past red: red hair
+    // crimson where real hair goes dark auburn, 39's photo patches)
+    let tint = pow(colour, vec3<f32>(draw.fibre_look.y * (1.0 - clamp(seen, 0.0, 1.0))));
     let shine = vec3<f32>(reflected * draw.material.y * 2.0) + transmitted + second;
     return 3.14159265 * (shine + sqrt(colour) * scatter * tint);
 }
@@ -2573,14 +2579,19 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
     let uv_turn = uv_dx.x * uv_dy.y - uv_dy.x * uv_dx.y;
     let image_up = -(world_dy * uv_dx.x - world_dx * uv_dy.x) * sign(uv_turn);
     var base = srgb_to_linear(texel.rgb) * draw.color.rgb;
-    // a `:fibres` strand (ADR-813): its own lightness (`_STRAND`, ±20 %), darker toward its root, and
-    // its value and baked self-shadow handed to the light loop
+    // a `:fibres` strand (ADR-813): its own lightness (`_STRAND`, ±`:colour-spread`), darker toward its
+    // root, its last third lighter toward its tip (`:tip-lighten`: sun and wear, ADR-825), and its
+    // value and baked self-shadow handed to the light loop
     let fibres = (draw.flags.y & 512u) != 0u;
     if (fibres) {
         fibre_strand = fragment.curvature;
         fibre_visibility = fragment.visibility;
         let root = clamp(fragment.uv.y, 0.0, 1.0);
-        base = base * (0.8 + 0.4 * fract(fibre_strand)) * mix(1.0, 0.75, root * root);
+        let spread = draw.fibre_look.z;
+        base = base * (1.0 - spread + 2.0 * spread * fract(fibre_strand)) * mix(1.0, 0.75, root * root);
+        // (`uv.y` 1 at the root, 0 at the tip: the last third eases toward the tip)
+        let toward_tip = clamp((0.3333 - root) * 3.0, 0.0, 1.0);
+        base = mix(base, sqrt(base), draw.fibre_look.w * toward_tip);
     }
     var normal = safe_normalize(fragment.normal);
     if (!front) {
