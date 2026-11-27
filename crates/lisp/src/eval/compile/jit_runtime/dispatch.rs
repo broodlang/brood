@@ -118,7 +118,7 @@ pub(crate) fn jit_dispatch_call(
 
     // The callee's arm when the resolve below found one it could not link (not native yet,
     // an optional or rest parameter, over the cap): the slow path runs it as it is.
-    let mut vm_arm: Option<(Arc<ArmHandle>, EnvId)> = None;
+    let mut vm_arm: Option<(ArmRef, EnvId)> = None;
     // The contract shim whose result the call still owes a check, once the resolve below
     // entered one (ADR-773).
     let mut contract: Option<Value> = None;
@@ -217,7 +217,7 @@ pub(crate) fn jit_dispatch_call(
                 crate::builtins::contracts::ShimEntry::Run => None,
             }
         };
-        let resolved: Option<(Arc<ArmHandle>, EnvId, (u32, u32))> = if elided {
+        let resolved: Option<(ArmRef, EnvId, (u32, u32))> = if elided {
             match heap.vm_call_ic_probe(site, head, argc as u32, epoch) {
                 Some((_, Some(t))) => Some(t),
                 // An arm-less IC hit: a builtin callee, or a closure the interpreter cached

@@ -1613,7 +1613,7 @@ fn arm_handle_clone_does_not_touch_the_shared_arm_refcount() {
          to cloning `Arc<CompiledArm>` on the call path"
     );
     assert_eq!(
-        Arc::strong_count(&handle),
+        crate::eval::compile::ArmRef::strong_count(&handle),
         1001,
         "the clones should land on the process-local handle instead"
     );
@@ -1624,7 +1624,7 @@ fn arm_handle_clone_does_not_touch_the_shared_arm_refcount() {
         Arc::as_ptr(&shared)
     ));
     drop(clones);
-    assert_eq!(Arc::strong_count(&handle), 1);
+    assert_eq!(crate::eval::compile::ArmRef::strong_count(&handle), 1);
 }
 
 /// The sibling of the guard above: **resolving** an arm must not allocate a handle per call.
@@ -1654,18 +1654,20 @@ fn resolving_a_closure_arm_twice_reuses_one_memoized_handle() {
     let first = compiled_arm_for(heap, id, 1).expect("f/1 compiles");
     let second = compiled_arm_for(heap, id, 1).expect("f/1 compiles");
     assert!(
-        Arc::ptr_eq(&first, &second),
+        crate::eval::compile::ArmRef::ptr_eq(&first, &second),
         "a second resolution must reuse the memoized handle, not allocate another one"
     );
 
     // The hot path: many resolutions, every result held so nothing can be recycled into
     // the same address and fake a pass.
     let shared_before = Arc::strong_count(first.arc());
-    let repeats: Vec<Arc<ArmHandle>> = (0..1000)
+    let repeats: Vec<ArmRef> = (0..1000)
         .map(|_| compiled_arm_for(heap, id, 1).expect("f/1 compiles"))
         .collect();
     assert!(
-        repeats.iter().all(|h| Arc::ptr_eq(h, &first)),
+        repeats
+            .iter()
+            .all(|h| crate::eval::compile::ArmRef::ptr_eq(h, &first)),
         "every resolution of the same (closure, argc) should be the one memoized handle"
     );
     assert_eq!(
