@@ -4579,7 +4579,10 @@ mod gui_scene_light_tests {
     fn sheen_cloth_read_clamped_and_absent_by_default() {
         // ADR-836: [r g b roughness], the colour to 0 … 1, the roughness to 0.07 … 1
         let given = scene_with("[]", "{:sheen-cloth [0.9 1.4 0.5 0.01]}").expect("a scene");
-        assert_eq!(given.draws[0].material.sheen_cloth, Some([0.9, 1.0, 0.5, 0.07]));
+        assert_eq!(
+            given.draws[0].material.sheen_cloth,
+            Some([0.9, 1.0, 0.5, 0.07])
+        );
         let plain = scene_with("[]", "{}").expect("a scene");
         assert_eq!(plain.draws[0].material.sheen_cloth, None);
     }
