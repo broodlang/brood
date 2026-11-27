@@ -40,6 +40,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         byte_at,
     );
     primitives.def(
+        "%bytes-f32-le",
+        Arity::exact(2),
+        Sig::new(vec![bytes_ty, int], float),
+        &["b", "off"],
+        "The little-endian IEEE-754 single at byte off of b, as a float: exact, infinities, NaN and the sign of zero kept, its bits as the single's (a signalling NaN stays one). Errors if the four bytes are not all in b.",
+        bytes_f32_le,
+    );
+    primitives.def(
         "%subbytes",
         Arity::range(2, 3),
         Sig::variadic(any, bytes_ty),
@@ -242,6 +250,46 @@ pub(super) fn byte_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 }
 
 /// `(byte-at b i)` — the byte at index `i` as an int 0–255 (out of range errors).
+/// `(%bytes-f32-le b off)` — the little-endian single at byte `off` of `b` as a float
+/// (`f32_bits_to_f64`). A reader of a binary format (a glTF's vertices) built each float from
+/// four `bytes/at`s and its bits in Brood: a few microseconds a float, most of a 3D game's
+/// start.
+pub(super) fn bytes_f32_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let off = expect_int(heap, "bytes/f32-le", arg(args, 1))?;
+    let b = as_bytes(heap, "bytes/f32-le", arg(args, 0))?;
+    let start = usize::try_from(off)
+        .ok()
+        .filter(|start| start.checked_add(4).is_some_and(|end| end <= b.len()));
+    let Some(start) = start else {
+        return Err(LispError::runtime(format!(
+            "bytes/f32-le: bytes [{}, {}) out of range [0, {})",
+            off,
+            off.saturating_add(4),
+            b.len()
+        ))
+        .with_code(error_codes::INDEX_OUT_OF_RANGE));
+    };
+    let bits = u32::from_le_bytes([b[start], b[start + 1], b[start + 2], b[start + 3]]);
+    Ok(Value::float(f32_bits_to_f64(bits)))
+}
+
+/// The double an IEEE-754 single's `bits` stand for, exactly, its bits built from the single's
+/// rather than by the processor's conversion: that quiets a signalling NaN, and this keeps the
+/// payload as it is, as a reader rebuilding the bits itself does (b3d's `f32-from-bits`). The
+/// sign is put on the magnitude's bits, so minus zero and a negative NaN keep theirs.
+pub(crate) fn f32_bits_to_f64(bits: u32) -> f64 {
+    let sign = u64::from(bits >> 31);
+    let exponent = u64::from((bits >> 23) & 0xff);
+    let mantissa = u64::from(bits & 0x7f_ffff);
+    let magnitude = match exponent {
+        // zero and the subnormals: mantissa × 2^-149, exact in a double
+        0 => mantissa as f64 * f64::from_bits((1023 - 149) << 52),
+        255 => f64::from_bits((2047 << 52) | (mantissa << 29)),
+        _ => f64::from_bits(((exponent + 896) << 52) | (mantissa << 29)),
+    };
+    f64::from_bits(magnitude.to_bits() | (sign << 63))
+}
+
 pub(super) fn byte_at(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     let i = expect_int(heap, "bytes/at", arg(args, 1))?;

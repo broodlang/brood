@@ -251,3 +251,24 @@
     (let (parent (self)
           _ (spawn (fn () (send parent (bytes/scatter #b"aaaa" (bytes 2) 1 #b"x")))))
       (is (= (receive (filled filled) (after 5000 :timeout)) #b"aaxa")))))
+
+(describe "bytes/f32-le"
+  (test "reads a little-endian single as the double it is, exactly"
+    (assert= (bytes/f32-le (bytes 0 0 192 63) 0) 1.5)
+    (assert= (bytes/f32-le (bytes 9 0 0 192 191) 1) -1.5)
+    (assert= (bytes/f32-le (bytes/int-le-> 1036831949 4) 0) 0.10000000149011612)
+    ;; the smallest subnormal, and the sign of zero
+    (assert= (bytes/f32-le (bytes 1 0 0 0) 0) (math/pow 2.0 -149))
+    (assert= (bit/float-> (bytes/f32-le (bytes 0 0 0 128) 0)) (bit/float-> -0.0)))
+
+  (test "infinities come through, and a NaN keeps its bits (a signalling one stays one)"
+    (assert= (bit/float-> (bytes/f32-le (bytes 0 0 128 127) 0)) 9218868437227405312)
+    (assert= (bit/float-> (bytes/f32-le (bytes 0 0 128 255) 0))
+      (bit/float-> (- 0.0 (bit/->float 9218868437227405312))))
+    ;; 0x7f800001, a signalling NaN: payload bit 0 lands at bit 29 of the double
+    (assert= (bit/float-> (bytes/f32-le (bytes 1 0 128 127) 0)) 9218868437764276224))
+
+  (test "four bytes past the end, or a negative offset, is an error"
+    (is (try (do (bytes/f32-le (bytes 1 2 3) 0) false) (catch _ true)))
+    (is (try (do (bytes/f32-le (bytes 1 2 3 4) 1) false) (catch _ true)))
+    (is (try (do (bytes/f32-le (bytes 1 2 3 4) -1) false) (catch _ true)))))

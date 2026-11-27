@@ -8,6 +8,14 @@
     (bytes/at #b\"hi\" 0)        ;=> 104"
   (%byte-at b i))
 
+(defn f32-le (b:bytes off:int -> float)
+  "The little-endian IEEE-754 single at byte `off` of `b`, as a float: exact, with infinities,
+NaN and the sign of zero kept. Errors if the four bytes are not all in `b`.
+
+    (bytes/f32-le (bytes 0 0 192 63) 0)    ;=> 1.5
+    (bytes/f32-le (bytes 0 0 192 191) 0)   ;=> -1.5"
+  (%bytes-f32-le b off))
+
 (defn slice (b:bytes start:int & more:int -> bytes)
   "The byte slice [start, end) of b as a fresh bytes value (end defaults to the length). Errors if the range is out of bounds.
 

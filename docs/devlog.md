@@ -3412,3 +3412,13 @@ native function (7cdd9009e's tag from the pending VM callers), one line off from
 gone native in time). The call's cold error branch now records its site
 (`brood_rt_note_error_site`, so the hot trampoline keeps its register-sized arguments), and
 the arm's error block tags the error with that call's position, as the other call paths do.
+
+2026-11-28. **`bytes/f32-le`: a single read out of bytes as a float.** Brood could read
+integers out of bytes (`bytes/uint-le`, a byte at a time in Brood) and nothing else, so a
+reader of a binary format rebuilt every float from its bits in Brood: b3d's glTF reader and
+womanblend's start spent most of their seven seconds on it (`b3d-math/f32-le`, a few
+microseconds a float, called for every vertex coordinate of her body). `%bytes-f32-le` reads
+the four bytes and builds the double from the single's bits as such a reader does (the sign
+put on the magnitude's bits, so minus zero and a NaN's payload — a signalling one included —
+come through as they are; the processor's conversion would quiet it): the same to the bit as
+b3d's `f32-from-bits` on 300 000 patterns. Guard: `tests/bytes_test.blsp` "bytes/f32-le".
