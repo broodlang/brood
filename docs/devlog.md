@@ -3201,3 +3201,15 @@ arm's code and its inlined upgrade's from `reset_arm_untried` and the latch
 code now. Still open: the same loop's first lowering guesses integers for floats read out of a
 vector in about half its runs, and the float-context re-lowering that follows runs at 1 µs a
 call where a first lowering that guessed right runs at 0.27.
+
+2026-11-27. **A typed self-recursive function of a module tiers to native code; `seq/find`
+checks its collection once.** The JIT's tiering election asks whether an arm's name still
+names it (`record_self_global_ok`) and read the PUBLIC name, which under armed contracts
+(`nest run`, `nest test`) holds the shim: every typed self-tail loop of a module answered
+"rebound" at each election (`[jit-bail] reason=self-loop-name-rebound`, once every 128 calls,
+for good) and never left the VM. It reads `contracts::self_call_binding` now, as the VM's own
+self-call guard has since the `std/vt` grapheme loop. And `seq/find` called
+`%expect-collection` at every step of its walk: three quarters of a find. Its walk is a
+private `find-in`, vouched for once. `seq/find` over 36 items: 32 µs → 7 (womanblend's viewer
+calls it about 70 times a frame). Guard: `tests/contract_test.blsp` "a contracted function's
+self-loop tiers to native code" (red on 9beeb7d11 with contracts armed).

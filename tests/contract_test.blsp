@@ -649,6 +649,7 @@
 (defn wrapper (x) (f x))
 (defn nested (xs) (map xs (fn (x) (f x))))
 (defn named-loop (n acc) (if (= n 0) acc (named-loop (- n 1) (f n))))
+(defn spin (n:int acc:int -> int) (if (= n 0) acc (spin (- n 1) (+ acc 1))))
 (defn as-value (xs) (map xs f))
 (defn hot (n acc) (if (= n 0) acc (hot (- n 1) (+ acc (count (f \"z\"))))))
 (defn wrap-hot (n acc) (if (= n 0) acc (wrap-hot (- n 1) (+ acc (count (wrapper \"z\"))))))
@@ -689,6 +690,25 @@
   ;; terminal grid once per character.
   (test "a contracted function's own tail self-call is inside the boundary"
     (assert= 5 (contract-boundary-fixture/countdown 5 0)))
+  ;; And the JIT's own "is this name still me?" reads the same binding: by the public name,
+  ;; which holds the shim, a typed self-recursive function of a module answered "rebound" at
+  ;; every tiering election and never left the VM (`seq/find`, `json`'s `skip-ws`: five times
+  ;; slower than an untyped copy, under every `nest run`).
+  (test "a contracted function's self-loop tiers to native code"
+    (let (body (if (%contracts-armed?)
+                 (%load-string "contract-boundary-fixture/%orig%spin")
+                 contract-boundary-fixture/spin)
+          native? (fn () (= :native (get (%jit-arm-state body 2) :state)))
+          ;; (no native tier to reach under a ceiling below it: `BROOD_TIER=0`, a build without the JIT)
+          tiered (fold (range 80)
+                   (not (%native-tier?))
+                   (fn (done _)
+                     (or done
+                       (do
+                         (fold (range 300) nil (fn (_ _) (contract-boundary-fixture/spin 50 0)))
+                         (or (native?) (do (proc/sleep 25) (native?))))))))
+      (assert= 50 (contract-boundary-fixture/spin 50 0))
+      (is tiered)))
   ;; A thin wrapper called from native code runs its compiled arm (so it can tier up), not
   ;; the dispatcher's redirect: the compiled arm must apply the boundary the redirect did —
   ;; armed, a call that reached the shim would raise on the string `f` returns.

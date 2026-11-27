@@ -268,7 +268,17 @@ pub(super) fn record_float_globals(arm: &CompiledArm, heap: &Heap, env: EnvId) {
 #[cfg(feature = "jit")]
 pub(super) fn record_self_global_ok(arm: &CompiledArm, heap: &Heap, env: EnvId) {
     use std::sync::atomic::Ordering::Relaxed;
-    let ok = match arm.dbg_name.and_then(|s| heap.env_get(env, s)) {
+    // Through the binding the arm's own self-call stands for: a contracted function of a
+    // module is reached, from its own module, by its uncontracted alias, and the PUBLIC name
+    // holds the shim (`contracts::self_call_binding`, which the VM's self-call guard already
+    // reads). Read by the public name, every typed self-recursive function of a module
+    // answered "rebound" at each election and never left the VM: `seq/find` ran 5 times
+    // slower than an untyped copy of itself, `json`'s `skip-ws` the same.
+    let ok = match arm
+        .dbg_name
+        .map(|s| crate::builtins::contracts::self_call_binding(heap, s))
+        .and_then(|s| heap.env_get(env, s))
+    {
         Some(Value::Fn(id)) => {
             super::cached_arm_for(heap, id, arm.nrequired).is_some_and(|other| other.uid == arm.uid)
         }
