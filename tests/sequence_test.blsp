@@ -546,7 +546,7 @@
     (assert= [10 20] (seq/mapv [1 2] (fn (x) (* x 10)))))
 
   ;; A vector is walked by index straight into the result (`%mapv-vector`, a self-tail loop
-  ;; that stays native); every other collection goes through `map`.
+  ;; that stays native); a range and a list have loops of their own (below).
   (test "mapv over a vector keeps order, calls f once an item, and gives []  for []"
     (assert= [] (seq/mapv [] inc))
     (assert= ["a!" "b!" "c!"] (seq/mapv ["a" "b" "c"] (fn (text) (str text "!"))))
@@ -562,6 +562,95 @@
         (fn () (seq/mapv [1.0 2.0 3.0] (fn (item) (* item 2.0)))))
       (fold (range 2000) nil (fn (_ _) (seq/mapv [1.0 2.0 3.0] (fn (item) (* item 2.0)))))
       (assert= :native (get (%jit-arm-state %mapv-vector 5) :state)))))
+
+(describe "the eager sequence ops walk each kind of collection with a loop of its own"
+  ;; `map`, `seq/filter`, `seq/reject`, `seq/keep` and `mapcat` (`%defseq`) walk a vector by
+  ;; index and anything else as a list; `seq/mapv` a vector, a range and a list each directly;
+  ;; `seq/find` a vector by index; `into` a vector is one kernel copy; `fold` walks a list as
+  ;; it is. Every kind must answer what it did when they all went through `seq` and `rest`.
+  (test "every kind answers alike"
+    (let (kinds [[1 2 3 4] (list 1 2 3 4) (range 1 5) (seq/lmap [0 1 2 3] inc) #{1 2 3 4}]
+          sorted (fn (items) (sort items)))
+      (doseq (kind kinds)
+        (assert= (list 2 3 4 5) (sorted (map kind inc)))
+        (assert= [2 3 4 5] (into [] (sort (seq/mapv kind inc))))
+        (assert= (list 2 4) (sorted (seq/filter kind even?)))
+        (assert= (list 1 3) (sorted (seq/reject kind even?)))
+        (assert= (list 20 40) (sorted (seq/keep kind (fn (n) (when (even? n) (* n 10))))))
+        (assert= (list 1 1 2 2 3 3 4 4) (sorted (mapcat kind (fn (n) (list n n)))))
+        (assert= 3 (seq/find kind (fn (n) (= n 3))))
+        (assert= nil (seq/find kind (fn (n) (= n 9))))
+        (assert= 10 (fold kind 0 +))
+        (assert= [1 2 3 4] (into [] (sort (into [] kind))))
+        (assert= [0 1 2 3 4] (into [] (sort (into [0] kind)))))))
+  (test "a vector, a list and a range keep their order"
+    (doseq (kind [[3 1 2] (list 3 1 2) (range 3 0 -1)])
+      (let (first-item (first (seq kind)))
+        (assert= first-item (first (map kind identity)))
+        (assert= first-item (nth (seq/mapv kind identity) 0))
+        (assert= first-item (first (seq/filter kind (fn (_) true))))
+        (assert= first-item (first (seq/keep kind identity)))
+        (assert= first-item (nth (into [] kind) 0))))
+    (assert= (list 3 2 1) (map (range 3 0 -1) identity))
+    (assert= [3 2 1] (seq/mapv (range 3 0 -1) identity))
+    (assert= [0 2 4] (seq/mapv (range 0 6 2) identity)))
+  (test "the function is called once an item, front to back"
+    (doseq (kind [[1 2 3] (list 1 2 3) (range 1 4)])
+      (let (seen (table/new)
+            note (fn (n) (table/put seen :order (conj (table/get seen :order []) n)) n))
+        (map kind note)
+        (seq/mapv kind note)
+        (seq/keep kind note)
+        (seq/filter kind note)
+        (assert= [1 2 3 1 2 3 1 2 3 1 2 3] (table/get seen :order)))))
+  (test "empty collections, nil and a map"
+    (doseq (nothing [[] nil (list) (range 0) {} #{}])
+      (assert= nil (map nothing inc))
+      (assert= [] (seq/mapv nothing inc))
+      (assert= nil (seq/filter nothing even?))
+      (assert= nil (seq/keep nothing identity))
+      (assert= nil (mapcat nothing list))
+      (assert= nil (seq/find nothing even?))
+      (assert= [] (into [] nothing))
+      (assert= [7] (into [7] nothing))
+      (assert= :start (fold nothing :start (fn (acc _) acc))))
+    (assert= (list [:a 1]) (map {:a 1} identity))
+    (assert= [[:a 1]] (seq/mapv {:a 1} identity))
+    (assert= [[:a 1]] (into [] {:a 1}))
+    (assert= (list :a) (seq/keep {:a 1} first))
+    (assert= [:a 1] (seq/find {:a 1} (fn ([_ value]) (= value 1)))))
+  (test "into a vector hands back a vector poured into an empty one, and never changes one"
+    (let (source [1 2 3]
+          grown (into source (list 4)))
+      (assert= [1 2 3] source)
+      (assert= [1 2 3 4] grown)
+      (assert= [1 2 3 5] (into source [5]))
+      (assert= [1 2 3] (into [] source))))
+  (test "a string is refused by the name the caller called"
+    (check-allow :type-mismatch
+      (is (includes? (try (map "ab" identity) (catch e (error-message e)))
+            "map: expected a sequence"))
+      (is (includes? (try (seq/mapv "ab" identity) (catch e (error-message e)))
+            "seq/mapv: expected a sequence"))
+      (is (includes? (try (seq/keep "ab" identity) (catch e (error-message e)))
+            "keep: expected a sequence"))
+      (is (includes? (try (fold "ab" 0 +) (catch e (error-message e))) "fold: expected a sequence"))
+      (is (includes? (try (into [] "ab") (catch e (error-message e))) "into: expected a sequence"))
+      (is (includes? (try (seq/mapv 5 identity) (catch e (error-message e)))
+            "seq/mapv: expected a collection"))))
+  ;; A walk whose function once waited on a message is kept off native code for the rest
+  ;; of the process (`suspend-latched`), and other tests `map` a `receive`: in a process
+  ;; that has, the walk is held to that reason and no other.
+  (test "the walks run natively"
+    (when (%native-tier?)
+      (let (double (fn (item) (* item 2.0))
+            native? (fn (walk argc work)
+                      (or (= :native (settle walk argc work 500))
+                        (= "suspend-latched" (str (get (%jit-arm-state walk argc) :reason))))))
+        (is (native? %map-vector-walk 5 (fn () (map [1.0 2.0 3.0] double))))
+        (is (native? %map-list-walk 3 (fn () (map (list 1.0 2.0 3.0) double))))
+        (is (native? %mapv-range 5 (fn () (seq/mapv (range 3) double))))
+        (is (native? %mapv-list 3 (fn () (seq/mapv (list 1.0 2.0 3.0) double))))))))
 
 (describe "sort-by across processes"
   (test "workers sorting a shared vector by a key each send back the same order"

@@ -3249,3 +3249,33 @@ call. In womanblend's viewer 10 hot functions moved to native code (277 refused 
 other 266 hold calls that remain, which is what the gate's cost model is about (§7.1 of
 compute-frontier.md stands). Not measured on brood's benchmark rows: this machine does not
 run them. Guard: `tests/jit_leaf_admit_test.blsp`.
+
+2026-11-27. **The eager sequence ops walk each kind with a loop of its own; `into` a vector is
+one copy; `contains?` on a map is native.** From womanblend's viewer, where `nest`'s profiler
+put a fifth of the game thread in the prelude's sequence plumbing (`map` 13% inclusive, `seq`
+5%, `into` 4%, `seq/keep` 8%, `%contains-key?` 3%). What each cost was the calls round the
+work, not the work: from native code a function the cost gate keeps on the VM costs ~180 ns to
+enter (a VM-to-VM call 76, native-to-native 27), and these ops were chains of such calls.
+`%defseq` (`map`, `%filter`, `mapcat`, `seq/filter`, `seq/reject`, `seq/keep`) now defines two
+private top-level self-tail walks an op, a vector's BY INDEX (walked with `rest` a vector costs
+a view a step) and a list's, in place of one `letrec` loop over `seq`'s view; `seq/mapv` walks
+a range and a list directly as it did a vector, appending with `%vector-push`; `seq/find`
+walks a vector by index; `fold` and `%fold-source` hand a plain list on without the call into
+`seq`; `into` a vector from a vector, list, nil, range or set is decided on two tags and is
+one `%vector-concat`; `contains?` probes a map inline with `get`'s three-argument primitive
+(`%map-get` with a default is a call, which is what kept it on the VM). Best of 25 batches,
+this machine under load: `map` of a 4-item vector 2.2 → 0.9 µs and of 30 items 6.4 → 4.0;
+`seq/mapv` of a 30-range 9.2 → 4.7, of a 4-item list 4.1 → 2.2; `seq/find` in 30 3.4 → 1.7;
+`(into [] list-of-30)` 2.0 → 1.2; `contains?` on a map from a native loop 466 → 141 ns.
+womanblend's serial tick 152 → 140–146 million instructions on its game thread (`perf`,
+sampled). Found by the new tests and fixed: `(into [0] (seq/lmap xs f))` raised (a seq-view
+is a `pair?`, and neither the kernel nor `append` walks one). Measured and not done: lifting
+the cost gate again (her tick within 1%: the arms it admits meet `slot-int-guard` on float
+code, 89 000 bail lines in 280 ticks). Worth knowing: a walk whose function once waited on a
+message is `suspend-latched` for the process, so a native-tier assertion on a shared walk
+depends on what ran before it. Guards: `tests/sequence_test.blsp` "the eager sequence ops walk
+each kind of collection with a loop of its own" (every kind alike, order, calls once an item,
+refusals by name, the walks native), `contains_native_test`. Run: 68 test files that use
+these ops, both contract modes (2 835 tests); not `make test`, which this machine does not
+run (`treesit_module_test`'s read-only grammar directory case failed in 2 of 5 such runs and
+passes alone: not looked into).

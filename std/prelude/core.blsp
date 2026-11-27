@@ -301,7 +301,14 @@ inside `first`.
 ;; The list a fold walks: `seq`'s view, except a string — which `seq` passes through, for
 ;; `count` and `empty?`, but which has no elements to fold — is refused here, by name.
 (defn- %fold-source (who coll)
-  (if (%eq (type-of coll) :string) (%refuse-string who coll) (seq coll)))
+  ;; A plain list, the commonest thing to reach here (what `map`, `seq/keep` and `seq/filter`
+  ;; answer), is its own source: told apart here by its tag and the two lazy kinds that
+  ;; share it, without the call into `seq` and `seq`'s walk down its whole dispatch
+  ;; (about 500 ns from native code, as much as folding four items).
+  (let (t (type-of coll))
+    (if (%eq t :pair)
+      (if (range? coll) (%range->list coll) (if (seqview? coll) (%seqview-realize coll) coll))
+      (if (%eq t :string) (%refuse-string who coll) (seq coll)))))
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
 
@@ -375,7 +382,11 @@ inside `first`.
         ;; `cond`/`second`.
         (let (parts (%seqview-parts coll))
           (fold (%vector-ref parts 0) acc ((%vector-ref parts 1) f)))
-        (%fold-loop f acc (%fold-source "fold" coll))))))
+        ;; Neither a range nor a seq-view, so a `:pair` here is a plain list and is walked
+        ;; as it is: `%fold-source` and `seq` would hand it back unchanged, two calls later.
+        (if (%eq (type-of coll) :pair)
+          (%fold-loop f acc coll)
+          (%fold-loop f acc (%fold-source "fold" coll)))))))
 (defn- %fold-loop (f acc coll)
   ;; ADR-315: a fold STOPS once the accumulator is a failure. Neither `with` nor `ok->`
   ;; can reach this case — the accumulator is threaded by the combinator, not by the

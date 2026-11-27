@@ -221,12 +221,21 @@ can.)
     (contains? {:a 1} :a)      ;=> true
     (contains? {:a nil} :a)    ;=> true    ; a stored nil is still present
     (contains? {:a 1} :zz)     ;=> false"
-  ;; A set's membership is one inline probe (`%set-has?` compiles to a primitive op), and
-  ;; everything else is a tail call to `%contains-key?`: with no call left for the set case
-  ;; to pay, this compiles to native code and is cheap enough to inline into its callers.
-  ;; It used to hold the map branch inline, which kept it on the VM (`call-mediated-boxed`)
-  ;; and cost a membership test ~900 ns from native code.
-  (if (set? m) (%set-has? m k) (%contains-key? m k)))
+  ;; A set's membership is one inline probe (`%set-has?` compiles to a primitive op) and a
+  ;; map's is two (`get` with each sentinel, which compiles to a primitive op where
+  ;; `%map-get` with a default is a call, compared by `%eq`), so both
+  ;; compile to native code with nothing left to pay and are cheap enough to inline into
+  ;; their callers. Everything else (a record, nil, the vector that is refused) is a tail
+  ;; call to `%contains-key?`. The map branch used to be spelled with `=`, a call, which
+  ;; kept whichever function held it on the VM (`call-mediated-boxed`): a membership test
+  ;; cost ~900 ns from native code with it here, ~470 ns with it in `%contains-key?`.
+  (if (set? m)
+    (%set-has? m k)
+    (if (map? m)
+      (if (%eq (get m k :%contains-miss-a) :%contains-miss-a)
+        (if (%eq (get m k :%contains-miss-b) :%contains-miss-b) false true)
+        true)
+      (%contains-key? m k))))
 
 ;; ---- map: merge / update / nested access -----------------------------------
 ;; All Brood over the kernel ops (`%map-assoc`/`%map-pairs`) and the surface above

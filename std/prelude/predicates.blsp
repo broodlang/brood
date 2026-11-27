@@ -239,19 +239,21 @@ itself (a type is a set of runtime tags): it does not walk the tail, so an impro
   (rest (rest (rest coll))))
 
 ;; ---- sequence operations ----
-;; Many eager seq ops share one structure: reverse-accumulate over `(seq coll)`,
-;; then reverse once. `%defseq` encodes the pattern as a single `defn` whose body
-;; holds a tail-recursive `letrec` loop. This keeps the source location visible to
-;; `note_definition` (which only recognises `def`/`defn` as outer heads) and
-;; removes the need for separate `name-acc` globals. Each loop calls the user fn
-;; directly — no extra `apply` frame per element. Inside `step`: `item` is bound to
-;; the current element and `acc` is the current accumulator.
+;; Many eager seq ops share one structure: reverse-accumulate over the collection, then
+;; reverse once. `%defseq` encodes the pattern as a `defn` and its two walks, each a private
+;; top-level self-tail loop the JIT runs natively: one over a vector BY INDEX (walked with
+;; `rest` a vector costs a view a step), one over a list, which is what `%fold-source` makes
+;; of every other collection. The walks are top-level, not a `letrec` inside the `defn`: a
+;; local loop reaches `f` through its closure and ran a third slower on a 4-item vector.
+;; Each walk calls the user fn directly — no extra `apply` frame per element. Inside `step`:
+;; `item` is bound to the current element and `acc` is the current accumulator.
 ;; `item` and `acc` are *intentional* anaphora: a `%defseq` step-expr is documented
 ;; to reference them (`(cons (f item) acc)`), so they opt out of automatic binding
 ;; hygiene with `~'item`/`~'acc` — an unquoted quoted symbol stays the literal name
-;; (the `aif` `it` case). Every other binder here — `coll`, `-loop` — is auto-renamed
+;; (the `aif` `it` case). Every other binder here — `coll`, `index`, `size` — is auto-renamed
 ;; by the hygiene pass (ADR-066 amendment) so it can't capture the caller's `step`
-;; code; no `#`/`(gensym)` needed.
+;; code; no `#`/`(gensym)` needed. The walks are named after the op (`%map-list-walk`,
+;; `%map-vector-walk`), and `params` ride along as their own parameters.
 (defmacro %defseq (sym params docstring step)
   "Define an eager sequence op that reverse-accumulates over `coll`.
 `params` are the extra arguments after `coll`; inside `step`, `item` is the
@@ -260,17 +262,32 @@ current element and `acc` is the current accumulator."
     (error "%defseq: third argument must be a docstring string, got "
       (pr-str docstring)
       ". Syntax: (%defseq name (params...) \"docstring\" step-expr)")
-    `(defn ~sym (coll ~@params)
-       ~docstring
-       (letrec (-loop (fn (coll ~'acc)
-                        (if (/empty? coll)
-                          acc
-                          (let (~'item (/first coll))
-                            (-loop (/rest coll) ~step)))))
-         ;; `%fold-source`, not `seq`: `seq` passes a string through (for `count` and
-         ;; `empty?`), and walking it would then fail inside `first`, naming a function
-         ;; the caller never called. `%fold-source` refuses a string with the hint.
-         (/reverse (-loop (/%fold-source ~(str sym) coll) nil))))))
+    (let (list-walk (symbol (str "%" sym "-list-walk"))
+          vector-walk (symbol (str "%" sym "-vector-walk")))
+      `(do
+         (/defn- ~list-walk
+           (coll ~@params ~'acc)
+           (if (/empty? coll)
+             ~'acc
+             (let (~'item (/first coll))
+               (~list-walk (/rest coll) ~@params ~step))))
+         (/defn- ~vector-walk
+           (coll ~@params index size ~'acc)
+           (if (/%lt index size)
+             (let (~'item (/%vector-ref coll index))
+               (~vector-walk coll ~@params (/%add index 1) size ~step))
+             ~'acc))
+         (defn ~sym (coll ~@params)
+           ~docstring
+           ;; The walks hand back a list (or nil), so the reverse is `%reverse-acc` itself,
+           ;; without `reverse`'s dispatch on the kind of its collection.
+           ;; `%fold-source`, not `seq`: `seq` passes a string through (for `count` and
+           ;; `empty?`), and walking it would then fail inside `first`, naming a function
+           ;; the caller never called. `%fold-source` refuses a string with the hint.
+           (/%reverse-acc (if (/%eq (/type-of coll) :vector)
+                            (~vector-walk coll ~@params 0 (/%vector-length coll) nil)
+                            (~list-walk (/%fold-source ~(str sym) coll) ~@params nil))
+             nil))))))
 
 (%defseq map
   (f)

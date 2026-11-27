@@ -284,6 +284,24 @@ Always true for `n` <= 0.
     (into #{} [1 1 2])        ;=> #{1 2}
     (into {} [[:a 1]])        ;=> {:a 1}
     (into [] {:a 1})          ;=> [[:a 1]]"
+  ;; Into a vector from a vector, a list, nil, a range or a set, which is nearly every
+  ;; `into` there is (`(into [] xs)`), is decided here on the two tags and is one kernel
+  ;; copy: the walk down `%into-any`'s conditions, each a call, cost more than the copy
+  ;; (30 items: 2.0 µs, of which the copy is a quarter). A lazy seq-view shares a list's tag
+  ;; and goes the long way, as does everything else.
+  (if (%eq (type-of to) :vector)
+    (let (kind (type-of from))
+      (if (%eq kind :vector)
+        ;; an already-vector `from` poured into an empty vector is the answer itself
+        (if (%eq (%vector-length to) 0) from (%vector-concat to from))
+        (if (if (%eq kind :pair)
+              (if (seqview? from) false true)
+              (if (%eq kind :nil) true (%eq kind :set)))
+          (%vector-concat to from)
+          (%into-any to from))))
+    (%into-any to from)))
+
+(defn- %into-any (to from)
   (cond
     ;; Map target: build via the kernel's GC-quiet CHAMP builder (`%map-into`) —
     ;; an implementation detail of *constructing* a fresh immutable map (it writes
@@ -320,8 +338,10 @@ Always true for `n` <= 0.
         (empty? to) (if (vector? from) from (apply vector (seq from)))
         ;; the kernel copies once for the shapes it walks; a map (its entries) or any
         ;; other seqable still goes through `append`
-        (or (vector? from) (pair? from) (nil? from) (range? from) (set? from))
-          (%vector-concat to from)
+        ;; (a lazy seq-view is a `pair?` too, and neither the kernel nor `append` walks
+        ;; one: `(into [0] (seq/lmap xs f))` raised. `seq` realises it to a list first.)
+        (seqview? from) (%vector-concat to (seq from))
+        (or (vector? from) (pair? from) (nil? from) (set? from)) (%vector-concat to from)
         else (apply vector (append to from)))
     else (append to from)))
 
@@ -1010,15 +1030,30 @@ indexed access or a vector literal shape (`(into [] (map coll f))`, named).
 
     (seq/mapv [1 2 3] inc)   ;=> [2 3 4]
     (map [1 2 3] inc)    ;=> (2 3 4)   ; the list-returning sibling"
-  ;; A vector, the common case, is walked by index straight into the result: a self-tail loop
-  ;; stays native, and `conj` appends in place (ADR-511). Through `map` and `into` it was six
-  ;; calls the JIT keeps on the VM and two throwaway lists: a 3-element `mapv` 3.2 → 0.95 µs.
-  (if (vector? coll)
-    (%mapv-vector coll f 0 (count coll) [])
-    (into [] (map (%expect-collection "seq/mapv" coll) f))))
+  ;; Every kind is walked straight into the result by a self-tail loop, which stays native:
+  ;; a vector by index, a range by counting, anything else as the list `%fold-source` makes
+  ;; of it. Through `map` and `into` it was six calls the JIT keeps on the VM and two
+  ;; throwaway lists: a 3-element `mapv` of a vector 3.2 → 0.95 µs, of a 4-item list
+  ;; 3.9 → 1.2 µs. The walks append with `%vector-push`, the kernel op behind `conj` on a
+  ;; vector (in place, ADR-511): the result is theirs alone, and `conj`'s own call and test
+  ;; cost more than the append (30 items 6.0 → 3.7 µs).
+  (if (%eq (type-of coll) :vector)
+    (%mapv-vector coll f 0 (%vector-length coll) [])
+    (if (range? coll)
+      (let (bounds (%range-bounds coll))
+        (%mapv-range f (%vector-ref bounds 0) (%vector-ref bounds 1) (%vector-ref bounds 2) []))
+      (%mapv-list (%fold-source "seq/mapv" (%expect-collection "seq/mapv" coll)) f []))))
 
 (defn- %mapv-vector (coll f index size acc)
-  (if (= index size) acc (%mapv-vector coll f (+ index 1) size (conj acc (f (nth coll index))))))
+  (if (%lt index size)
+    (%mapv-vector coll f (%add index 1) size (%vector-push acc (f (%vector-ref coll index))))
+    acc))
+(defn- %mapv-range (f index high step acc)
+  (if (if (%lt 0 step) (%lt index high) (%lt high index))
+    (%mapv-range f (%add index step) high step (%vector-push acc (f index)))
+    acc))
+(defn- %mapv-list (coll f acc)
+  (if (empty? coll) acc (%mapv-list (rest coll) f (%vector-push acc (f (first coll))))))
 
 (defn seq/partition (coll:seqable n:number -> any)
   "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped.
