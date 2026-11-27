@@ -5,7 +5,9 @@
 use crate::core::heap::Heap;
 use crate::core::value::{EnvId, Value, kw};
 use crate::error::{LispError, LispResult};
-use crate::host::hair::{Constants, Lock, Shape, Vector, moved};
+use crate::host::hair::{
+    Constants, Link, LinkConstants, Lock, Settling, Shape, Vector, linked, moved,
+};
 
 use super::args::arg;
 
@@ -72,6 +74,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["locks", "pose", "worlds", "base"],
         "Every lock of `locks` (maps of :joints :points :bounce :root-parent) with its joints turned, root first, to point along its points, as b3d-hair's `turned-lock` turns them: from the `pose`'s local transforms (maps of :rotation :translation :scale a joint), the frame's `worlds` (16 numbers a joint) and the skeleton's `base`. A vector a lock of `[rotation translation world]` a joint: its new local rotation and translation and its world matrix (ADR-821 amended, stage 2).",
         hair_turned,
+    );
+    primitives.def(
+        "%hair-linked",
+        Arity::exact(5),
+        Sig::new(vec![vec_ty, vec_ty, vec_ty, map_ty, map_ty], vec_ty),
+        &["locks", "links", "shapes", "constants", "link-constants"],
+        "Every link of `links` (`[a b rests]`, b3d-hair's `links-of`) between the locks of `locks` (maps of :points :previous :lengths :margins :limits :thickness :nears, :lengths as the curls stretch them now) brought back within its bounds as b3d-hair's `cohered` does (`link-constants`: :together :apart :laid [least most] :give), then each lock the links moved settled again against her body's `shapes` as its `settled-again` settles it (b3d-hair's settings in `constants`): a vector a lock, nil where its points are as they were, else `[points previous]` (ADR-821 amended, stage 3).",
+        hair_linked,
     );
 }
 
@@ -539,6 +549,126 @@ fn constants_of(heap: &Heap, map: Value) -> Result<Constants, String> {
         clearance: get("clearance")?,
         passes: get("passes")? as usize,
     })
+}
+
+/// `(%hair-linked locks links shapes constants link-constants)`
+fn hair_linked(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let who = "hair/linked";
+    let fail = |reason: String| LispError::runtime(format!("{who}: {reason}"));
+    let shapes_now = shapes(heap, arg(args, 2), "the shapes").map_err(fail)?;
+    let constants = constants_of(heap, arg(args, 3)).map_err(fail)?;
+    let given = arg(args, 4);
+    let get = |name: &str| number(heap, field(heap, given, name), &format!(":{name}"));
+    let laid = match numbers(heap, field(heap, given, "laid"), ":laid")
+        .map_err(fail)?
+        .as_slice()
+    {
+        [least, most] => [*least, *most],
+        _ => return Err(fail(":laid is not [least most]".to_string())),
+    };
+    let link_constants = LinkConstants {
+        together: get("together").map_err(fail)?,
+        apart: get("apart").map_err(fail)?,
+        laid,
+        give: get("give").map_err(fail)?,
+    };
+    let count = shapes_now.len();
+    let locks = items(heap, arg(args, 0), "the locks")
+        .map_err(fail)?
+        .into_iter()
+        .map(|map| {
+            let nears = match field(heap, map, "nears") {
+                Value::Nil => None,
+                value => Some(
+                    items(heap, value, ":nears")?
+                        .into_iter()
+                        .map(|places| {
+                            numbers(heap, places, ":nears")?
+                                .into_iter()
+                                .map(|place| {
+                                    let place = place as usize;
+                                    if place < count {
+                                        Ok(place)
+                                    } else {
+                                        Err(format!(":nears names shape {place} of {count}"))
+                                    }
+                                })
+                                .collect()
+                        })
+                        .collect::<Result<Vec<Vec<usize>>, String>>()?,
+                ),
+            };
+            let lock = Settling {
+                points: vectors(heap, field(heap, map, "points"), ":points")?,
+                previous: vectors(heap, field(heap, map, "previous"), ":previous")?,
+                lengths: numbers(heap, field(heap, map, "lengths"), ":lengths")?,
+                margins: numbers(heap, field(heap, map, "margins"), ":margins")?,
+                limits: numbers(heap, field(heap, map, "limits"), ":limits")?,
+                thickness: optional_numbers(heap, field(heap, map, "thickness"), ":thickness")?,
+                nears,
+            };
+            let points = lock.points.len();
+            let bones = points.saturating_sub(1);
+            if lock.previous.len() < points
+                || lock.margins.len() < points
+                || lock.limits.len() < points
+                || lock.lengths.len() < bones
+                || lock
+                    .thickness
+                    .as_ref()
+                    .is_some_and(|thickness| thickness.len() < points)
+                || lock.nears.as_ref().is_some_and(|nears| nears.len() < bones)
+            {
+                return Err(format!(
+                    "a lock of {points} points is short of what it needs"
+                ));
+            }
+            Ok(lock)
+        })
+        .collect::<Result<Vec<Settling>, String>>()
+        .map_err(fail)?;
+    let links = items(heap, arg(args, 1), "the links")
+        .map_err(fail)?
+        .into_iter()
+        .map(|each| {
+            let parts = items(heap, each, "a link")?;
+            let [a, b, rests] = parts.as_slice() else {
+                return Err("a link is not [a b rests]".to_string());
+            };
+            let a = number(heap, *a, "a link's a")? as usize;
+            let b = number(heap, *b, "a link's b")? as usize;
+            let rests = numbers(heap, *rests, "a link's rests")?;
+            if a >= locks.len() || b >= locks.len() {
+                return Err(format!("a link names lock {a} or {b} of {}", locks.len()));
+            }
+            if rests.len() > locks[a].points.len() || rests.len() > locks[b].points.len() {
+                return Err("a link's rests are longer than its locks".to_string());
+            }
+            Ok(Link { a, b, rests })
+        })
+        .collect::<Result<Vec<Link>, String>>()
+        .map_err(fail)?;
+    let settled = linked(&locks, &links, &shapes_now, &constants, &link_constants);
+    let mut out = Vec::with_capacity(settled.len());
+    for each in settled {
+        let Some((points, previous)) = each else {
+            out.push(Value::Nil);
+            continue;
+        };
+        let mut as_value = |chain: Vec<Vector>| {
+            let items: Vec<Value> = chain
+                .into_iter()
+                .map(|[x, y, z]| {
+                    heap.alloc_vector(vec![Value::float(x), Value::float(y), Value::float(z)])
+                })
+                .collect();
+            heap.alloc_vector(items)
+        };
+        let points = as_value(points);
+        let previous = as_value(previous);
+        out.push(heap.alloc_vector(vec![points, previous]));
+    }
+    Ok(heap.alloc_vector(out))
 }
 
 /// `(%hair-moved locks steps step shapes-before shapes constants)`

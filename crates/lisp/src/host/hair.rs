@@ -485,14 +485,15 @@ fn kept_off(
     (p, q)
 }
 
-/// `constrained-with`: one pass, root to tip
+/// `constrained-with`: one pass, root to tip (`rides` None: `olds` left as they are, as
+/// `constrained` leaves them)
 #[allow(clippy::too_many_arguments)]
 fn constrained_with(
     points: &mut [Vector],
     olds: &mut [Vector],
     lock: &Lock,
     nears: &[Vec<&Shape>],
-    rides: &[Vector],
+    rides: Option<&[Vector]>,
     constants: &Constants,
 ) {
     let lengths = &lock.lengths;
@@ -577,7 +578,9 @@ fn constrained_with(
             }
         };
         points[index] = end;
-        unkicked(olds, rides, index, placed, end, kept, constants);
+        if let Some(rides) = rides {
+            unkicked(olds, rides, index, placed, end, kept, constants);
+        }
     }
 }
 
@@ -655,7 +658,7 @@ fn sub_step(
     }
     let mut olds = points.to_vec();
     for _ in 0..constants.passes {
-        constrained_with(&mut stepped, &mut olds, lock, nears, rides, constants);
+        constrained_with(&mut stepped, &mut olds, lock, nears, Some(rides), constants);
     }
     // never under the ground: a point that would be is put on it, its old place raised as far
     let mut grounded = stepped.clone();
@@ -1267,6 +1270,149 @@ pub fn turned_lock(
         above_turn = turned;
     }
     found
+}
+
+/// What b3d-hair's links between locks read (`*together*`, `*apart*`, `*laid*`, `*link-give*`)
+#[derive(Clone, Copy, Debug)]
+pub struct LinkConstants {
+    pub together: f64,
+    pub apart: f64,
+    pub laid: [f64; 2],
+    pub give: f64,
+}
+
+/// A link between locks `a` and `b`: its rest length at each point (`links-of`)
+#[derive(Clone, Debug)]
+pub struct Link {
+    pub a: usize,
+    pub b: usize,
+    pub rests: Vec<f64>,
+}
+
+/// One lock as `cohered` and `settled-again` read it: its points and old places, its bones'
+/// lengths as its curls stretch them now (`lengths-now`), its margins, bend limits and hair
+/// thickness, and the places in the frame's shapes near each bone (None: `:nears` nil)
+#[derive(Clone, Debug)]
+pub struct Settling {
+    pub points: Vec<Vector>,
+    pub previous: Vec<Vector>,
+    pub lengths: Vec<f64>,
+    pub margins: Vec<f64>,
+    pub limits: Vec<f64>,
+    pub thickness: Option<Vec<f64>>,
+    pub nears: Option<Vec<Vec<usize>>>,
+}
+
+/// `grounded-from`: every point but the root that is under the ground put on it
+fn grounded(points: &[Vector], ground: f64) -> Vec<Vector> {
+    points
+        .iter()
+        .enumerate()
+        .map(|(index, &[x, y, z])| {
+            if index > 0 && y < ground {
+                [x, ground, z]
+            } else {
+                [x, y, z]
+            }
+        })
+        .collect()
+}
+
+/// `moved-along`: each of `previous` moved as its point moved, `before` → `now`
+fn moved_along(previous: &[Vector], now: &[Vector], before: &[Vector]) -> Vec<Vector> {
+    previous
+        .iter()
+        .zip(now.iter().zip(before.iter()))
+        .map(|(old, (to, from))| {
+            [
+                old[0] + (to[0] - from[0]),
+                old[1] + (to[1] - from[1]),
+                old[2] + (to[2] - from[2]),
+            ]
+        })
+        .collect()
+}
+
+/// b3d-hair's `cohered` (every link brought back within its bounds, one pass), then
+/// `settled-again` for each lock the links moved: for each lock None when its points are as they
+/// were, else its new `(points, previous)`. The same sums in the same order as the Brood forms,
+/// so the result is theirs exactly (ADR-821 amended, stage 3).
+pub fn linked(
+    locks: &[Settling],
+    links: &[Link],
+    shapes: &[Shape],
+    constants: &Constants,
+    link: &LinkConstants,
+) -> Vec<Option<(Vec<Vector>, Vec<Vector>)>> {
+    let ground = constants.ground;
+    let mut all: Vec<Vec<Vector>> = locks.iter().map(|lock| lock.points.clone()).collect();
+    for each in links {
+        for index in 1..each.rests.len() {
+            let [px, py, pz] = all[each.a][index];
+            let [qx, qy, qz] = all[each.b][index];
+            let rest = each.rests[index];
+            let gx = qx - px;
+            let gy = qy - py;
+            let gz = qz - pz;
+            let squared = gx * gx + gy * gy + gz * gz;
+            let laid = py <= ground + 0.01 && qy <= ground + 0.01;
+            let least = (if laid { link.laid[0] } else { link.together }) * rest;
+            let most = (if laid { link.laid[1] } else { link.apart }) * rest;
+            if (squared >= least * least && squared <= most * most) || squared < 1.0e-18 {
+                continue;
+            }
+            let distance = squared.sqrt();
+            let wanted = if distance < least { least } else { most };
+            let share = (-link.give).max(link.give.min(0.5 * (distance - wanted))) / distance;
+            let sx = gx * share;
+            let sy = gy * share;
+            let sz = gz * share;
+            all[each.a][index] = [px + sx, py + sy, pz + sz];
+            all[each.b][index] = [qx - sx, qy - sy, qz - sz];
+        }
+    }
+    locks
+        .iter()
+        .zip(all)
+        .map(|(lock, points)| {
+            let new = grounded(&points, ground);
+            if new == lock.points {
+                return None;
+            }
+            let previous = moved_along(&lock.previous, &new, &lock.points);
+            let Some(nears) = &lock.nears else {
+                return Some((new, previous));
+            };
+            let before = new.clone();
+            let mut points = new;
+            let mut olds = previous.clone();
+            let held = Lock {
+                points: Vec::new(),
+                previous: Vec::new(),
+                before: Vec::new(),
+                now: Vec::new(),
+                carries: Vec::new(),
+                nears: Vec::new(),
+                stiffness: Vec::new(),
+                follows: None,
+                damping: Vec::new(),
+                upright: 1.0,
+                holds: Vec::new(),
+                lengths: lock.lengths.clone(),
+                margins: lock.margins.clone(),
+                limits: lock.limits.clone(),
+                thickness: lock.thickness.clone(),
+            };
+            let near: Vec<Vec<&Shape>> = nears
+                .iter()
+                .map(|places| places.iter().map(|&place| &shapes[place]).collect())
+                .collect();
+            constrained_with(&mut points, &mut olds, &held, &near, None, constants);
+            let points = grounded(&points, ground);
+            let previous = moved_along(&previous, &points, &before);
+            Some((points, previous))
+        })
+        .collect()
 }
 
 #[cfg(test)]
