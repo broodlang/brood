@@ -1164,6 +1164,10 @@ pub struct Material {
     /// its fibres throw back at grazing angles, linear RGB, and the sheen's roughness (0.07 … 1);
     /// a standard, cutout or blended surface only, the GPU painter only. Nil: none.
     pub sheen_cloth: Option<[f32; 4]>,
+    /// It shades skin under it at millimetres (`:contact-caster`, ADR-837): drawn also into the
+    /// camera's casters-only depth view, which a skin's contact march reads (her own creases are
+    /// never in it). The GPU painter only.
+    pub contact_caster: bool,
     /// Its skin pressed by the scene's contacts (`:deform`, ADR-805).
     pub deform: bool,
     /// A garment (`:garment`, ADR-839): with `deform`, its vertices pushed out of the scene's garment
@@ -1230,6 +1234,7 @@ impl Default for Material {
             sheen: None,
             surroundings: None,
             sheen_cloth: None,
+            contact_caster: false,
             deform: false,
             garment: false,
             covered: false,
@@ -3087,6 +3092,8 @@ pub struct ShadowView {
     pub perspective: bool,
     /// Where its map is kept (ADR-800), set by [`shadow_plan`].
     pub map: ShadowMapSlot,
+    /// Only `:contact-caster` draws are drawn into it (ADR-837: the camera's casters view).
+    pub casters_only: bool,
 }
 
 /// Where a shadow view's map is kept (ADR-800): which of the scene's two map arrays (0, the
@@ -3172,6 +3179,9 @@ pub struct ShadowPlan {
     /// Which view is the camera's depth for the ambient occlusion — none without it (or no
     /// room left for it).
     pub occlusion: Option<u32>,
+    /// Which view is the camera's depth of `:contact-caster` draws alone (ADR-837) — none
+    /// without the occlusion's view, a caster, or room.
+    pub casters: Option<u32>,
 }
 
 /// Where `draw`'s vertices can be in the world this frame — morphed, skinned and moved — from
@@ -3403,6 +3413,7 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
                 depth_range: [near, far],
                 perspective: false,
                 map: ShadowMapSlot::default(),
+                casters_only: false,
             }]
         }
         LightKind::Spot => {
@@ -3423,6 +3434,7 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
                 depth_range: [near, far],
                 perspective: true,
                 map: ShadowMapSlot::default(),
+                casters_only: false,
             }]
         }
         LightKind::Point => {
@@ -3441,6 +3453,7 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
                     depth_range: [near, far],
                     perspective: true,
                     map: ShadowMapSlot::default(),
+                    casters_only: false,
                 })
                 .collect()
         }
@@ -3458,6 +3471,7 @@ pub fn shadow_plan(scene: &Scene, world: Option<Bounds>) -> ShadowPlan {
         lights: [(0, 0); MAX_LIGHTS],
         arrays: ShadowArrays::default(),
         occlusion: None,
+        casters: None,
     };
     // the texels the plan's views and `more` would need together
     let texels_with = |views: &[ShadowView], more: &[u32]| {
@@ -3504,7 +3518,21 @@ pub fn shadow_plan(scene: &Scene, world: Option<Bounds>) -> ShadowPlan {
                 depth_range: [0.0, 1.0],
                 perspective: false,
                 map: ShadowMapSlot::default(),
+                casters_only: false,
             });
+            // and the same view of the `:contact-caster` draws alone (ADR-837), when there are
+            // any: what a skin's contact march reads, so cloth shades the skin under its edges
+            // while the skin's own creases, never in it, shade nothing
+            let casters = scene.draws.iter().any(|draw| draw.material.contact_caster);
+            if casters
+                && plan.views.len() < MAX_SHADOW_VIEWS
+                && texels_with(&plan.views, &[side]) <= MAX_SHADOW_TEXELS
+            {
+                plan.casters = Some(plan.views.len() as u32);
+                let mut view = plan.views[plan.views.len() - 1].clone();
+                view.casters_only = true;
+                plan.views.push(view);
+            }
         }
     }
     // each view to its array, in order: a view at the largest resolution in array 0, any
@@ -5563,7 +5591,15 @@ pub fn rasterize<'t>(
     let shadow_maps: Vec<Vec<f32>> = shadows
         .views
         .iter()
-        .map(|view| render_shadow_map(view, &posed, textures))
+        // (the casters' view, ADR-837, is the GPU painter's alone: the frozen CPU painter never
+        // reads it, so it is not drawn)
+        .map(|view| {
+            if view.casters_only {
+                Vec::new()
+            } else {
+                render_shadow_map(view, &posed, textures)
+            }
+        })
         .collect();
     for item in &posed {
         let material = &item.draw.material;
@@ -6881,6 +6917,34 @@ mod tests {
         assert_eq!(plan.views.len(), 7);
         assert_eq!(plan.arrays.sides, [4096, 1024]);
         assert!(plan.arrays.texels() <= MAX_SHADOW_TEXELS);
+    }
+
+    #[test]
+    fn a_contact_caster_adds_the_cameras_casters_view_and_nothing_else_does() {
+        // ADR-837: with the ambient occlusion's view there, a `:contact-caster` draw adds the same
+        // view of casters alone, right after it; without a caster there is none
+        let (mut scene, _meshes) = floor_and_card(slanted());
+        scene.ambient_occlusion = Some(AmbientOcclusion {
+            radius: 0.015,
+            strength: 0.6,
+        });
+        let plain = shadow_plan(&scene, None);
+        assert!(plain.occlusion.is_some());
+        assert_eq!(plain.casters, None);
+        scene.draws[1].material.contact_caster = true;
+        let with = shadow_plan(&scene, None);
+        let occlusion = with.occlusion.expect("the occlusion's view");
+        let casters = with.casters.expect("the casters' view");
+        assert_eq!(casters, occlusion + 1);
+        assert!(with.views[casters as usize].casters_only);
+        assert!(!with.views[occlusion as usize].casters_only);
+        assert_eq!(
+            with.views[casters as usize].view_proj,
+            with.views[occlusion as usize].view_proj
+        );
+        // no occlusion, no casters' view either
+        scene.ambient_occlusion = None;
+        assert_eq!(shadow_plan(&scene, None).casters, None);
     }
 
     #[test]
