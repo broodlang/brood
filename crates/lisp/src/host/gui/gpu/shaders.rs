@@ -2375,7 +2375,36 @@ fn fibre_transmittance(colour: vec3<f32>) -> vec3<f32> {
     let b2 = b * b;
     let denominator = 5.969 - 0.215 * b + 2.532 * b2 - 10.73 * b2 * b + 5.574 * b2 * b2 + 0.245 * b2 * b2 * b;
     let ratio = log(clamp(colour, vec3<f32>(1e-4), vec3<f32>(1.0))) / denominator;
-    return exp(-2.0 * ratio * ratio);
+    // (ADR-827) a fibre's absorption is its two melanins', whose spectra tie the channels
+    // together (d'Eon et al. 2011, as pbrt holds them): the absorption Chiang's inversion asks of
+    // each channel apart, fitted by least squares with neither amount below none. Each channel
+    // apart, a red hair's red was hardly absorbed at all (green 7.6 times red, where pheomelanin
+    // absorbs it 2.1 times), so light through her hair came out a pure, bright red
+    return exp(-2.0 * melanin_fit(ratio * ratio));
+}
+
+// the absorption `wanted`, channel by channel, as the nearest sum of eumelanin's and pheomelanin's
+// (amounts never below none): their absorption a unit of each, d'Eon et al. 2011
+fn melanin_fit(wanted: vec3<f32>) -> vec3<f32> {
+    let eumelanin = vec3<f32>(0.419, 0.697, 1.37);
+    let pheomelanin = vec3<f32>(0.187, 0.4, 1.05);
+    let eu_eu = dot(eumelanin, eumelanin);
+    let pheo_pheo = dot(pheomelanin, pheomelanin);
+    let eu_pheo = dot(eumelanin, pheomelanin);
+    let eu_wanted = dot(eumelanin, wanted);
+    let pheo_wanted = dot(pheomelanin, wanted);
+    let determinant = eu_eu * pheo_pheo - eu_pheo * eu_pheo;
+    var eu_amount = (eu_wanted * pheo_pheo - pheo_wanted * eu_pheo) / determinant;
+    var pheo_amount = (pheo_wanted * eu_eu - eu_wanted * eu_pheo) / determinant;
+    // (one below none: the best of the other alone)
+    if (eu_amount < 0.0) {
+        eu_amount = 0.0;
+        pheo_amount = max(pheo_wanted / pheo_pheo, 0.0);
+    } else if (pheo_amount < 0.0) {
+        pheo_amount = 0.0;
+        eu_amount = max(eu_wanted / eu_eu, 0.0);
+    }
+    return eu_amount * eumelanin + pheo_amount * pheomelanin;
 }
 
 fn hair_gaussian(width: f32, angle: f32) -> f32 {
