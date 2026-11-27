@@ -706,7 +706,7 @@ impl Mesh {
         };
         // its colliders (ADR-839): whole spheres of 12 floats, at most MAX_PUSH_COLLIDERS, each radius
         // above 0 and its weights summing to about 1
-        if parts.push_colliders.len() % 48 != 0 {
+        if !parts.push_colliders.len().is_multiple_of(48) {
             return Err(format!(
                 ":push-colliders is 12 f32 a sphere [cx cy cz radius j0 j1 j2 j3 w0 w1 w2 w3], not {} bytes",
                 parts.push_colliders.len()
@@ -732,7 +732,9 @@ impl Mesh {
             ));
         }
         if let Some(index) = push_colliders.iter().position(|sphere| {
-            !(sphere[3] > 0.0)
+            // (a radius not above 0, a NaN included)
+            sphere[3].is_nan()
+                || sphere[3] <= 0.0
                 || (sphere[8] + sphere[9] + sphere[10] + sphere[11] - 1.0).abs() > 0.01
         }) {
             return Err(format!(
