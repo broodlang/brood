@@ -88,7 +88,9 @@ impl GpuWindow {
         let ground_luminance = luminance(bg.unwrap_or(renderer.bg()));
         let lift = luminance(fg) > ground_luminance;
         let known = &self.px_glyphs;
-        let run = renderer.px_run(s, face.family, face.bold, face.italic, px, &|key| known.contains_key(key));
+        let run = renderer.px_run(s, face.family, face.bold, face.italic, px, &|key| {
+            known.contains_key(key)
+        });
         let left = match align {
             1 => x - run.width / 2.0,
             2 => x - run.width,

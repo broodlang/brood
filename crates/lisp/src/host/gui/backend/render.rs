@@ -579,7 +579,9 @@ impl Renderer {
             run.width = run.width.max(line_w);
             for gl in &glyphs {
                 let phys = gl.physical((0.0, line_y), 1.0);
-                let hinted = shared.hinted.mask(&mut shared.fs, phys.cache_key, hint, 1.0);
+                let hinted = shared
+                    .hinted
+                    .mask(&mut shared.fs, phys.cache_key, hint, 1.0);
                 let img = match &hinted {
                     Some(img) => img.clone(),
                     None => match shared.swash.get_image(&mut shared.fs, phys.cache_key) {
@@ -596,7 +598,9 @@ impl Renderer {
                     Vec::new()
                 } else {
                     match img.content {
-                        SwashContent::Mask => img.data.iter().flat_map(|a| [255, 255, 255, *a]).collect(),
+                        SwashContent::Mask => {
+                            img.data.iter().flat_map(|a| [255, 255, 255, *a]).collect()
+                        }
                         SwashContent::Color => img.data.clone(),
                         SwashContent::SubpixelMask => continue,
                     }
@@ -2677,7 +2681,12 @@ mod px_run_tests {
         assert!((ratio - 2.0).abs() < 0.08, "width ratio {ratio}");
         // nine glyphs with ink (the space has none), each with its pixels
         assert_eq!(small.glyphs.len(), 9);
-        assert!(small.glyphs.iter().all(|g| g.rgba.len() == (g.w * g.h * 4) as usize));
+        assert!(
+            small
+                .glyphs
+                .iter()
+                .all(|g| g.rgba.len() == (g.w * g.h * 4) as usize)
+        );
         // the capital W about 0.7 of the size tall at 28 px, and inside the run's line
         let w = &large.glyphs[0];
         assert!((15..=24).contains(&w.h), "W is {} px tall", w.h);
