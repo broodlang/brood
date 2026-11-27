@@ -2653,8 +2653,13 @@ pub(super) fn draw_uniform(
         material.detail_cavity,
     ]));
     bytes.extend(floats_bytes(&eye_floats(material)));
-    // `DrawU::sheen`: a hair surface's second highlight's colour, the fourth float 1 when given
-    let sheen = material.sheen.map_or([0.0; 4], |[r, g, b]| [r, g, b, 1.0]);
+    // `DrawU::sheen`: a hair surface's second highlight's colour; any other surface's
+    // `:surroundings` (ADR-831: no surface reads both); the fourth float 1 when given
+    let sheen = match material.surface {
+        Surface::Hair | Surface::Strands => material.sheen,
+        _ => material.surroundings,
+    }
+    .map_or([0.0; 4], |[r, g, b]| [r, g, b, 1.0]);
     bytes.extend(floats_bytes(&sheen));
     // `DrawU::deform`: pressed by the scene's contacts, its first posed vertex, whether it has a
     // softness, its vertex count (ADR-805)

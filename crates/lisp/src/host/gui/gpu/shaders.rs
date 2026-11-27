@@ -702,7 +702,7 @@ struct DrawU {
     eye_shape: vec4<f32>,       // the eyeball's radius, the iris's, the cornea's, the iris's depth under the cornea's top
     eye_uv: vec4<f32>,          // the middle of the first eye's iris in the texture, then the second's
     eye_iris: vec4<f32>,        // the iris's radius in the texture, the pupil's share of the iris, the slope of the bowl the iris is lit as
-    sheen: vec4<f32>,           // a hair surface's second highlight's colour (`:sheen`), w 1 when given (ADR-799)
+    sheen: vec4<f32>,           // a hair surface's second highlight's colour (`:sheen`, ADR-799); any other surface's `:surroundings` (ADR-831); w 1 when given
     deform: vec4<u32>,          // pressed by the scene's contacts (ADR-805), its first posed vertex, whether it has a softness, its vertex count
     loose: vec4<f32>,           // its flesh lagging its bones (ADR-812): the amount (0 none), its lagging palette's offset, its joint count
     clamp_info: vec4<f32>,      // x: how many `:clamp-planes` its strands keep to (ADR-813); y: the UV set its `:wrinkles` read by (ADR-817); z: the strands a `:fibres` shadow stands for (ADR-813)
@@ -2476,10 +2476,26 @@ fn karis_hair(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: ve
     let shine = vec3<f32>(reflected * draw.material.y * 2.0) + transmitted + second;
     return 3.14159265 * (shine + sqrt(colour) * scatter * tint);
 }
+// ADR-831: an ambient `visibility` (its occlusion) with the light bounced back off surroundings
+// of `albedo`, per channel: GTAO's multi-bounce fit to path-traced references (Jimenez, Wu,
+// Pesce, Jarabo, "Practical Real-Time Strategies for Accurate Indirect Occlusion", SIGGRAPH
+// 2016): never darker than the occlusion alone, a red surround giving back mostly red
+fn bounced_occlusion(visibility: f32, albedo: vec3<f32>) -> vec3<f32> {
+    let a = 2.0404 * albedo - vec3<f32>(0.3324);
+    let b = -4.7951 * albedo + vec3<f32>(0.6417);
+    let c = 2.7552 * albedo + vec3<f32>(0.6903);
+    let v = vec3<f32>(visibility);
+    return max(v, ((a * v + b) * v + c) * v);
+}
 // (`diffuse_normal` is what the light falls on and `mirror_surface` the surface a reflection must
 // not go under: `normal` and `surface_normal` but for an `:eye` under its cornea, ADR-796)
 fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>, curvature: f32, specular_kept: f32, diffuse_normal: vec3<f32>, mirror_surface: vec3<f32>, under_cornea: vec4<f32>) -> vec3<f32> {
     var out = base * ambient(diffuse_normal) * occlusion;
+    // what the occlusion took away given back in part by the surroundings' colour (ADR-831):
+    // inside her mouth the gums' red, so a shadowed tooth goes dim and warm, not grey
+    if (draw.flags.x != 4u && draw.flags.x != 5u && draw.sheen.w > 0.5) {
+        out = base * ambient(diffuse_normal) * bounced_occlusion(occlusion, draw.sheen.rgb);
+    }
     // a `:fibres` strand's ambient through the hair round it, as a light's comes (ADR-828): the
     // bake's mean crossings over every direction (its constant term), each fibre passing its own
     // colour's share and scattering a little away. A grey exp(-0.05 crossings) let inner strands

@@ -800,3 +800,69 @@ fn a_quad_op_takes_its_edge_from_its_radius_and_outline() {
     );
     assert_eq!(&fb.solids[9..11], &[10.0, 3.5]);
 }
+
+// --- the surroundings' bounce in the occluded ambient (ADR-831) ------------------------------
+
+#[test]
+fn surroundings_ride_in_the_sheen_slot_of_a_surface_that_is_not_hair() {
+    use crate::host::gui::mesh::{Draw, Material, Surface};
+    let floats = |material: Material| -> Vec<f32> {
+        let draw = Draw {
+            loose: None,
+            mesh: 1,
+            model: [0.0; 16],
+            palette: None,
+            morphs: Vec::new(),
+            material,
+        };
+        scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4], [0.0; 4])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| f32::from_le_bytes(*word))
+            .collect()
+    };
+    let slot = |all: Vec<f32>| -> Vec<f32> { all[all.len() - 48..all.len() - 44].to_vec() };
+    // teeth: their surroundings, given
+    let teeth = floats(Material {
+        surroundings: Some([0.39, 0.14, 0.12]),
+        sheen: Some([1.0, 1.0, 1.0]),
+        ..Material::default()
+    });
+    assert_eq!(slot(teeth), [0.39, 0.14, 0.12, 1.0]);
+    // hair: its sheen, whatever surroundings say
+    let hair = floats(Material {
+        surface: Surface::Strands,
+        surroundings: Some([0.39, 0.14, 0.12]),
+        sheen: Some([0.5, 0.25, 0.125]),
+        ..Material::default()
+    });
+    assert_eq!(slot(hair), [0.5, 0.25, 0.125, 1.0]);
+    // neither: nothing, and the shader leaves the occlusion as it was
+    assert_eq!(slot(floats(Material::default())), [0.0; 4]);
+    assert!(MESH_SRC.contains("fn bounced_occlusion(visibility: f32, albedo: vec3<f32>) -> vec3<f32> {"));
+    assert!(MESH_SRC.contains("if (draw.flags.x != 4u && draw.flags.x != 5u && draw.sheen.w > 0.5) {"));
+}
+
+#[test]
+fn the_bounce_is_never_darker_than_the_occlusion_and_tinted_by_the_surroundings() {
+    // the shader's fit (GTAO), here as the shader has it
+    let bounced = |visibility: f32, albedo: f32| -> f32 {
+        let a = 2.0404 * albedo - 0.3324;
+        let b = -4.7951 * albedo + 0.6417;
+        let c = 2.7552 * albedo + 0.6903;
+        visibility.max(((a * visibility + b) * visibility + c) * visibility)
+    };
+    assert!(MESH_SRC.contains("let a = 2.0404 * albedo - vec3<f32>(0.3324);"));
+    for visibility in [0.0, 0.1, 0.3, 0.6, 1.0] {
+        let [red, green, blue] = [0.39, 0.14, 0.12].map(|albedo| bounced(visibility, albedo));
+        assert!(red >= visibility && green >= visibility && blue >= visibility);
+        assert!(red >= green && green >= blue, "the gums' red given back most: {visibility}");
+        assert!(red <= 1.0 + 1e-5);
+    }
+    // nothing occluded: nothing to give back
+    assert!((bounced(1.0, 0.39) - 1.0).abs() < 1e-4);
+    // a dark corner of the mouth (visibility 0.2): warm, red over green by more than 1.15
+    let (red, green) = (bounced(0.2, 0.39), bounced(0.2, 0.14));
+    assert!(red / green > 1.15, "{red} / {green}");
+}

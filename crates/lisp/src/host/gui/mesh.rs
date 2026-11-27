@@ -1110,6 +1110,10 @@ pub struct Material {
     pub hair_shift: [f32; 2],
     /// The second highlight's colour, linear RGB (`:sheen`); nil: the hair's own base colour.
     pub sheen: Option<[f32; 3]>,
+    /// The albedo of what surrounds the surface, linear RGB (`:surroundings`, ADR-831): the share
+    /// of its ambient that occlusion takes away comes back in part as light bounced off that
+    /// colour (the GPU painter only; nil: occluded ambient is simply lost, as before).
+    pub surroundings: Option<[f32; 3]>,
     /// Its skin pressed by the scene's contacts (`:deform`, ADR-805).
     pub deform: bool,
     /// A `:fibres` surface (ADR-813): a `:strands` mesh at its real width, its coverage of a
@@ -1168,6 +1172,7 @@ impl Default for Material {
             strand_width: DEFAULT_STRAND_WIDTH,
             hair_shift: [HAIR_SHIFT_PRIMARY, HAIR_SHIFT_SECONDARY],
             sheen: None,
+            surroundings: None,
             deform: false,
             fibres: false,
             clamp_planes: Vec::new(),

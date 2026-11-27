@@ -1820,6 +1820,16 @@ fn scene_spec(
         if let Some(sheen) = numbers(get(material_map, "sheen"), 3) {
             material.sheen = Some([sheen[0].max(0.0), sheen[1].max(0.0), sheen[2].max(0.0)]);
         }
+        // the albedo of what surrounds the surface, linear [r g b] (ADR-831): the ambient its
+        // occlusion takes away comes back in part, bounced off that colour (GTAO's multi-bounce);
+        // as before when not given
+        if let Some(surroundings) = numbers(get(material_map, "surroundings"), 3) {
+            material.surroundings = Some([
+                surroundings[0].clamp(0.0, 1.0),
+                surroundings[1].clamp(0.0, 1.0),
+                surroundings[2].clamp(0.0, 1.0),
+            ]);
+        }
         material.lobes = match get(material_map, "lobes") {
             None | Some(Value::Nil) => None,
             Some(given) => match numbers(Some(given), 3) {
@@ -4485,6 +4495,15 @@ mod gui_scene_light_tests {
         let error = scene_with("[]", "{:surface :fibres :clamp-planes [[0 0 0 0 0 0]]}")
             .expect_err("no normal");
         assert!(error.contains(":clamp-planes are each"), "{error}");
+    }
+
+    #[test]
+    fn surroundings_read_clamped_and_absent_by_default() {
+        // ADR-831: the surroundings' albedo, each channel kept to 0 … 1; nil when not given
+        let given = scene_with("[]", "{:surroundings [0.39 0.14 1.5]}").expect("a scene");
+        assert_eq!(given.draws[0].material.surroundings, Some([0.39, 0.14, 1.0]));
+        let plain = scene_with("[]", "{}").expect("a scene");
+        assert_eq!(plain.draws[0].material.surroundings, None);
     }
 
     #[test]
