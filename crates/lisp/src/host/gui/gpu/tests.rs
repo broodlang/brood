@@ -927,3 +927,76 @@ fn a_light_without_a_shadow_map_still_has_its_contact_shadow() {
     );
     assert!(MESH_SRC.contains("            contact = contact_shadow(world, arrival.to_light, surface_normal, view);\n            seen = contact;"));
 }
+
+// --- a cloth's sheen (ADR-836) ---------------------------------------------------------------
+
+#[test]
+fn a_cloths_sheen_rides_in_the_strand_slot_of_a_surface_that_is_not_hair() {
+    use crate::host::gui::mesh::{Draw, Material, Surface};
+    let strand = |material: Material| -> Vec<f32> {
+        let draw = Draw {
+            loose: None,
+            mesh: 1,
+            model: [0.0; 16],
+            palette: None,
+            morphs: Vec::new(),
+            material,
+        };
+        let floats: Vec<f32> = scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4], [0.0; 4])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| f32::from_le_bytes(*word))
+            .collect();
+        floats[40..44].to_vec()
+    };
+    // a knit: its sheen's colour and roughness where a strand's widths would be
+    assert_eq!(
+        strand(Material {
+            sheen_cloth: Some([0.8, 0.8, 0.78, 0.6]),
+            ..Material::default()
+        }),
+        [0.8, 0.8, 0.78, 0.6]
+    );
+    // plain standard: zeros, no sheen
+    assert_eq!(strand(Material::default()), [0.0; 4]);
+    // strands keep their widths and shifts, whatever a sheen says
+    let ribbons = strand(Material {
+        surface: Surface::Strands,
+        hair_shift: [-0.1, 0.2],
+        sheen_cloth: Some([1.0, 1.0, 1.0, 0.5]),
+        ..Material::default()
+    });
+    assert_eq!(ribbons[2..4], [-0.1, 0.2]);
+    assert!(
+        MESH_SRC
+            .contains("return draw.flags.x >= 1u && draw.flags.x <= 3u && draw.strand.w > 0.0;")
+    );
+}
+
+#[test]
+fn the_sheens_albedo_fit_stays_within_the_integral() {
+    // the shader's fit (ADR-836), as it has it, against the integral at a few points
+    // (Charlie's distribution, Neubelt's visibility; womanblend-f9's fit script)
+    let fit = |r: f32, cosine: f32| -> f32 {
+        let inverse = 1.0 / (cosine + 0.15);
+        (-0.30065 + 1.4614 * r - 0.60645 * r * r - 0.44483 * cosine - 0.19257 * r * cosine
+            + (0.34488 - 0.61552 * r + 0.27141 * r * r) * inverse
+            + 0.21332 * cosine * cosine)
+            .clamp(0.0, 1.0)
+    };
+    // (r, n·v, the integral)
+    for (r, cosine, integral) in [
+        (0.4_f32, 1.0_f32, 0.011_f32),
+        (0.7, 1.0, 0.082),
+        (1.0, 1.0, 0.141),
+        (1.0, 0.1833, 0.432),
+    ] {
+        assert!(
+            (fit(r, cosine) - integral).abs() < 0.06,
+            "r {r} n·v {cosine}: {} against {integral}",
+            fit(r, cosine)
+        );
+    }
+    assert!(MESH_SRC.contains("return clamp(-0.30065 + 1.4614 * rough"));
+}

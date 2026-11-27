@@ -1145,6 +1145,10 @@ pub struct Material {
     /// of its ambient that occlusion takes away comes back in part as light bounced off that
     /// colour (the GPU painter only; nil: occluded ambient is simply lost, as before).
     pub surroundings: Option<[f32; 3]>,
+    /// A cloth's sheen (`:sheen-cloth [r g b roughness]`, ADR-836): the colour of the soft light
+    /// its fibres throw back at grazing angles, linear RGB, and the sheen's roughness (0.07 … 1);
+    /// a standard, cutout or blended surface only, the GPU painter only. Nil: none.
+    pub sheen_cloth: Option<[f32; 4]>,
     /// Its skin pressed by the scene's contacts (`:deform`, ADR-805).
     pub deform: bool,
     /// A `:fibres` surface (ADR-813): a `:strands` mesh at its real width, its coverage of a
@@ -1204,6 +1208,7 @@ impl Default for Material {
             hair_shift: [HAIR_SHIFT_PRIMARY, HAIR_SHIFT_SECONDARY],
             sheen: None,
             surroundings: None,
+            sheen_cloth: None,
             deform: false,
             fibres: false,
             clamp_planes: Vec::new(),
