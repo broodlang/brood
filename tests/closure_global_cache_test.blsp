@@ -45,5 +45,6 @@
   (test "two instances of one closure answer each for itself"
     (let (one (cgc-maker 1)
           two (cgc-maker 2))
-      (assert= (seq/mapv (range 4) (fn (index) (if (= 0 (math/mod index 2)) (one index) (two index))))
+      (assert= (seq/mapv (range 4)
+                 (fn (index) (if (= 0 (math/mod index 2)) (one index) (two index))))
         [20 40 40 60]))))
