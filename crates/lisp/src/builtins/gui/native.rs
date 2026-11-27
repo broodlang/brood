@@ -1868,6 +1868,18 @@ fn scene_spec(
         material.garment = matches!(get(material_map, "garment"), Some(Value::Bool(true)));
         // and the mesh's garment cover in force over her skin (ADR-839)
         material.covered = matches!(get(material_map, "covered"), Some(Value::Bool(true)));
+        // and a garment's stretch read from its second UV set (ADR-840)
+        material.stretch_from_uv2 = matches!(
+            get(material_map, "stretch-from-uv2"),
+            Some(Value::Bool(true))
+        );
+        // and its knit's cover and layers (ADR-840)
+        if let Some(cover) = number("knit-cover") {
+            material.knit_cover = cover.clamp(0.0, 1.0);
+        }
+        if let Some(layers) = number("knit-layers") {
+            material.knit_layers = layers.clamp(1.0, 8.0);
+        }
         // a `:fibres` surface's `:density`: how much of its baked hair count dims its light (a
         // number from 0; 0.4 without it); refused when not, as a wrong one would light hair
         // wrongly without a word
@@ -4639,6 +4651,26 @@ mod gui_scene_light_tests {
         let plain = scene_keyed("[]", "{}", ":contacts [{:sphere [0 1 0 0.1]}]").expect("a scene");
         assert_eq!(plain.contact_garments, vec![false]);
         assert!(!plain.draws[0].material.garment);
+    }
+
+    #[test]
+    fn a_stretched_knits_keys_are_read_clamped() {
+        // ADR-840: the stretch from uv2, the knit's cover at rest (0 … 1) and its layers (1 … 8)
+        let scene = scene_with(
+            "[]",
+            "{:surface :blend :stretch-from-uv2 true :knit-cover 0.96 :knit-layers 2}",
+        )
+        .expect("a scene");
+        let material = &scene.draws[0].material;
+        assert!(material.stretch_from_uv2);
+        assert_eq!((material.knit_cover, material.knit_layers), (0.96, 2.0));
+        let clamped = scene_with("[]", "{:knit-cover 1.4 :knit-layers 0}").expect("a scene");
+        let material = &clamped.draws[0].material;
+        assert_eq!((material.knit_cover, material.knit_layers), (1.0, 1.0));
+        let plain = scene_with("[]", "{}").expect("a scene");
+        let material = &plain.draws[0].material;
+        assert!(!material.stretch_from_uv2);
+        assert_eq!((material.knit_cover, material.knit_layers), (0.0, 1.0));
     }
 
     #[test]

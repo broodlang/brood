@@ -1102,3 +1102,34 @@ fn a_lights_size_softens_its_contact_shadow() {
     assert!((covered(0.002, 0.01) - 0.615).abs() < 0.01);
     assert_eq!(covered(0.005, 0.01), 1.0);
 }
+
+#[test]
+fn a_stretched_knits_cover_rides_in_the_clamp_slots() {
+    // ADR-840: on a draw with the stretch and a knit cover, DrawU::clamps[0] holds the cover and
+    // the layers (its clamp planes set aside, as an eye's are); the shader reads them as so
+    use crate::host::gui::mesh::{Draw, Material, Surface};
+    let draw = Draw {
+        loose: None,
+        mesh: 1,
+        model: [0.0; 16],
+        palette: None,
+        morphs: Vec::new(),
+        material: Material {
+            surface: Surface::Blend,
+            stretch_from_uv2: true,
+            knit_cover: 0.96,
+            knit_layers: 2.0,
+            clamp_planes: vec![[0.0, 1.0, 0.0, 0.5]],
+            ..Material::default()
+        },
+    };
+    let packed = scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4], [0.0; 4]);
+    let read = |at: usize| f32::from_le_bytes(packed[at..at + 4].try_into().expect("a float"));
+    assert_eq!((read(384), read(388)), (0.96, 2.0));
+    assert_eq!(read(368), 0.0, "a knit keeps to no clamp planes");
+    assert!(MESH_SRC.contains("alpha = alpha * knit_alpha(fragment);"));
+    assert!(MESH_SRC.contains("return 1.0 - pow(1.0 - cover, max(knit.y, 1.0));"));
+    assert!(
+        MESH_SRC.contains("textureSample(detail_texture, texture_sampler, detail_uv(fragment))")
+    );
+}

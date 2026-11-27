@@ -1366,6 +1366,36 @@ struct VertexOut {
     @location(10) uv2: vec2<f32>,
 };
 
+// the garment's stretch at this fragment (ADR-840, `:stretch-from-uv2`: its second UV set holds
+// the cloth's stretch against its cut, weft and warp, 1 at rest); (1, 1) for any other draw
+fn fabric_stretch(fragment: VertexOut) -> vec2<f32> {
+    if ((draw.flags.y & 16384u) == 0u) {
+        return vec2<f32>(1.0);
+    }
+    return clamp(fragment.uv2, vec2<f32>(0.25), vec2<f32>(4.0));
+}
+
+// how much of the light a stretched knit stops here (ADR-840): its yarn keeps its area while the
+// cloth's grows by weft × warp, so its cover is `:knit-cover` (at rest) over that, and through
+// `:knit-layers` of it, 1 − (1 − cover)^layers. A blended garment's alpha, its lit skin drawn first
+// showing where the loops open; 1 for any draw without the stretch or a knit cover
+// (`DrawU::clamps[0]`: the cover, the layers)
+fn knit_alpha(fragment: VertexOut) -> f32 {
+    let knit = draw.clamps[0];
+    if ((draw.flags.y & 16384u) == 0u || knit.x <= 0.0) {
+        return 1.0;
+    }
+    let stretch = fabric_stretch(fragment);
+    let cover = clamp(knit.x / (stretch.x * stretch.y), 0.0, 1.0);
+    return 1.0 - pow(1.0 - cover, max(knit.y, 1.0));
+}
+
+// where the detail tile is read: its repeats over the UVs, and on a stretched garment opened
+// along each axis by the stretch, so the knit's loops grow as the cloth is pulled (ADR-840)
+fn detail_uv(fragment: VertexOut) -> vec2<f32> {
+    return fragment.uv * draw.detail.xy / fabric_stretch(fragment);
+}
+
 // a vertex morphed, and the matrix that skins and places it
 struct Posed {
     matrix: mat4x4<f32>,
@@ -3094,7 +3124,7 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     let normal_texel = straight(textureSample(normal_texture, texture_sampler, fragment.uv), (draw.flags.y & 8u) != 0u);
     let occlusion_texel = straight(textureSample(occlusion_texture, texture_sampler, fragment.uv), (draw.flags.y & 32u) != 0u);
     // the detail tile at its own repeats, so its mip level follows them (the CPU's `detail_lod`)
-    let detail_texel = straight(textureSample(detail_texture, texture_sampler, fragment.uv * draw.detail.xy), (draw.flags.y & 128u) != 0u);
+    let detail_texel = straight(textureSample(detail_texture, texture_sampler, detail_uv(fragment)), (draw.flags.y & 128u) != 0u);
     let texel = select(vec4<f32>(1.0), base_texel, (draw.flags.y & 1u) != 0u);
     // a skin's regions (ADR-826, texture bit 2048): its roughness; its thickness, which scales the
     // scatter (thin skin, ears and nostrils, glows; the body's 0.7 is the material's own); the detail
@@ -3115,6 +3145,8 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
         }
         alpha = 1.0;
     } else if (draw.flags.x == 3u) {
+        // a stretched knit lets her skin show between its opened loops (ADR-840)
+        alpha = alpha * knit_alpha(fragment);
         if (alpha <= 0.002) {
             discard;
         }
@@ -3283,7 +3315,7 @@ fn fs_hair_front(fragment: VertexOut, @builtin(front_facing) front: bool) -> @lo
     let base_texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
     let normal_texel = straight(textureSample(normal_texture, texture_sampler, fragment.uv), (draw.flags.y & 8u) != 0u);
     let occlusion_texel = straight(textureSample(occlusion_texture, texture_sampler, fragment.uv), (draw.flags.y & 32u) != 0u);
-    let detail_texel = straight(textureSample(detail_texture, texture_sampler, fragment.uv * draw.detail.xy), (draw.flags.y & 128u) != 0u);
+    let detail_texel = straight(textureSample(detail_texture, texture_sampler, detail_uv(fragment)), (draw.flags.y & 128u) != 0u);
     let texel = select(vec4<f32>(1.0), base_texel, (draw.flags.y & 1u) != 0u);
     let uv_dx = dpdx(fragment.uv);
     let uv_dy = dpdy(fragment.uv);
@@ -3337,7 +3369,7 @@ fn fs_fibre_front(fragment: VertexOut, @builtin(front_facing) front: bool) -> @l
     let base_texel = straight(textureSample(base_texture, texture_sampler, fragment.uv), (draw.flags.y & 2u) != 0u);
     let normal_texel = straight(textureSample(normal_texture, texture_sampler, fragment.uv), (draw.flags.y & 8u) != 0u);
     let occlusion_texel = straight(textureSample(occlusion_texture, texture_sampler, fragment.uv), (draw.flags.y & 32u) != 0u);
-    let detail_texel = straight(textureSample(detail_texture, texture_sampler, fragment.uv * draw.detail.xy), (draw.flags.y & 128u) != 0u);
+    let detail_texel = straight(textureSample(detail_texture, texture_sampler, detail_uv(fragment)), (draw.flags.y & 128u) != 0u);
     let texel = select(vec4<f32>(1.0), base_texel, (draw.flags.y & 1u) != 0u);
     let uv_dx = dpdx(fragment.uv);
     let uv_dy = dpdy(fragment.uv);

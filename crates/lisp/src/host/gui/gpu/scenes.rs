@@ -1863,7 +1863,9 @@ impl MeshGpu {
                         0
                     }
                     // (and 8192 for a garment, its vertices pushed out of her skin, ADR-839)
-                    | if material.garment { 8192 } else { 0 };
+                    | if material.garment { 8192 } else { 0 }
+                    // (and 16384 for a garment's stretch read from its second UV set, ADR-840)
+                    | if material.stretch_from_uv2 { 16384 } else { 0 };
                 // its morphs blended here, sparse, into one offset a vertex (none when no target
                 // it names moves anything, or the frame's offsets would pass the binding limit)
                 let vertex_count = mesh.vertex_count as usize;
@@ -2978,7 +2980,9 @@ pub(super) fn draw_uniform(
     bytes.extend(floats_bytes(&loose));
     // `DrawU::clamp_info` and `clamps`: the planes its strands keep to (ADR-813)
     // (none on an `:eye`: its pupils ride in the planes' place, ADR-835)
-    let planes = if material.eye_optics().is_some() {
+    // (none on a stretched knit either: its cover and layers ride there, ADR-840)
+    let knit = material.stretch_from_uv2 && material.knit_cover > 0.0;
+    let planes = if material.eye_optics().is_some() || knit {
         &[]
     } else {
         &material.clamp_planes[..material
@@ -3014,6 +3018,9 @@ pub(super) fn draw_uniform(
     let mut clamps = [0.0f32; crate::host::gui::mesh::MAX_CLAMP_PLANES * 4];
     if material.eye_optics().is_some() {
         clamps = pupil_floats(material);
+    } else if knit {
+        clamps[0] = material.knit_cover;
+        clamps[1] = material.knit_layers;
     }
     for (slot, plane) in planes.iter().enumerate() {
         clamps[slot * 4..slot * 4 + 4].copy_from_slice(plane);

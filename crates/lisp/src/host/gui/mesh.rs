@@ -1220,6 +1220,14 @@ pub struct Material {
     /// Its mesh's `:cover` in force (`:covered`, ADR-839): pressed, each vertex stops the larger of its
     /// standoff and its cover short of the contact (her skin under the garment she wears now).
     pub covered: bool,
+    /// Its second UV set read as the cloth's stretch, weft and warp, 1 at rest (`:stretch-from-uv2`,
+    /// ADR-840): the detail tile opened by it.
+    pub stretch_from_uv2: bool,
+    /// A knit's cover at rest, 0 … 1 (`:knit-cover`, ADR-840; 0: none, opaque as drawn), and how many
+    /// layers of it (`:knit-layers`, 1 or more: a lined cup 2); with the stretch, a blended garment's
+    /// alpha.
+    pub knit_cover: f32,
+    pub knit_layers: f32,
     /// A `:fibres` surface (ADR-813): a `:strands` mesh at its real width, its coverage of a
     /// pixel worked out exactly and blended, the three nearest layers a pixel lit (TressFX
     /// ShortCut). The GPU painter alone draws it so; the CPU painter draws it as `:strands`.
@@ -1282,6 +1290,9 @@ impl Default for Material {
             deform: false,
             garment: false,
             covered: false,
+            stretch_from_uv2: false,
+            knit_cover: 0.0,
+            knit_layers: 1.0,
             fibres: false,
             clamp_planes: Vec::new(),
             fibre_density: 0.4,
