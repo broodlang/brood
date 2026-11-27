@@ -1263,6 +1263,11 @@ copy in `handoff.md` points here.
 
 ### 7.1 The `call-mediated-boxed` bail class — CLOSED 2026-08-31: correctly rejected, three ways
 
+> **Amended 2026-11-27:** an arm that holds a primitive of its own (arithmetic, a comparison, a
+> map or vector read) is admitted with its calls; an arm that only forwards calls is still
+> refused. The eleven default rows did not move in CI's `ab` and a 3D game's tick is 5%
+> lighter. See the devlog of that day for what had made the earlier trials read as losses.
+
 > **Verdict: the gate's cost model is right, and this section is no longer a lead.** Three
 > independent experiments admitted these arms to native and every one lost: (1) step 2's
 > full-blob admission (below — every row regressed); (2) hot ADMISSION (`BROOD_XADMIT=1`):

@@ -3360,3 +3360,20 @@ noise in CI's `ab`), where `tests/rethrow_position_test.blsp` and the crash repo
 failed once `error`'s callers were native: the gate had been hiding it for named functions,
 and closures and loops had it already. Guard: `tests/jit_error_position_test.blsp` (fails on
 0d3f559c6).
+
+2026-11-27. **The JIT's cost gate admits a named function that does work of its own.**
+`call-mediated-boxed` refused a first lowering to every named function holding a call and
+no vector op or self loop (compute-frontier §7.1: "every row regressed" when it was lifted,
+2026-08). It now admits such an arm when it holds a primitive of its own — arithmetic, a
+comparison, a map or vector read, a map literal — and still refuses one that only forwards
+calls. Why now: lifted outright, a 3D game's tick was 5% lighter and the eleven default rows
+did not move (CI's Diagnose `ab`, twice); what had made every earlier trial on that game a
+wash was the game's own model reader deopting 90,000 times at a big integer, not the gate
+(b3d 68db8bb). Why not outright: with the forwarders native too, a parked process read 176 B
+more in `process_floor` (more tables a process) and more native frames sat under `receive`s;
+with the rule as it is the full suite is green and the game keeps the whole gain (her tick
+94.9 million instructions against 95.1 lifted outright, 99.5 with the gate). What the lift
+found on the way is fixed: an error raised under native code keeps its position (c18ce2dd5,
+7cdd9009e). Left open: the fuller lift wants the receive-host check to see callees not yet
+compiled (`arm_hosts_receive`; a version that reads the shared cache is on branch
+`perf/lift-call-gate`'s history), and the spawn rows are not in `ab`'s default set.

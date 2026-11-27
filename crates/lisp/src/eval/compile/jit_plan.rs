@@ -1161,10 +1161,32 @@ pub(super) mod codegen {
         // The unboxing signals that earn the general lowering:
         //   * a `VectorRef`/`MakeVector` (rules bintree/matmul back in — they lower and win), or
         //   * a self-tail loop (`fold--loop`, hence `reduce`/`pipeline`; `row-sum`).
+        // …or data work of its own: an arithmetic, comparison, map or vector primitive, or a
+        // map literal. Such an arm is admitted WITH its calls (2026-11-27). What stays refused
+        // is an arm that only forwards calls — the prelude's control and loading helpers, the
+        // shape the notes above are about: admitted too, they cost every parked process more
+        // tables (`tests/process_floor.rs` read 176 B) and put native frames under more
+        // `receive`s. The arms with work are where an interpreted body costs: a 3D game's
+        // frame is 5% lighter with them native (womanblend), and the eleven default rows do
+        // not move (CI's `ab`). Lifted before that, they deopted without end in one program,
+        // which read as the gate being right: it was the program's own code (a big integer
+        // made for every negative float it read).
+        let has_work = code.iter().any(|i| {
+            matches!(
+                i,
+                Inst::Prim1 { .. }
+                    | Inst::Prim2 { .. }
+                    | Inst::Prim3 { .. }
+                    | Inst::Prim2SlotSlot { .. }
+                    | Inst::Prim2SlotInt { .. }
+                    | Inst::MakeMap(_)
+            )
+        });
         if arm.dbg_name.is_some()
             && non_tail_call_count(code) >= 1
             && !has_inline_vec
             && !has_self_loop
+            && !has_work
         {
             // An arm whose calls the leaf inliner takes ALL of is not call-mediated once it
             // is upgraded: its spliced body (`LeafInline::resume`) holds no call at all. The
