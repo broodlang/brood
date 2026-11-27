@@ -814,6 +814,8 @@ pub(super) fn render_ops<P: Painter>(
             // frame and filled or sampled if it lands inside. Slow next to the GPU, but
             // a game on a build without one (or under `BROOD_GUI_GPU=0`) draws instead of
             // showing its text alone.
+            // (a quad's radius and outline are the GPU painter's alone, ADR-832: frozen, this one
+            // draws the plain quad, ADR-818)
             Op::Quad {
                 x,
                 y,
@@ -821,6 +823,7 @@ pub(super) fn render_ops<P: Painter>(
                 h,
                 color,
                 rot,
+                ..
             } => paint_quad(canvas, *x, *y, *w, *h, *color, *rot),
             Op::Sprite {
                 tex,
@@ -2526,6 +2529,8 @@ mod cell_region_tests {
                 h: 6.0,
                 color: [10, 200, 30, 255],
                 rot: 0.0,
+                radius: -1.0,
+                outline: 0.0,
             },
             // a half-transparent white one over black at (30, 4): mid grey
             Op::Quad {
@@ -2535,6 +2540,8 @@ mod cell_region_tests {
                 h: 4.0,
                 color: [255, 255, 255, 128],
                 rot: 0.0,
+                radius: -1.0,
+                outline: 0.0,
             },
             // a 10×10 square turned 45°: its corners reach past the box, the box's own
             // corners are outside it
@@ -2545,6 +2552,8 @@ mod cell_region_tests {
                 h: 10.0,
                 color: [200, 200, 200, 255],
                 rot: std::f32::consts::FRAC_PI_4,
+                radius: -1.0,
+                outline: 0.0,
             },
             // the checker, 8×8 at (4, 20): top-left quadrant red, bottom-right blue,
             // the others untouched (alpha 0)
@@ -2577,6 +2586,8 @@ mod cell_region_tests {
                 h: f32::INFINITY,
                 color: [255, 0, 0, 255],
                 rot: f32::NAN,
+                radius: -1.0,
+                outline: 0.0,
             },
             Op::Quad {
                 x: -1.0e30,
@@ -2585,6 +2596,8 @@ mod cell_region_tests {
                 h: 1.0e30,
                 color: [255, 0, 0, 255],
                 rot: 1.0e30,
+                radius: -1.0,
+                outline: 0.0,
             },
         ];
         render_ops(
@@ -2723,6 +2736,8 @@ mod cell_region_tests {
             h: 8.0,
             color: [255, 255, 255, 255],
             rot: 0.3,
+            radius: -1.0,
+            outline: 0.0,
         };
         raster_frame(&mut r, &[Op::Clear, quad(4.0)], fb_w, fb_h, false);
         assert_eq!(r.retained.canvas[8 * fb_w + 14], pack([255, 255, 255]));

@@ -87,6 +87,13 @@ fn solid_coverage(in: SolidOut) -> f32 {
     let r = min(in.radius, min(in.half.x, in.half.y));
     let q = abs(p) - (in.half - vec2<f32>(r, r));
     let d = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
+    // An outline (`aa` 1 + its width, ADR-832): only the band `width` wide inside the edge,
+    // its distance |d + width/2| − width/2, with the same 1 px ramp on both of its sides.
+    if (in.aa > 1.0) {
+        let width = in.aa - 1.0;
+        let band = abs(d + 0.5 * width) - 0.5 * width;
+        return clamp(0.5 - band, 0.0, 1.0);
+    }
     return clamp(0.5 - d, 0.0, 1.0);
 }
 

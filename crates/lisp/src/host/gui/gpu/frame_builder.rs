@@ -34,12 +34,14 @@ pub(super) enum Batch {
     Particles { id: u32 },
 }
 
-/// A solid quad's edge treatment: a plain fill, or the SDF ramp (with a corner radius in
-/// pixels) a rounded or sub-cell rect wants.
+/// A solid quad's edge treatment: a plain fill, the SDF ramp (with a corner radius in
+/// pixels) a rounded or sub-cell rect wants, or only a band that many pixels wide inside such
+/// an edge (`Outline(radius, width)`: a ring, a rim, ADR-832).
 #[derive(Clone, Copy)]
 pub(super) enum Edge {
     Plain,
     Rounded(f32),
+    Outline(f32, f32),
 }
 
 /// The frame under construction: both instance buffers' contents and the batch list, in
@@ -119,9 +121,13 @@ impl FrameBuilder {
         if !self.visible(x, y, w, h, rot) {
             return;
         }
+        // (`aa`: 0 a plain fill, 1 the SDF edge, 1 + width only a band `width` wide inside it:
+        // the shader's `solid_coverage` reads the outline from it, so the instance keeps its
+        // layout)
         let (radius, aa) = match edge {
             Edge::Plain => (0.0, 0.0),
             Edge::Rounded(r) => (r.max(0.0), 1.0),
+            Edge::Outline(r, width) => (r.max(0.0), 1.0 + width.max(0.0)),
         };
         let index = (self.solids.len() / SOLID_FLOATS) as u32;
         self.solids.extend_from_slice(&[

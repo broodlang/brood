@@ -1160,7 +1160,9 @@ fn parse_gui_ops(
                 });
             }
         } else if tag == tags.quad_t {
-            // `[:quad x y w h color]` / `[:quad x y w h color rot]` — pixel space.
+            // `[:quad x y w h color]` / `[:quad x y w h color rot]` /
+            // `[:quad x y w h color rot radius]` / `[… radius outline]` — pixel space; a
+            // radius (≥ 0) draws it rounded and anti-aliased, an outline as a band (ADR-832).
             let x = num(arg(&parts, 1));
             let y = num(arg(&parts, 2));
             let w = num(arg(&parts, 3));
@@ -1169,6 +1171,11 @@ fn parse_gui_ops(
                 continue;
             };
             let rot = num(parts.get(6).copied().unwrap_or(Value::nil()));
+            let radius = match parts.get(7).copied() {
+                Some(v) if !matches!(v, Value::Nil) => num(v),
+                _ => -1.0,
+            };
+            let outline = num(parts.get(8).copied().unwrap_or(Value::nil()));
             ops.push(crate::host::gui::Op::Quad {
                 x,
                 y,
@@ -1176,6 +1183,8 @@ fn parse_gui_ops(
                 h,
                 color,
                 rot,
+                radius,
+                outline,
             });
         } else if tag == tags.text_px_t {
             // `[:text-px x y s face]` — pixel space; the face may carry `:align`.

@@ -3284,6 +3284,8 @@ mod strip_diff_tests {
                     h: ch as f32 * 0.5,
                     color: [255, 255, 0, 200],
                     rot: if pick(6) { 0.7 } else { 0.3 },
+                    radius: -1.0,
+                    outline: 0.0,
                 },
                 Op::Cells {
                     row0: 4,
@@ -3383,6 +3385,8 @@ mod strip_diff_tests {
                 h: ch as f32,
                 color: [250, 200, 0, 180],
                 rot: 0.5,
+                radius: -1.0,
+                outline: 0.0,
             },
             Op::Cursor {
                 row: 4,

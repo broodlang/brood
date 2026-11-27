@@ -550,6 +550,8 @@ impl GpuWindow {
                         );
                     }
                 }
+                // (a radius draws it rounded and anti-aliased, an outline only a band inside its
+                // edge; neither, the plain fill it always was: ADR-832)
                 Op::Quad {
                     x,
                     y,
@@ -557,8 +559,17 @@ impl GpuWindow {
                     h,
                     color,
                     rot,
+                    radius,
+                    outline,
                 } => {
-                    fb.solid(*x, *y, *w, *h, *color, *rot, Edge::Plain);
+                    let edge = if *outline > 0.0 {
+                        Edge::Outline(radius.max(0.0), *outline)
+                    } else if *radius >= 0.0 {
+                        Edge::Rounded(*radius)
+                    } else {
+                        Edge::Plain
+                    };
+                    fb.solid(*x, *y, *w, *h, *color, *rot, edge);
                 }
                 // A 3D scene: rendered into its own target before the passes, its picture drawn
                 // here as a premultiplied sprite at its pixel size (ADR-786).

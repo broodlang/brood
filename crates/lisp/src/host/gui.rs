@@ -857,6 +857,13 @@ pub enum Op {
     /// radians about its centre. The pixel-space sibling of `Rect`, and the one solid
     /// primitive a game needs: a line is a thin quad at an angle (`gui/line`, Brood), a
     /// health bar two of them. Drawn by both window painters (the CPU one per pixel).
+    ///
+    /// `radius` (pixels, ADR-832) rounds its corners and draws its edge anti-aliased (a 1 px
+    /// coverage ramp, the GPU painter's signed-distance rounded box): half its height makes
+    /// a pill, half its side a disc, 0 a sharp-cornered quad with smooth edges (a crisp line
+    /// at an angle). Negative (the default, no radius given) is the plain fill it always was.
+    /// `outline` > 0 draws only a band that wide inside its edge (a ring, a rim). The GPU
+    /// painter only: the CPU painter, frozen (ADR-818), draws the plain quad.
     Quad {
         x: f32,
         y: f32,
@@ -864,6 +871,8 @@ pub enum Op {
         h: f32,
         color: [u8; 4],
         rot: f32,
+        radius: f32,
+        outline: f32,
     },
     /// Text in PIXEL space: the run `s` shaped in `face` (the same face a `Text` op
     /// takes — colours, bold, italic, underline, `:scale`) with its top at `y` and its

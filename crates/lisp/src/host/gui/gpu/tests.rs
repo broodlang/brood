@@ -726,3 +726,77 @@ fn the_default_is_mailbox_no_vsync_may_tear_and_vsync_is_fifo() {
     // `:vsync true` is fifo
     assert_eq!(pick_present_mode(&all, Some(true)), Fifo);
 }
+
+// --- a pixel-space quad's radius and outline (ADR-832) ---------------------------------------
+
+/// The solid shader's `solid_coverage` (shaders.rs) for one pixel, mirrored: `local` the pixel
+/// centre's offset from the quad's top left, `half` its half size, `radius` and `aa` as the
+/// instance carries them (`FrameBuilder::solid`). What the GPU computes, so its arithmetic is
+/// tested here where there is no GPU.
+fn solid_coverage(local: (f32, f32), half: (f32, f32), radius: f32, aa: f32) -> f32 {
+    if aa == 0.0 {
+        return 1.0;
+    }
+    let (px, py) = (local.0 - half.0, local.1 - half.1);
+    let r = radius.min(half.0.min(half.1));
+    let (qx, qy) = (px.abs() - (half.0 - r), py.abs() - (half.1 - r));
+    let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+    let d = outside + qx.max(qy).min(0.0) - r;
+    if aa > 1.0 {
+        let width = aa - 1.0;
+        let band = (d + 0.5 * width).abs() - 0.5 * width;
+        return (0.5 - band).clamp(0.0, 1.0);
+    }
+    (0.5 - d).clamp(0.0, 1.0)
+}
+
+/// The summed coverage of a `side`×`side` quad's pixels, as the shader would cover them.
+fn covered_area(side: usize, radius: f32, aa: f32) -> f32 {
+    let half = side as f32 * 0.5;
+    let mut sum = 0.0;
+    for y in 0..side {
+        for x in 0..side {
+            sum += solid_coverage((x as f32 + 0.5, y as f32 + 0.5), (half, half), radius, aa);
+        }
+    }
+    sum
+}
+
+#[test]
+fn a_quad_with_a_radius_is_a_smooth_disc_and_with_an_outline_a_ring() {
+    let pi = std::f32::consts::PI;
+    // a 40 px quad of radius 20: a disc, its area πr² to within half a percent
+    let disc = covered_area(40, 20.0, 1.0);
+    assert!(
+        (disc - pi * 400.0).abs() < 0.005 * pi * 400.0,
+        "disc area {disc}"
+    );
+    // its edge anti-aliased: the pixel the circle crosses through its middle is half covered
+    let edge = solid_coverage((40.0, 20.0), (20.0, 20.0), 20.0, 1.0);
+    assert!((edge - 0.5).abs() < 0.01, "edge coverage {edge}");
+    // a 3 px outline of it: the band between radius 17 and 20
+    let ring = covered_area(40, 20.0, 1.0 + 3.0);
+    let band = pi * (400.0 - 289.0);
+    assert!(
+        (ring - band).abs() < 0.02 * band,
+        "ring area {ring} against {band}"
+    );
+    // and a plain fill covers every pixel
+    assert_eq!(covered_area(10, 0.0, 0.0), 100.0);
+}
+
+#[test]
+fn a_quad_op_takes_its_edge_from_its_radius_and_outline() {
+    let mut fb = FrameBuilder::new(FW, FH);
+    // an outline: its radius, and 1 + its width in the `aa` slot
+    fb.solid(
+        10.0,
+        10.0,
+        20.0,
+        20.0,
+        [255; 4],
+        0.0,
+        Edge::Outline(10.0, 2.5),
+    );
+    assert_eq!(&fb.solids[9..11], &[10.0, 3.5]);
+}
