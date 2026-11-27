@@ -510,13 +510,12 @@ pub(super) fn hair_prepass() -> bool {
 
 /// A trial of what a scene's hair costs on the card, for measuring only
 /// (`BROOD_GUI_HAIR_TRIAL`): 0 drawn as ever (the default), 1 its coverage alone, lit by
-/// nothing, 2 without its hair-on-hair shadow; for `:fibres` strands, 3 their own colour unlit, 4
-/// without their baked self-shadow, 5 without the hair opacity maps, 6 lit by the ambient alone. The shader's `HAIR_TRIAL`.
+/// nothing, 2 without its hair-on-hair shadow. The shader's `HAIR_TRIAL`.
 pub(super) fn hair_trial() -> u32 {
     std::env::var("BROOD_GUI_HAIR_TRIAL")
         .ok()
         .and_then(|text| text.trim().parse::<u32>().ok())
-        .filter(|trial| *trial <= 6)
+        .filter(|trial| *trial <= 2)
         .unwrap_or(0)
 }
 
