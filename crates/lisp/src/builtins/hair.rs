@@ -65,6 +65,87 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Every lock of `locks` (b3d-hair's state locks, each with its :root-parent: the root joint's parent, nil for the skeleton's base) planned as b3d-hair's `moved-plan` plans it, from the frame's `worlds` (16 numbers a joint), `base`, the head's `twist` ([angle [x y z]] or nil), `dt` and whether the colliders `moved-shapes`, then its sub-steps taken against `shapes` (blended from `shapes-before`) as `%hair-moved` takes them, with b3d-hair's settings in `constants` and `plan-constants` (:rate :most-steps :drift :clearance): a vector of `[points previous now step fresh nears bounce]` a lock (its curls' stretch planned too, from `plan-constants`' :bounce :stretch :bounce-most). b3d-hair's plan and sub-steps for a whole frame natively, in one call (ADR-821 amended).",
         hair_advance,
     );
+    primitives.def(
+        "%hair-turned",
+        Arity::exact(4),
+        Sig::new(vec![vec_ty, vec_ty, vec_ty, vec_ty], vec_ty),
+        &["locks", "pose", "worlds", "base"],
+        "Every lock of `locks` (maps of :joints :points :bounce :root-parent) with its joints turned, root first, to point along its points, as b3d-hair's `turned-lock` turns them: from the `pose`'s local transforms (maps of :rotation :translation :scale a joint), the frame's `worlds` (16 numbers a joint) and the skeleton's `base`. A vector a lock of `[rotation translation world]` a joint: its new local rotation and translation and its world matrix (ADR-821 amended, stage 2).",
+        hair_turned,
+    );
+}
+
+/// `(%hair-turned locks pose worlds base)`
+fn hair_turned(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use crate::host::hair::{Local, turned_lock};
+    let who = "hair/turned";
+    let fail = |reason: String| LispError::runtime(format!("{who}: {reason}"));
+    let triple = |value: Value, what: &str| -> Result<Vector, String> {
+        match numbers(heap, value, what)?.as_slice() {
+            [x, y, z] => Ok([*x, *y, *z]),
+            _ => Err(format!("{what} is not [x y z]")),
+        }
+    };
+    let pose = items(heap, arg(args, 1), "the pose")
+        .map_err(fail)?
+        .into_iter()
+        .map(|local| -> Result<Local, String> {
+            let rotation =
+                match numbers(heap, field(heap, local, "rotation"), ":rotation")?.as_slice() {
+                    [x, y, z, w] => [*x, *y, *z, *w],
+                    _ => return Err(":rotation is not [x y z w]".into()),
+                };
+            Ok(Local {
+                rotation,
+                translation: triple(field(heap, local, "translation"), ":translation")?,
+                scale: triple(field(heap, local, "scale"), ":scale")?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(fail)?;
+    let worlds = items(heap, arg(args, 2), "the worlds")
+        .map_err(fail)?
+        .into_iter()
+        .map(|world| matrix(heap, world, "a world matrix"))
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(fail)?;
+    let base = matrix(heap, arg(args, 3), "the base").map_err(fail)?;
+    let locks = items(heap, arg(args, 0), "the locks").map_err(fail)?;
+    let mut out = Vec::with_capacity(locks.len());
+    for lock in locks {
+        let joints: Vec<usize> = numbers(heap, field(heap, lock, "joints"), ":joints")
+            .map_err(fail)?
+            .into_iter()
+            .map(|joint| joint as usize)
+            .collect();
+        let points = vectors(heap, field(heap, lock, "points"), ":points").map_err(fail)?;
+        let stretch = match bounce_of(heap, field(heap, lock, "bounce")).map_err(fail)? {
+            Some((b, _, _)) => 1.0 + b,
+            None => 1.0,
+        };
+        let above = match field(heap, lock, "root-parent") {
+            Value::Nil => base,
+            value => {
+                let parent = number(heap, value, ":root-parent").map_err(fail)? as usize;
+                *worlds
+                    .get(parent)
+                    .ok_or_else(|| fail(format!("root parent {parent} past the worlds")))?
+            }
+        };
+        if points.len() != joints.len() + 1 || joints.iter().any(|&joint| joint >= pose.len()) {
+            return Err(fail("a lock's points or joints do not fit its pose".into()));
+        }
+        let turned = turned_lock(&joints, &points, stretch, &pose, &above);
+        let mut joints_out = Vec::with_capacity(turned.len());
+        for (rotation, place, world) in turned {
+            let rotation = heap.alloc_vector(rotation.iter().map(|&n| Value::float(n)).collect());
+            let place = heap.alloc_vector(place.iter().map(|&n| Value::float(n)).collect());
+            let world = heap.alloc_vector(world.iter().map(|&n| Value::float(n)).collect());
+            joints_out.push(heap.alloc_vector(vec![rotation, place, world]));
+        }
+        out.push(heap.alloc_vector(joints_out));
+    }
+    Ok(heap.alloc_vector(out))
 }
 
 fn matrix(heap: &Heap, value: Value, what: &str) -> Result<crate::host::hair::Matrix, String> {

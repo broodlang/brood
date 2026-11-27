@@ -1139,6 +1139,136 @@ pub fn plan(held: &Held, frame: &Frame, constants: &PlanConstants) -> Planned {
     }
 }
 
+// ---- a lock's joints turned along its points natively (ADR-821 amended, stage 2): b3d-hair's
+// `turned-lock`, sum for sum ----
+
+/// A joint's local transform, as b3d-skeleton's pose keeps it.
+#[derive(Clone, Copy, Debug)]
+pub struct Local {
+    pub rotation: [f64; 4],
+    pub translation: Vector,
+    pub scale: Vector,
+}
+
+/// `b3d-math/quat-multiply`
+fn quat_multiply(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    let [ax, ay, az, aw] = a;
+    let [bx, by, bz, bw] = b;
+    [
+        aw * bx + ax * bw + ay * bz + (0.0 - az * by),
+        aw * by + (0.0 - ax * bz) + ay * bw + az * bx,
+        aw * bz + ax * by + (0.0 - ay * bx) + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
+}
+
+/// `b3d-math/quat-normalize`
+fn quat_normalize([x, y, z, w]: [f64; 4]) -> [f64; 4] {
+    let size = (x * x + y * y + z * z + w * w).sqrt();
+    if size < 1.0e-12 {
+        [0.0, 0.0, 0.0, 1.0]
+    } else {
+        [x / size, y / size, z / size, w / size]
+    }
+}
+
+/// b3d-math's `rotation-of`: Shepperd's method over three unit columns
+fn rotation_of([[m00, m10, m20], [m01, m11, m21], [m02, m12, m22]]: [Vector; 3]) -> [f64; 4] {
+    let trace = m00 + m11 + m22;
+    if trace > 0.0 {
+        let s = 2.0 * (trace + 1.0).sqrt();
+        quat_normalize([(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25 * s])
+    } else if m00 > m11 && m00 > m22 {
+        let s = 2.0 * (1.0 + m00 + (0.0 - m11) + (0.0 - m22)).sqrt();
+        quat_normalize([0.25 * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s])
+    } else if m11 > m22 {
+        let s = 2.0 * (1.0 + m11 + (0.0 - m00) + (0.0 - m22)).sqrt();
+        quat_normalize([(m01 + m10) / s, 0.25 * s, (m12 + m21) / s, (m02 - m20) / s])
+    } else {
+        let s = 2.0 * (1.0 + m22 + (0.0 - m00) + (0.0 - m11)).sqrt();
+        quat_normalize([(m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s])
+    }
+}
+
+/// b3d-hair's `y-axis-of`: [0 1 0] turned by a unit quaternion
+fn y_axis_of([x, y, z, w]: [f64; 4]) -> Vector {
+    [
+        2.0 * (x * y - w * z),
+        1.0 - 2.0 * (x * x + z * z),
+        2.0 * (y * z + w * x),
+    ]
+}
+
+/// `b3d-math/mat4-from-trs`
+fn from_trs(translation: Vector, [x, y, z, w]: [f64; 4], [sx, sy, sz]: Vector) -> Matrix {
+    [
+        sx * (1.0 - 2.0 * (y * y + z * z)),
+        sx * (2.0 * (x * y + z * w)),
+        sx * (2.0 * (x * z - y * w)),
+        0.0,
+        sy * (2.0 * (x * y - z * w)),
+        sy * (1.0 - 2.0 * (x * x + z * z)),
+        sy * (2.0 * (y * z + x * w)),
+        0.0,
+        sz * (2.0 * (x * z + y * w)),
+        sz * (2.0 * (y * z - x * w)),
+        sz * (1.0 - 2.0 * (x * x + y * y)),
+        0.0,
+        translation[0],
+        translation[1],
+        translation[2],
+        1.0,
+    ]
+}
+
+/// `b3d-math/mat4-transform-point`
+fn transform_point(m: &Matrix, [x, y, z]: Vector) -> Vector {
+    let w = m[3] * x + m[7] * y + m[11] * z + m[15];
+    [
+        (m[0] * x + m[4] * y + m[8] * z + m[12]) / w,
+        (m[1] * x + m[5] * y + m[9] * z + m[13]) / w,
+        (m[2] * x + m[6] * y + m[10] * z + m[14]) / w,
+    ]
+}
+
+/// `turned-lock`: the lock's joints, root first, turned to point along its `points` under the
+/// world matrix `start_above` (its root's parent's, or the base), each joint below the first a
+/// bone down its parent by `stretch` (its curls' stretch): each joint's new local rotation and
+/// translation and its world matrix
+pub fn turned_lock(
+    joints: &[usize],
+    points: &[Vector],
+    stretch: f64,
+    pose: &[Local],
+    start_above: &Matrix,
+) -> Vec<([f64; 4], Vector, Matrix)> {
+    let mut above = *start_above;
+    let mut above_turn = rotation_of(rotation_columns(start_above));
+    let mut found = Vec::with_capacity(joints.len());
+    for (position, &joint) in joints.iter().enumerate() {
+        let local = pose[joint];
+        let own = quat_multiply(above_turn, local.rotation);
+        let swing = turn_between(
+            y_axis_of(own),
+            subtract(points[position + 1], points[position]),
+        );
+        let turned = quat_normalize(quat_multiply(swing, own));
+        let [cx, cy, cz, cw] = above_turn;
+        let rotation = quat_multiply([-cx, -cy, -cz, cw], turned);
+        let stretch_here = if position > 0 { stretch } else { 1.0 };
+        let place = if stretch_here == 1.0 {
+            local.translation
+        } else {
+            scale(local.translation, stretch_here)
+        };
+        let world = from_trs(transform_point(&above, place), turned, local.scale);
+        found.push((rotation, place, world));
+        above = world;
+        above_turn = turned;
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
