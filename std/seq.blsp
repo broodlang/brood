@@ -237,6 +237,18 @@ equality); recover the item itself with `find`.
   ((v start end) (%subvec v start end)))
 (sig subvec (vector int &optional int -> vector))
 
+;; `splice`: a run of a vector replaced in one copy. Two `subvec`s and two `into`s made three
+;; copies of it, and an `assoc` an item a copy each (a skeleton's world matrices for a limb,
+;; a joint's sixteen numbers in a palette of thousands).
+(defn splice (v start xs)
+  "A fresh vector like `v` with the items of `xs` in place of `v`'s from index `start` on, as
+many as `xs` has. An error when the run would not fit in `v`.
+
+    (seq/splice [1 2 3 4 5] 1 [:a :b])   ;=> [1 :a :b 4 5]
+    (seq/splice [1 2 3] 3 [])            ;=> [1 2 3]"
+  (%vector-splice v start xs))
+(sig splice (vector int seqable -> vector))
+
 ;; ---- early termination (ADR-376) ---------------------------------------------------
 ;; `(reduced acc)` ends a `transduce` at once with `acc` as its result. It is a NON-LOCAL
 ;; EXIT, not a returned box: the stage throws a `%reduced` record and `transduce` catches

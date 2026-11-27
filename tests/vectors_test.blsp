@@ -168,3 +168,41 @@
       (assert= [:a :b] [:a :b])
       (assert= [1 2 [3 "s"]] [1 2 [3 "s"]])
       true)))
+
+;; A multi-pair `assoc` on a vector copies it once for all its pairs (`%vector-assoc-pairs`),
+;; where it was a `%vector-assoc` a pair, each a copy of the whole vector; and `seq/splice`
+;; puts a run in, in one copy. What they answer is what the pair-at-a-time walk answered.
+(describe "many items of a vector replaced at once"
+  (test "a multi-pair assoc answers what its pairs one after another do"
+    (assert= (assoc [10 20 30] 0 1 2 3) [1 20 3])
+    (assert= (assoc [10 20 30] 0 1 2 3) (assoc (assoc [10 20 30] 0 1) 2 3))
+    ;; (the same index twice: the later pair stands)
+    (assert= (assoc [1 2 3] 1 :a 1 :b) [1 :b 3])
+    ;; (a last index with no value takes nil)
+    (assert= (assoc [1 2] 0 :x 1) [:x nil])
+    (assert= (apply assoc [1 2 3 4] (list 0 :a 3 :d)) [:a 2 3 :d]))
+
+  (test "it leaves the vector it was given as it was"
+    (let (given [1 2 3]
+          changed (assoc given 0 :a 1 :b 2 :c))
+      (assert= given [1 2 3])
+      (assert= changed [:a :b :c])))
+
+  (test "an index out of range is the error a single assoc gives, at the first bad pair"
+    (assert= "assoc: index 5 out of range [0, 2)"
+      (try (assoc [1 2] 5 :x 0 :y) (catch e (get e :message))))
+    (assert= "assoc: index -1 out of range [0, 2)"
+      (try (assoc [1 2] 0 :y -1 :x) (catch e (get e :message)))))
+
+  (test "seq/splice puts a run in place of the items from an index"
+    (assert= (seq/splice [1 2 3 4 5] 1 [:a :b]) [1 :a :b 4 5])
+    (assert= (seq/splice [1 2 3] 0 (list 7 8 9)) [7 8 9])
+    (assert= (seq/splice [1 2 3] 3 []) [1 2 3])
+    (assert= (seq/splice [1 2 3] 1 nil) [1 2 3])
+    (let (given [1 2 3 4])
+      (seq/splice given 2 [:c :d])
+      (assert= given [1 2 3 4])))
+
+  (test "a run that does not fit is refused"
+    (assert-error (seq/splice [1 2 3] 2 [9 9]))
+    (assert-error (seq/splice [1 2 3] -1 [9]))))

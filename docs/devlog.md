@@ -3228,3 +3228,13 @@ then once every 4096 (`tuning::p1_revalidation_due`). The collector's share afte
 `p1_revalidation_tests`; `runtime_drain_completes`, `runtime_multigen`, `runtime_collector`
 green. (`runtime_drain`'s parked-process test fails on this machine with and without the
 change at load 20: a 5 s deadline.)
+
+2026-11-27. **A vector's items replaced in one copy: a multi-pair `assoc`, and `seq/splice`.**
+`assoc` on a vector copies it (7 µs at 3,000 items), and `(assoc v i a j b …)` was a
+`%vector-assoc` a pair. womanblend's `womanblend-loose/lagging` put 20 joints' sixteen numbers
+into a palette of 2,816 with 320 of them a frame: 10.5% of her frame, the dearest function of
+her game by `nest`'s profiler (`profile/run`). `%vector-assoc-pairs` copies once for all the
+pairs (the prelude's `%assoc-vec-pairs` is it now), and `%vector-splice` / `seq/splice` puts a
+run of items in from an index in one copy, where two `subvec`s and two `into`s made three
+(b3d-skeleton's `spliced`). Guard: `tests/vectors_test.blsp` "many items of a vector replaced
+at once".

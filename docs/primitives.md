@@ -35,6 +35,8 @@ arg silently becoming `nil`.
 | | `%vector-ref` | 2 | index |
 | | `%vector-length` | 1 | length |
 | | `%vector-assoc` | 3 | a fresh vector with index `i` (in `[0, len)`) replaced — the vector counterpart of `%map-assoc`; the polymorphic `assoc`/`update` are Brood over it |
+| | `%vector-assoc-pairs` | 2 | a fresh vector with each index of a list `index value …` replaced, the vector copied once however many pairs: the vector half of a multi-pair `assoc` |
+| | `%vector-splice` | 3 | a fresh vector with the run `xs` in place of its items from `start`, the vector copied once: `seq/splice` |
 | | `%vector-concat` | 2 | a fresh vector of `v`'s elements followed by those of `xs` (a vector, list, range, set or nil), one allocation — the kernel op behind `conj` on a vector and `into` onto one, which built the result as a list twice and re-vectorised it (7.7 µs for four items, 2026-09-21) |
 | | `%vector-push` | 2 | `v` with `x` appended — `%vector-concat` of one item, without a collection to carry it: the kernel op behind `(conj v x)`, appending in place over an append buffer (ADR-511, ADR-810) |
 | | `%subvec` | 2–3 | a fresh vector slice `[start, end)`; `end` defaults to the length — the vector-preserving counterpart of the list-returning `take`/`drop`; `seq/remove-nth` is Brood over it |

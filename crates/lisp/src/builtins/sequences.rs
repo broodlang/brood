@@ -240,6 +240,22 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         vector_assoc,
     );
     primitives.def(
+        "%vector-assoc-pairs",
+        Arity::exact(2),
+        Sig::new(vec![vec_ty, seqable], vec_ty),
+        &["v", "kvs"],
+        "A fresh vector like v with each index of kvs (a list of index value index value …, each index in [0, len)) set to the value after it, in order: v copied ONCE, however many pairs. The vector half of a multi-pair assoc.",
+        vector_assoc_pairs,
+    );
+    primitives.def(
+        "%vector-splice",
+        Arity::exact(3),
+        Sig::new(vec![vec_ty, int, seqable], vec_ty),
+        &["v", "start", "xs"],
+        "A fresh vector like v with the items of xs (a vector, list, range or nil) in place of v's from index start on, as many as xs has: v copied once. Errors when start is negative or the run would pass v's end.",
+        vector_splice,
+    );
+    primitives.def(
         "%vector-concat",
         Arity::exact(2),
         Sig::new(vec![vec_ty, seqable], vec_ty),
@@ -1416,6 +1432,57 @@ pub(super) fn vector_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)),
         _ => Err(LispError::wrong_type(heap, "assoc", "vector", v)),
     }
+}
+
+/// `(%vector-assoc-pairs v kvs)` — `v` with each `index value` pair of `kvs` put in, in order,
+/// copied once. `(assoc v i a j b …)` was a `%vector-assoc` a pair, each a copy of the whole
+/// vector: a game patched 20 joints' 16 numbers into a palette of 2,816 with 320 copies of
+/// it a frame, a tenth of the frame. Errors as `%vector-assoc` does, at the first bad index;
+/// a last index with no value takes nil, as the loop it replaces gave it.
+pub(super) fn vector_assoc_pairs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let Value::Vector(id) = v else {
+        return Err(LispError::wrong_type(heap, "assoc", "vector", v));
+    };
+    let pairs = heap.seq_items(arg(args, 1))?;
+    let mut items = heap.vector(id).to_vec();
+    for pair in pairs.chunks(2) {
+        let index = expect_int(heap, "assoc", pair[0])?;
+        if index < 0 || index as usize >= items.len() {
+            return Err(LispError::runtime(format!(
+                "assoc: index {} out of range [0, {})",
+                index,
+                items.len()
+            ))
+            .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
+        }
+        items[index as usize] = pair.get(1).copied().unwrap_or(Value::Nil);
+    }
+    Ok(heap.alloc_vector(items))
+}
+
+/// `(%vector-splice v start xs)` — `v` with the run `xs` in place of its items from `start`:
+/// one copy of `v` for the whole run, where a `subvec` either side and two `into`s made three
+/// (a skeleton's world matrices for a limb, a joint's sixteen numbers in a palette).
+pub(super) fn vector_splice(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let Value::Vector(id) = v else {
+        return Err(LispError::wrong_type(heap, "seq/splice", "vector", v));
+    };
+    let start = expect_int(heap, "seq/splice", arg(args, 1))?;
+    let run = heap.seq_items(arg(args, 2))?;
+    let mut items = heap.vector(id).to_vec();
+    if start < 0 || start as usize + run.len() > items.len() {
+        return Err(LispError::runtime(format!(
+            "seq/splice: {} items from index {} do not fit in [0, {})",
+            run.len(),
+            start,
+            items.len()
+        ))
+        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
+    }
+    items[start as usize..start as usize + run.len()].copy_from_slice(&run);
+    Ok(heap.alloc_vector(items))
 }
 
 /// `(%vector-concat v xs)` — a fresh vector of `v`'s items followed by `xs`'s (a
