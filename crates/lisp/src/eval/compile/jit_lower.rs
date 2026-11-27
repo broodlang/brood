@@ -695,6 +695,7 @@ fn jit_lower_arm_inner(
     // native passes `u32::MAX` and re-runs from ip 0: its ips match no chunk the VM holds,
     // and its gate admits only pure-arith bodies, so re-running is effect-free.
     let ckpt_active = ckpt_slot != u32::MAX;
+    let slot_rewrites = crate::eval::compile::jit_plan::slot_rewrites(code);
     // The self-inlined upgrade (an inlined body with no leaf derivation — the rule
     // `jit_frame_layout` reads back): its ips match no chunk the VM holds, so it cannot be
     // rebuilt mid-call, and the small layout's journal index is a live slot of one of its
@@ -1178,15 +1179,17 @@ fn jit_lower_arm_inner(
                     return None;
                 }
             }
+            // (and after a store over an earlier binding, which the stretch since the last
+            // checkpoint may have read: `jit_plan::slot_rewrites`)
             if ckpt_active
-                && matches!(
+                && (matches!(
                     &code[j],
                     Inst::Call { tail: false, .. }
                         | Inst::Prim3 {
                             op: PrimOp3::TablePut,
                             ..
                         }
-                )
+                ) || slot_rewrites[j])
             {
                 load::emit_checkpoint_journal(&mut b, &stack, j, ckpt_slot, frame);
             }

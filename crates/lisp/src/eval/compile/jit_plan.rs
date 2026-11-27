@@ -298,6 +298,42 @@ fn pure_self_recursive(
     })
 }
 
+/// Which instructions of `code` are a `SetLocal` to a slot an EARLIER instruction also sets:
+/// the bytecode gives one frame slot to sibling `let` scopes in turn, so such a store may
+/// overwrite a binding that code since the last checkpoint has read.
+///
+/// A journalling lowering checkpoints after each of them ([`jit_ckpt_depth`] sizes the journal
+/// for it). A deopt resumes at the last checkpoint and the VM runs again what native code ran
+/// since, which is sound only while that stretch reads nothing it has itself overwritten. A
+/// first store to a slot overwrites the frame's nil, which nothing reads; a later one
+/// overwrites a binding. Without the checkpoint:
+///
+/// ```text
+/// (let (lag  (let (wave (get state :wave)) (+ (helper state) wave))   ; wave in slot 1
+///       drop (let (worlds (get state :worlds)) (- (get state :lift)))) ; worlds in slot 1 too
+///   …)
+/// ```
+///
+/// a deopt at the `-` resumed after `(helper state)` and added `worlds` to its answer
+/// (`+: expected number, got vector`; found in b3d's `hips-placed`, 2026-11-27). Code is
+/// laid out forwards (the one back edge, `SelfCall`, resets the frame and the journal), so
+/// "an earlier instruction" is every store that can have run before this one.
+pub(crate) fn slot_rewrites(code: &[Inst]) -> Vec<bool> {
+    let mut written: Vec<usize> = Vec::new();
+    code.iter()
+        .map(|inst| match inst {
+            Inst::SetLocal(slot) => {
+                let again = written.contains(slot);
+                if !again {
+                    written.push(*slot);
+                }
+                again
+            }
+            _ => false,
+        })
+        .collect()
+}
+
 /// Deopt-resume checkpointing (so a deopt never re-runs a side effect): the abstract operand-stack depth **after each non-tail
 /// `Call` completes**, maximised over all call sites — the number of extra frame
 /// slots the JIT'd arm needs to journal its live operands at each checkpoint.
@@ -326,6 +362,11 @@ pub(super) fn jit_ckpt_depth(
     depth[0] = Some(0);
     let mut work = vec![0usize];
     let mut max_after_ckpt: Option<usize> = None;
+    // A store over an earlier binding is a checkpoint too ([`slot_rewrites`]), in an arm that
+    // journals at all: with no call and no `table-put` a deopt re-runs from ip 0, where every
+    // binding is made again before it is read.
+    let rewrites = slot_rewrites(code);
+    let mut max_after_rewrite: usize = 0;
     // merge: assign-or-check a depth at ip; push to the worklist on first visit.
     fn merge(depth: &mut [Option<usize>], work: &mut Vec<usize>, ip: usize, d: usize) -> bool {
         match depth[ip] {
@@ -367,7 +408,12 @@ pub(super) fn jit_ckpt_depth(
             // a hot branch isn't silently under-reported (coverage runs with the JIT off
             // anyway; this is belt-and-braces).
             Inst::RecordBranch(..) => false,
-            Inst::Pop | Inst::SetLocal(_) => d >= 1 && merge(&mut depth, &mut work, ip + 1, d - 1),
+            Inst::Pop | Inst::SetLocal(_) => {
+                if d >= 1 && rewrites[ip] {
+                    max_after_rewrite = max_after_rewrite.max(d - 1);
+                }
+                d >= 1 && merge(&mut depth, &mut work, ip + 1, d - 1)
+            }
             Inst::Prim1 { .. } => d >= 1 && merge(&mut depth, &mut work, ip + 1, d),
             Inst::Prim2 { .. } => d >= 2 && merge(&mut depth, &mut work, ip + 1, d - 1),
             // `table-put` is the one *effect* in the boxed subset. It must be a
@@ -433,7 +479,7 @@ pub(super) fn jit_ckpt_depth(
             return None; // inconsistent depths — disable checkpointing for this arm
         }
     }
-    max_after_ckpt
+    max_after_ckpt.map(|depth| depth.max(max_after_rewrite))
 }
 
 /// Does `code` RECEIVE AT ITS HEAD (ADR-410)? Exactly one `%receive` call, and nothing before

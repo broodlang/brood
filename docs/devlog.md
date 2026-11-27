@@ -3279,3 +3279,19 @@ refusals by name, the walks native), `contains_native_test`. Run: 68 test files 
 these ops, both contract modes (2 835 tests); not `make test`, which this machine does not
 run (`treesit_module_test`'s read-only grammar directory case failed in 2 of 5 such runs and
 passes alone: not looked into).
+
+2026-11-27. **A deopt no longer reads a `let` slot the next binding took (a miscompile).** A
+deopt resumes at the last checkpoint, the last non-tail call native code finished, and the VM
+runs again what native code ran since. The bytecode gives one frame slot to sibling `let`
+scopes in turn, so that stretch could read a binding a later `let` had already stored over:
+`(let (lag (let (wave …) (+ (helper) wave)) drop (let (worlds …) (- lift))) …)`, a float under
+an integer guess at the `-`, resumed after `(helper)` and added `worlds` (in `wave`'s slot) to
+its answer: `+: expected number, got vector`, on the first calls after the function went
+native. Found in b3d's `hips-placed` by a womanblend session (a new binding before `drop`
+failed "at random frames"; a `try` or a print, each a call and so a checkpoint, hid it).
+Native code now checkpoints after a store over an earlier binding (`jit_plan::slot_rewrites`;
+`jit_ckpt_depth` sizes the journal for it), in arms that journal at all: without a call a
+deopt re-runs from ip 0, where every binding is made again before it is read. `load.rs`'s
+note that a let slot is "dominated by this store, so a deopt's VM re-run recomputes the binding
+before any read sees a stale slot" held only from ip 0. Guard:
+`tests/jit_slot_reuse_deopt_test.blsp` (both cases fail on c807c63c7).

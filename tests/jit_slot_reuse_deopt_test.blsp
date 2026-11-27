@@ -1,0 +1,46 @@
+(defmodule jit-slot-reuse-deopt-test (:use test))
+
+;;; A deopt resumes at the last checkpoint — the last call native code finished — and the VM
+;;; runs again what native code ran since. The bytecode gives one frame slot to sibling `let`
+;;; scopes in turn, so that stretch could read a binding a later `let` had already stored
+;;; over: in `srd-placed` the call's checkpoint sits between `wave`'s store and its read,
+;;; `worlds` then takes `wave`'s slot, and the float under an integer guess at `(- lift)`
+;;; deopts. The VM resumed after `(srd-rate state)` and added `worlds` to it
+;;; (`+: expected number, got vector`, on the first calls after the function went native;
+;;; found in b3d's `hips-placed`). Native code checkpoints after a store over an earlier
+;;; binding (`jit_plan::slot_rewrites`), so the resumed stretch reads only what it has made.
+
+(defn srd-rate (state) (get state :rate))
+
+(defn srd-placed (state)
+  (let (lag (let (riding (get state :riding)
+                  wave (get state :wave))
+              (+ riding (+ (srd-rate state) wave)))
+        drop (let (worlds (get state :worlds))
+               (if (nil? worlds) 0.0 (- (get state :lift))))
+        pair [lag drop])
+    pair))
+
+;; (the same with the reused slot's reader behind TWO calls, and the store over it in a branch)
+(defn srd-branched (state)
+  (let (lag (let (riding (srd-rate state)
+                  wave (get state :wave))
+              (+ (srd-rate state) (+ riding wave)))
+        drop (if (get state :worlds)
+               (let (worlds (get state :worlds)
+                     first-row (nth worlds 0))
+                 (- (+ (nth first-row 0) (get state :lift))))
+               0.0)
+        pair [lag drop])
+    pair))
+
+(def- *state* {:rate 20 :riding 1 :wave 2 :worlds [[1.0 2.0] [3.0 4.0]] :lift 0.25})
+
+(describe "a deopt after a let slot was given to the next binding"
+  (test "resumes without reading the next binding as the earlier one"
+    (assert= (fold (range 4000) nil (fn (_ _) (srd-placed *state*))) [23 -0.25])
+    (assert= (srd-placed (assoc *state* :worlds nil)) [23 0.0]))
+
+  (test "the same behind two calls, the store in a branch"
+    (assert= (fold (range 4000) nil (fn (_ _) (srd-branched *state*))) [42 -1.25])
+    (assert= (srd-branched (assoc *state* :worlds nil)) [42 0.0])))
