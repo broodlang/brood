@@ -2668,10 +2668,15 @@ pub(super) fn draw_uniform(
     // offset and joint count (ADR-812)
     bytes.extend(floats_bytes(&loose));
     // `DrawU::clamp_info` and `clamps`: the planes its strands keep to (ADR-813)
-    let planes = &material.clamp_planes[..material
-        .clamp_planes
-        .len()
-        .min(crate::host::gui::mesh::MAX_CLAMP_PLANES)];
+    // (none on an `:eye`: its pupils ride in the planes' place, ADR-835)
+    let planes = if material.eye_optics().is_some() {
+        &[]
+    } else {
+        &material.clamp_planes[..material
+            .clamp_planes
+            .len()
+            .min(crate::host::gui::mesh::MAX_CLAMP_PLANES)]
+    };
     // (and the UV set its `:wrinkles` read by, ADR-817)
     let wrinkle_uv = material
         .wrinkles
@@ -2696,7 +2701,11 @@ pub(super) fn draw_uniform(
         shadow_share,
         shadow_keep,
     ]));
+    // the planes, or on an `:eye` its pupils (ADR-835: no eye has planes, no strand has pupils)
     let mut clamps = [0.0f32; crate::host::gui::mesh::MAX_CLAMP_PLANES * 4];
+    if material.eye_optics().is_some() {
+        clamps = pupil_floats(material);
+    }
     for (slot, plane) in planes.iter().enumerate() {
         clamps[slot * 4..slot * 4 + 4].copy_from_slice(plane);
     }
@@ -2712,6 +2721,31 @@ pub(super) fn draw_uniform(
     bytes.extend(floats_bytes(&material.fibre_look));
     bytes.extend(floats_bytes(&material.fibre_cut));
     bytes
+}
+
+/// A material's pupils as `DrawU::clamps` holds them on an `:eye` (ADR-835), zeros for any other
+/// surface: `clamps[0]` and `[1]` an eye's scale, its offset across and up, the ruff's width;
+/// `clamps[2]` and `[3]` an eye's two waves, each its turns plus its phase's share of a turn, then
+/// its depth.
+fn pupil_floats(material: &crate::host::gui::mesh::Material) -> [f32; 16] {
+    let mut floats = [0.0f32; 16];
+    let Some(eye) = material.eye_optics() else {
+        return floats;
+    };
+    for (slot, at) in eye.eyes.iter().take(MAX_EYES).enumerate() {
+        floats[slot * 4..slot * 4 + 4].copy_from_slice(&[
+            at.pupil_scale,
+            at.pupil_offset[0],
+            at.pupil_offset[1],
+            eye.pupil_ruff,
+        ]);
+        for (wave, [turns, depth, phase]) in at.pupil_waves.iter().take(2).enumerate() {
+            let share = (phase / std::f32::consts::TAU).rem_euclid(1.0);
+            floats[8 + slot * 4 + wave * 2] = turns + share.min(0.999);
+            floats[8 + slot * 4 + wave * 2 + 1] = *depth;
+        }
+    }
+    floats
 }
 
 /// A material's `:eye` as `DrawU` holds it (ADR-796), all zeros for any surface but `:eye`:

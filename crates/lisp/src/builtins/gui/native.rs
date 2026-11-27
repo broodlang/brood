@@ -2426,7 +2426,7 @@ fn eye_spec(
     use crate::host::gui::mesh::{
         DEFAULT_CORNEA_RADIUS, DEFAULT_EYE_IOR, DEFAULT_EYE_RADIUS, DEFAULT_IRIS_CONCAVITY,
         DEFAULT_IRIS_DEPTH, DEFAULT_IRIS_RADIUS, DEFAULT_PUPIL, Eye, EyeAt, MAX_EYES,
-        MAX_IRIS_CONCAVITY,
+        MAX_IRIS_CONCAVITY, MAX_PUPIL_WAVES,
     };
     let map = match given {
         None | Some(Value::Nil) => return Ok(None),
@@ -2540,10 +2540,66 @@ fn eye_spec(
                     "{whose} :axis is missing: the direction it looks along in the mesh at rest, [x y z]"
                 ));
             };
+            // its own pupil (ADR-835): its size against the material's, its middle's offset in
+            // iris radii, its outline's waves
+            let pupil_scale = match heap.map_get(entry_map, value::kw("pupil-scale")) {
+                None | Some(Value::Nil) => 1.0,
+                Some(given) if is_number(given) && (0.5..=1.5).contains(&num(given)) => num(given),
+                Some(given) => {
+                    return Err(format!(
+                        "{whose} :pupil-scale is its pupil's size against the material's :pupil, a number from 0.5 to 1.5, not {}",
+                        print(given)
+                    ));
+                }
+            };
+            let pupil_offset = match heap.map_get(entry_map, value::kw("pupil-offset")) {
+                None | Some(Value::Nil) => [0.0, 0.0],
+                Some(given) => match numbers(given, 2) {
+                    Some(pair) if pair.iter().all(|share| share.abs() <= 0.3) => [pair[0], pair[1]],
+                    _ => {
+                        return Err(format!(
+                            "{whose} :pupil-offset is [across up], where its pupil's middle is from the iris's in iris radii, each at most 0.3 either way, not {}",
+                            print(given)
+                        ));
+                    }
+                },
+            };
+            let mut pupil_waves = [[0.0f32; 3]; MAX_PUPIL_WAVES];
+            match heap.map_get(entry_map, value::kw("pupil-waves")) {
+                None | Some(Value::Nil) => {}
+                Some(Value::Vector(waves_id)) if heap.vector(waves_id).len() <= MAX_PUPIL_WAVES => {
+                    for (slot, wave) in heap.vector(waves_id).iter().enumerate() {
+                        match numbers(*wave, 3) {
+                            Some(found)
+                                if found[0].fract() == 0.0
+                                    && (1.0..=12.0).contains(&found[0])
+                                    && found[1].abs() <= 0.2 =>
+                            {
+                                pupil_waves[slot] = [found[0], found[1], found[2]];
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "{whose} :pupil-waves' wave {slot} is [turns depth phase]: turns a whole number from 1 to 12, depth a share of the pupil's radius at most 0.2 either way, phase in radians, not {}",
+                                    print(*wave)
+                                ));
+                            }
+                        }
+                    }
+                }
+                Some(given) => {
+                    return Err(format!(
+                        "{whose} :pupil-waves is a vector of at most {MAX_PUPIL_WAVES} waves [turns depth phase], its pupil's outline out of round, not {}",
+                        print(given)
+                    ));
+                }
+            }
             Ok(EyeAt {
                 centre: [centre[0], centre[1], centre[2]],
                 axis,
                 iris_uv: [iris_uv[0], iris_uv[1]],
+                pupil_scale,
+                pupil_offset,
+                pupil_waves,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -2652,7 +2708,19 @@ fn eye_spec(
             ));
         }
     };
+    // `:pupil-ruff`: the pupillary ruff's width in iris radii (ADR-835), 0 … 0.2
+    let pupil_ruff = match heap.map_get(map, value::kw("pupil-ruff")) {
+        None | Some(Value::Nil) => crate::host::gui::mesh::DEFAULT_PUPIL_RUFF,
+        Some(given) if is_number(given) && (0.0..=0.2).contains(&num(given)) => num(given),
+        Some(given) => {
+            return Err(format!(
+                "an :eye's :pupil-ruff is how wide the dark frill round its pupil's edge is, in iris radii, a number from 0 (none) to 0.2, not {}",
+                print(given)
+            ));
+        }
+    };
     Ok(Some(Eye {
+        pupil_ruff,
         eyes,
         up,
         radius,
@@ -4501,7 +4569,10 @@ mod gui_scene_light_tests {
     fn surroundings_read_clamped_and_absent_by_default() {
         // ADR-831: the surroundings' albedo, each channel kept to 0 … 1; nil when not given
         let given = scene_with("[]", "{:surroundings [0.39 0.14 1.5]}").expect("a scene");
-        assert_eq!(given.draws[0].material.surroundings, Some([0.39, 0.14, 1.0]));
+        assert_eq!(
+            given.draws[0].material.surroundings,
+            Some([0.39, 0.14, 1.0])
+        );
         let plain = scene_with("[]", "{}").expect("a scene");
         assert_eq!(plain.draws[0].material.surroundings, None);
     }
@@ -5040,6 +5111,9 @@ mod gui_scene_light_tests {
                 centre: [0.03, 1.5, 0.1],
                 axis: [0.0, 0.0, 1.0],
                 iris_uv: [0.3, 0.7],
+                pupil_scale: 1.0,
+                pupil_offset: [0.0, 0.0],
+                pupil_waves: Default::default(),
             }]
         );
         assert_eq!(eye.up, [0.0, 1.0, 0.0]);
@@ -5103,6 +5177,94 @@ mod gui_scene_light_tests {
         // nil is none
         let scene = scene_with("[]", "{:eye nil}").expect("a scene");
         assert_eq!(scene.draws[0].material.eye, None);
+    }
+
+    #[test]
+    fn each_eyes_pupil_reads_its_own_and_is_refused_with_why() {
+        // ADR-835: two pupils of one material differ as real ones do
+        use crate::host::gui::mesh::DEFAULT_PUPIL_RUFF;
+        let left = "{:centre [0.03 1.5 0.1] :axis [0 0 1] :iris-uv [0.3 0.7] :pupil-scale 1.025 :pupil-offset [0.05 0.02] :pupil-waves [[2 0.03 1.0] [3 -0.02 0.5]]}";
+        let right = "{:centre [-0.03 1.5 0.1] :axis [0 0 1] :iris-uv [0.7 0.7]}";
+        let scene = scene_with(
+            "[]",
+            &format!(
+                "{{:surface :eye :eye {{:eyes [{left} {right}] :iris-uv-radius 0.1 :pupil-ruff 0.03}}}}"
+            ),
+        )
+        .expect("two eyes");
+        let eye = scene.draws[0].material.eye_optics().expect("its optics");
+        assert_eq!(eye.eyes[0].pupil_scale, 1.025);
+        assert_eq!(eye.eyes[0].pupil_offset, [0.05, 0.02]);
+        assert_eq!(
+            eye.eyes[0].pupil_waves,
+            [[2.0, 0.03, 1.0], [3.0, -0.02, 0.5]]
+        );
+        // what an eye does not say: the material's pupil, round and centred
+        assert_eq!(eye.eyes[1].pupil_scale, 1.0);
+        assert_eq!(eye.eyes[1].pupil_offset, [0.0, 0.0]);
+        assert_eq!(eye.eyes[1].pupil_waves, [[0.0; 3]; 2]);
+        assert_eq!(eye.pupil_ruff, 0.03);
+        let plain = scene_with(
+            "[]",
+            &format!("{{:surface :eye :eye {{:eyes [{right}] :iris-uv-radius 0.1}}}}"),
+        )
+        .expect("an eye");
+        assert_eq!(
+            plain.draws[0]
+                .material
+                .eye_optics()
+                .expect("optics")
+                .pupil_ruff,
+            DEFAULT_PUPIL_RUFF
+        );
+        let refused = |entry: &str, keys: &str, why: &str| {
+            let error = scene_with(
+                "[]",
+                &format!("{{:surface :eye :eye {{:eyes [{entry}] :iris-uv-radius 0.1 {keys}}}}}"),
+            )
+            .expect_err(why);
+            assert!(error.contains(why), "{error:?} does not say {why:?}");
+        };
+        let with =
+            |keys: &str| format!("{{:centre [0 0 0] :axis [0 0 1] :iris-uv [0.5 0.5] {keys}}}");
+        for given in ["0.2", "2", ":big"] {
+            refused(
+                &with(&format!(":pupil-scale {given}")),
+                "",
+                ":pupil-scale is its pupil's size",
+            );
+        }
+        for given in ["[0.5 0]", "[0.1]", "0.1"] {
+            refused(
+                &with(&format!(":pupil-offset {given}")),
+                "",
+                ":pupil-offset is [across up]",
+            );
+        }
+        for given in [
+            "[[2.5 0.03 0]]",
+            "[[2 0.5 0]]",
+            "[[0 0.03 0]]",
+            "[[2 0.03]]",
+        ] {
+            refused(
+                &with(&format!(":pupil-waves {given}")),
+                "",
+                "wave 0 is [turns depth phase]",
+            );
+        }
+        refused(
+            &with(":pupil-waves [[2 0 0] [3 0 0] [4 0 0]]"),
+            "",
+            ":pupil-waves is a vector of at most 2",
+        );
+        for given in ["0.5", "-0.01", ":thin"] {
+            refused(
+                &with(""),
+                &format!(":pupil-ruff {given}"),
+                ":pupil-ruff is how wide",
+            );
+        }
     }
 
     #[test]

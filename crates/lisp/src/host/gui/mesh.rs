@@ -978,8 +978,12 @@ pub const DEFAULT_LIMBUS: f32 = 0.45;
 pub const DEFAULT_LIMBUS_WIDTH: f32 = 0.1;
 /// The steepest bowl a material may ask for.
 pub const MAX_IRIS_CONCAVITY: f32 = 4.0;
-/// How soft the pupil's edge is: it fades over this share of its radius either side.
+/// How soft the pupil's edge is: it fades over this share of its radius either side (the CPU
+/// painter's; the GPU's edge is a pixel wide, ADR-835).
 pub const PUPIL_EDGE: f32 = 0.08;
+/// The pupillary ruff's width unless the material says, in iris radii: 0.15 mm on a 5.9 mm
+/// iris radius (ADR-835).
+pub const DEFAULT_PUPIL_RUFF: f32 = 0.025;
 /// Where, as a share of the iris's radius from the eye's axis, the cornea's own normal begins
 /// to give way to the mesh's, which it is at the limbus (1).
 pub const CORNEA_EDGE: f32 = 0.85;
@@ -993,6 +997,30 @@ pub struct EyeAt {
     pub axis: [f32; 3],
     /// Where the middle of its iris is in the base texture.
     pub iris_uv: [f32; 2],
+    /// Its own pupil (ADR-835): its size against the material's `pupil` (1: the same), its
+    /// middle's offset [across up] from the iris's in iris radii (across toward the texture's
+    /// u), and its outline out of round, each wave `[turns depth phase]` adding `depth` times
+    /// cos(turns angle + phase) to its radius's share (turns 0: none). Two eyes differ so.
+    pub pupil_scale: f32,
+    pub pupil_offset: [f32; 2],
+    pub pupil_waves: [[f32; 3]; MAX_PUPIL_WAVES],
+}
+
+/// How many waves an eye's pupil outline may take ([`EyeAt::pupil_waves`]).
+pub const MAX_PUPIL_WAVES: usize = 2;
+
+impl EyeAt {
+    /// An eye at `centre` looking along `axis`, its iris at `iris_uv`, its pupil the material's.
+    pub fn new(centre: [f32; 3], axis: [f32; 3], iris_uv: [f32; 2]) -> EyeAt {
+        EyeAt {
+            centre,
+            axis,
+            iris_uv,
+            pupil_scale: 1.0,
+            pupil_offset: [0.0, 0.0],
+            pupil_waves: [[0.0; 3]; MAX_PUPIL_WAVES],
+        }
+    }
 }
 
 /// An `:eye` surface's optics (ADR-796): where its eyes are in the mesh at rest, and their
@@ -1028,6 +1056,9 @@ pub struct Eye {
     /// radii (ADR-796, `:limbus [strength width]`).
     pub limbus: f32,
     pub limbus_width: f32,
+    /// The pupillary ruff's width in iris radii (ADR-835, `:pupil-ruff`): the dark scalloped
+    /// frill of pigment round a real pupil's edge, 0.1–0.2 mm (0: none).
+    pub pupil_ruff: f32,
 }
 
 impl Eye {
@@ -8919,6 +8950,9 @@ mod tests {
                 centre: [0.0; 3],
                 axis: [0.0, 0.0, 1.0],
                 iris_uv: [0.5, 0.5],
+                pupil_scale: 1.0,
+                pupil_offset: [0.0, 0.0],
+                pupil_waves: Default::default(),
             }],
             up: [0.0, 1.0, 0.0],
             radius: DEFAULT_EYE_RADIUS,
@@ -8932,6 +8966,7 @@ mod tests {
             // (no limbal ring: this eye is for the refraction and the pupil)
             limbus: 0.0,
             limbus_width: DEFAULT_LIMBUS_WIDTH,
+            pupil_ruff: crate::host::gui::mesh::DEFAULT_PUPIL_RUFF,
         }
     }
 
@@ -9120,11 +9155,17 @@ mod tests {
                     centre: [-0.03, 0.0, 0.0],
                     axis: [0.0, 0.0, 1.0],
                     iris_uv: [0.3, 0.7],
+                    pupil_scale: 1.0,
+                    pupil_offset: [0.0, 0.0],
+                    pupil_waves: Default::default(),
                 },
                 EyeAt {
                     centre: [0.03, 0.0, 0.0],
                     axis: [0.0, 0.0, 1.0],
                     iris_uv: [0.7, 0.3],
+                    pupil_scale: 1.0,
+                    pupil_offset: [0.0, 0.0],
+                    pupil_waves: Default::default(),
                 },
             ],
             ior: 1.0,
@@ -9279,6 +9320,9 @@ mod tests {
                 centre: [0.0, 0.0, 0.5 - iris],
                 axis: [0.0, 0.0, 1.0],
                 iris_uv: [0.5, 0.5],
+                pupil_scale: 1.0,
+                pupil_offset: [0.0, 0.0],
+                pupil_waves: Default::default(),
             }],
             ..big
         }
@@ -9603,6 +9647,7 @@ mod tests {
             concavity: 0.0,
             limbus: 0.0,
             limbus_width: DEFAULT_LIMBUS_WIDTH,
+            pupil_ruff: crate::host::gui::mesh::DEFAULT_PUPIL_RUFF,
             ..eye.clone()
         };
         assert_eq!(seen_across(&flat, 0.7).iris_normal, [0.0, 0.0, 1.0]);
@@ -9791,6 +9836,7 @@ mod tests {
             concavity: 0.3,
             limbus: 0.45,
             limbus_width: 0.1,
+            pupil_ruff: crate::host::gui::mesh::DEFAULT_PUPIL_RUFF,
         };
         assert!(
             (limbus_shade(&eye, 1.0) - 0.55).abs() < 1e-6,

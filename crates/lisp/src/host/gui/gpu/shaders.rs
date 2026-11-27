@@ -706,7 +706,7 @@ struct DrawU {
     deform: vec4<u32>,          // pressed by the scene's contacts (ADR-805), its first posed vertex, whether it has a softness, its vertex count
     loose: vec4<f32>,           // its flesh lagging its bones (ADR-812): the amount (0 none), its lagging palette's offset, its joint count
     clamp_info: vec4<f32>,      // x: how many `:clamp-planes` its strands keep to (ADR-813); y: the UV set its `:wrinkles` read by (ADR-817); z: the strands a `:fibres` shadow stands for (ADR-813)
-    clamps: array<vec4<f32>, 4>,  // each plane: its unit normal toward the strands' side, `normal · point`
+    clamps: array<vec4<f32>, 4>,  // each plane: its unit normal toward the strands' side, `normal · point`; on an `:eye` its pupils (ADR-835: [0] [1] each eye's scale, offset across and up, ruff width; [2] [3] its two waves, turns + phase's share of a turn, depth)
     wrinkles: array<vec4<f32>, 2>,  // a skin's eight wrinkle zones' weights (ADR-817; zero: none)
     fibre_look: vec4<f32>,      // a `:fibres` surface's scatter strength, scatter depth, colour spread, tip lighten (ADR-825)
     fibre_cut: vec4<f32>,       // its cuticle tilt, roughness spread, absorption a metre (ADR-825)
@@ -2260,6 +2260,8 @@ struct EyeSeen {
     axis: vec3<f32>,
     // what its colour is multiplied by for the limbal ring (`mesh::limbus_shade`): 1 away from it
     limbus: f32,
+    // how much of the pupillary ruff covers it (ADR-835): 0 away from the pupil's edge
+    ruff: f32,
 };
 
 // `mesh::limbus_shade`: the limbal ring's shade at `rim` iris radii from the axis (ADR-796); its
@@ -2274,9 +2276,10 @@ fn limbus_shade(rim: f32) -> f32 {
 // viewer's side, bent there (Snell), followed to the iris's plane; the texture read at that
 // point's place on the iris's disc. A line that misses the cornea's cap (the white) reflects
 // about the eyeball's own normal, the rest as the mesh has it (ADR-804).
-fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world: vec3<f32>, view: vec3<f32>, uv: vec2<f32>, normal: vec3<f32>, curvature: f32) -> EyeSeen {
+fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world: vec3<f32>, view: vec3<f32>, uv: vec2<f32>, normal: vec3<f32>, curvature: f32, pixel: f32) -> EyeSeen {
     var seen: EyeSeen;
     seen.through = false;
+    seen.ruff = 0.0;
     seen.uv = uv;
     seen.pupil = 0.0;
     seen.normal = normal;
@@ -2338,10 +2341,27 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
     let across = dot(hit, right) / iris_radius;
     let above = dot(hit, up) / iris_radius;
     let rim = sqrt(across * across + above * above);
-    let pupil_share = draw.eye_iris.y;
+    // each eye's own pupil (ADR-835): its size, its middle off the iris's, its outline out of
+    // round by its waves; its edge as sharp as a pixel allows, a dark scalloped ruff round it
+    let which = select(0u, 1u, centre.w >= 0.5);
+    let own = draw.clamps[which];
+    let pupil_share = draw.eye_iris.y * own.x;
     if (pupil_share > 0.0) {
-        // (`mesh::PUPIL_EDGE`)
-        seen.pupil = 1.0 - smoothstep(pupil_share * (1.0 - 0.08), pupil_share * (1.0 + 0.08), rim);
+        let from_pupil = vec2<f32>(across - own.y, above - own.z);
+        let reach = length(from_pupil);
+        let angle = atan2(from_pupil.y, from_pupil.x);
+        let waves = draw.clamps[2u + which];
+        let outline = 1.0
+            + waves.y * cos(floor(waves.x) * angle + fract(waves.x) * 6.2831853)
+            + waves.w * cos(floor(waves.z) * angle + fract(waves.z) * 6.2831853);
+        let edge = pupil_share * outline;
+        // half a pixel, in iris radii, never under a hundredth of the pupil's radius
+        let soft = max(0.5 * pixel / iris_radius, 0.01 * pupil_share);
+        seen.pupil = 1.0 - smoothstep(edge - soft, edge + soft, reach);
+        // the ruff: its crenellations a few dozen round, their phase the eye's own
+        let crenels = 0.75 + 0.25 * cos(36.0 * angle + 2.4 * f32(which));
+        let ruff_out = edge + own.w * crenels;
+        seen.ruff = (1.0 - smoothstep(ruff_out - soft, ruff_out + soft, reach)) * (1.0 - seen.pupil) * select(0.0, 1.0, own.w > 0.0);
     }
     let entry_out = entry - axis * entry_along;
     let entry_rim = sqrt(dot(entry_out, entry_out)) / iris_radius;
@@ -2884,11 +2904,11 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
     var under_cornea = vec4<f32>(0.0);
     var mirror_surface = surface_normal;
     if (draw.flags.x == 6u && draw.eye_centres[0].w > 0.0) {
-        let seen = eye_seen(fragment.eye_centre, fragment.eye_axis, fragment.eye_up, fragment.world, view, fragment.uv, normal, curvature);
+        let seen = eye_seen(fragment.eye_centre, fragment.eye_axis, fragment.eye_up, fragment.world, view, fragment.uv, normal, curvature, max(length(world_dx), length(world_dy)));
         if (seen.through) {
             let under = straight(textureSampleGrad(base_texture, texture_sampler, seen.uv, uv_dx, uv_dy), (draw.flags.y & 2u) != 0u);
             let under_texel = select(vec4<f32>(1.0), under, (draw.flags.y & 1u) != 0u);
-            base = srgb_to_linear(under_texel.rgb) * draw.color.rgb * (1.0 - seen.pupil) * seen.limbus;
+            base = srgb_to_linear(under_texel.rgb) * draw.color.rgb * (1.0 - seen.pupil) * (1.0 - 0.85 * seen.ruff) * seen.limbus;
             normal = seen.normal;
             mirror_surface = seen.normal;
             diffuse_normal = seen.iris_normal;

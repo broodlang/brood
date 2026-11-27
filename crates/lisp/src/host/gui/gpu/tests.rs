@@ -267,11 +267,17 @@ fn the_mesh_shader_validates() {
                 centre: [1.0, 2.0, 3.0],
                 axis: [0.0, 0.0, 1.0],
                 iris_uv: [0.3, 0.7],
+                pupil_scale: 1.0,
+                pupil_offset: [0.0, 0.0],
+                pupil_waves: Default::default(),
             },
             EyeAt {
                 centre: [-1.0, 2.0, 3.0],
                 axis: [0.0, 1.0, 0.0],
                 iris_uv: [0.7, 0.2],
+                pupil_scale: 1.0,
+                pupil_offset: [0.0, 0.0],
+                pupil_waves: Default::default(),
             },
         ],
         up: [0.0, 1.0, 0.0],
@@ -285,6 +291,7 @@ fn the_mesh_shader_validates() {
         concavity: 0.5,
         limbus: 0.3,
         limbus_width: 0.12,
+        pupil_ruff: crate::host::gui::mesh::DEFAULT_PUPIL_RUFF,
     };
     let eye_floats = |surface: Surface| -> Vec<f32> {
         let eyed = Draw {
@@ -322,6 +329,43 @@ fn the_mesh_shader_validates() {
         ]
     );
     assert_eq!(eye_floats(Surface::Cutout), [0.0; 32], "no other surface");
+    // ADR-835: an eye's pupils in the clamp planes' place (bytes 320 … 384), each its own
+    let mut own = optics.clone();
+    own.eyes[1].pupil_scale = 0.975;
+    own.eyes[1].pupil_offset = [0.04, 0.02];
+    own.eyes[1].pupil_waves = [[2.0, 0.03, std::f32::consts::PI], [3.0, -0.02, 0.0]];
+    let pupils = scenes::draw_uniform(
+        &Draw {
+            loose: None,
+            mesh: 1,
+            model: [0.0; 16],
+            palette: None,
+            morphs: Vec::new(),
+            material: Material {
+                surface: Surface::Eye,
+                eye: Some(own),
+                clamp_planes: vec![[0.0, 1.0, 0.0, 0.5]],
+                ..Material::default()
+            },
+        },
+        [0; 4],
+        [0; 4],
+        [0; 4],
+        [0.0; 4],
+    );
+    let read = |at: usize| f32::from_le_bytes(pupils[at..at + 4].try_into().expect("a float"));
+    let clamp_floats: Vec<f32> = (0..16).map(|index| read(320 + index * 4)).collect();
+    let ruff = crate::host::gui::mesh::DEFAULT_PUPIL_RUFF;
+    assert_eq!(
+        clamp_floats,
+        [
+            1.0, 0.0, 0.0, ruff, 0.975, 0.04, 0.02, ruff, // each eye's scale, offset, ruff
+            0.0, 0.0, 0.0, 0.0, 2.5, 0.03, 3.0,
+            -0.02, // each eye's waves: turns + phase's share, depth
+        ]
+    );
+    assert_eq!(read(304), 0.0, "an eye keeps to no clamp planes");
+    assert!(MESH_SRC.contains("let own = draw.clamps[which];"));
     assert_eq!(
         draw_declared, 512,
         "the eye's fields, then a hair's `:sheen` (ADR-799), `deform` (ADR-805), `loose` (ADR-812), the clamp planes (ADR-813), the wrinkle weights (ADR-817), then a hair's look (ADR-825): the whole of DRAW_BYTES"
@@ -840,8 +884,13 @@ fn surroundings_ride_in_the_sheen_slot_of_a_surface_that_is_not_hair() {
     assert_eq!(slot(hair), [0.5, 0.25, 0.125, 1.0]);
     // neither: nothing, and the shader leaves the occlusion as it was
     assert_eq!(slot(floats(Material::default())), [0.0; 4]);
-    assert!(MESH_SRC.contains("fn bounced_occlusion(visibility: f32, albedo: vec3<f32>) -> vec3<f32> {"));
-    assert!(MESH_SRC.contains("if (draw.flags.x != 4u && draw.flags.x != 5u && draw.sheen.w > 0.5) {"));
+    assert!(
+        MESH_SRC
+            .contains("fn bounced_occlusion(visibility: f32, albedo: vec3<f32>) -> vec3<f32> {")
+    );
+    assert!(
+        MESH_SRC.contains("if (draw.flags.x != 4u && draw.flags.x != 5u && draw.sheen.w > 0.5) {")
+    );
 }
 
 #[test]
@@ -857,7 +906,10 @@ fn the_bounce_is_never_darker_than_the_occlusion_and_tinted_by_the_surroundings(
     for visibility in [0.0, 0.1, 0.3, 0.6, 1.0] {
         let [red, green, blue] = [0.39, 0.14, 0.12].map(|albedo| bounced(visibility, albedo));
         assert!(red >= visibility && green >= visibility && blue >= visibility);
-        assert!(red >= green && green >= blue, "the gums' red given back most: {visibility}");
+        assert!(
+            red >= green && green >= blue,
+            "the gums' red given back most: {visibility}"
+        );
         assert!(red <= 1.0 + 1e-5);
     }
     // nothing occluded: nothing to give back
