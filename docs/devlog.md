@@ -3303,3 +3303,17 @@ its declared `list`: three `[trusted]` warnings under `nest check --strict` afte
 (`editor/treesit/injection-problems` and `indent-problems`, `settings/file-diagnostics`),
 which is what the pre-push hook and CI's `scripts/green.sh` run. The flat `list` now. Strict
 over `std/` and `tests/`: zero warnings.
+
+2026-11-27. **A tail call out of native code takes the native link.** A native function ENDING
+in a call hands the call back to whoever entered it (`finish_nested`, outcome 4), which ran it
+through `apply_value`: the arm looked up by hash (`compiled_arm_for`), the arguments copied, a
+fresh driver started to find the callee's native code again. The same call NOT in tail
+position took the fast link. `perf` on womanblend's game thread put 9.5% of it in that glue
+(`dispatch`, `push_frame`, `vm_cache_arm_handle`, `vm_run_bc`'s entry). The staged call is now
+made as native code makes a computed-head call (`jit_dispatch_call`): linked straight to the
+target's native code, its arm found by the computed-call memo, with the native depth raised
+for the hop as before (KI-11). The memo keeps a named function's entry across a collection
+(only a LOCAL closure and its env move). womanblend's serial tick: 104.3 → 101.4 million
+instructions on its game thread (`perf`, sampled, two lengths taken apart). Not measured on
+brood's benchmark rows: this machine does not run them. Run: the 55 test files of the JIT,
+tail calls, contracts, preemption and the checker; not `make test`.

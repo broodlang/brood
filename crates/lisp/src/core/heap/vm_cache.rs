@@ -95,7 +95,8 @@ type ComputedCalls = [Option<ComputedCallEntry>; COMPUTED_CALL_SLOTS];
 ///   only when this process next syncs). As for the named-head IC (ADR-096).
 /// - `gc_runs`: a collection moves LOCAL closures and their envs. A moved closure's bits
 ///   change (the generation stamp), but that stamp is 29 bits and wraps, so nothing derived
-///   from a LOCAL handle outlives a collection.
+///   from a LOCAL handle outlives a collection. An entry for a closure in a shared region
+///   (a named function: immovable, and so is its env) is not held to it.
 #[cfg(feature = "jit")]
 pub(crate) struct ComputedCallEntry {
     closure: u64,
@@ -386,7 +387,11 @@ impl Heap {
                 e.closure == callee.0
                     && e.argc == argc
                     && e.epoch == epoch
-                    && e.gc_runs == self.gc_runs
+                    // Only a LOCAL closure and its env move at a collection: a named
+                    // function's handle and env are immovable, and its entry is kept across
+                    // one (a tail call out of native code is resolved here, a frame's worth
+                    // of them between two collections).
+                    && (e.gc_runs == self.gc_runs || callee.region() != crate::core::value::LOCAL)
             })
             .map(|e| (e.arm.clone(), e.env, e.bases));
         self.vm_cache.calls.set(Some(slots));

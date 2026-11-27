@@ -303,9 +303,6 @@ pub(crate) fn finish_nested(
                 return Nested::Raised;
             }
             let target = heap.root_at(staged);
-            let args: SmallVec<[Value; 4]> = (staged + 1..end).map(|k| heap.root_at(k)).collect();
-            heap.truncate_roots(frame.stage_base);
-            let g = heap.global();
             // A builtin in tail position — `(defn conj ((coll x) (… (%vector-push coll x) …)))`,
             // every thin wrapper over a kernel op: call it directly, as a non-tail call from
             // native code already does (`jit_dispatch_call`'s `call_native_direct`), not
@@ -313,6 +310,10 @@ pub(crate) fn finish_nested(
             // code (ADR-810). The builtin receives copies of its arguments, that path's
             // contract, and a collection it made due runs after it (KI-411).
             if let Value::Native(native) = target {
+                let args: SmallVec<[Value; 4]> =
+                    (staged + 1..end).map(|k| heap.root_at(k)).collect();
+                heap.truncate_roots(frame.stage_base);
+                let g = heap.global();
                 return match crate::eval::call_native(heap, native, &args, g) {
                     Ok(value) => Nested::Done(heap.collect_if_bytes_spent(value)),
                     Err(error) => {
@@ -323,11 +324,29 @@ pub(crate) fn finish_nested(
                     }
                 };
             }
-            let r = jit_native_reenter(heap, frame.native_depth, |h| {
-                apply_value(h, target, &args, g)
-                    .map_err(|e| crate::eval::name_uncallable_local(h, e, target, local))
+            // Anything else is a call with a computed head, and is made as native code makes
+            // one (`jit_dispatch_call`): `[callee, arg0..]` moved down to where the finished
+            // callee's frame began, then linked straight to the target's native code when it
+            // has some, its arm found by the computed-call memo. Through `apply_value` every
+            // native function ENDING in a call paid the general dispatch for it — the arm
+            // looked up by hash, the arguments copied, a fresh driver started to find the
+            // native code again — where the same call NOT in tail position took the link:
+            // a tenth of a 3D game's frame. The depth stays raised for the hop (KI-11), so a
+            // chain of tail-calling delegators still meets the cap and drains on the VM.
+            let argc = end - staged - 1;
+            for k in 0..=argc {
+                let staged_value = heap.root_at(staged + k);
+                heap.set_root_at(frame.stage_base + k, staged_value);
+            }
+            heap.truncate_roots(frame.stage_base + argc + 1);
+            let head = local.unwrap_or(u32::MAX);
+            let value = jit_native_reenter(heap, frame.native_depth, |h| {
+                super::dispatch::jit_dispatch_call(h, argc, NO_SITE, head, false)
             });
-            reenter_result(heap, r)
+            match value {
+                Some(value) => Nested::Done(value),
+                None => Nested::Raised,
+            }
         }
         // Deopt (1) / preempt (2) / anything else: resume at the checkpoint, frame intact —
         // never re-running a side effect — else re-run on the VM from the arguments, which
