@@ -1881,6 +1881,12 @@ fn hair_transmittance(light: Light, view_index: u32, world: vec3<f32>, turn: f32
         }
         radius = min(penumbra * 0.5 / max(texel, 1e-9), 16.0);
     }
+    // (never read narrower than a texel and a half: one texel's density under a strand stamped the
+    // map's texels on the back of her hair as blocky dark bands once dual scattering read its
+    // transmittance for every strand, ADR-834; the disc smooths across them as a penumbra would)
+    if (HAIR_TRIAL != 16u) {
+        radius = max(radius, 1.5);
+    }
     if (radius > 1.0) {
         var through = 0.0;
         for (var tap = 0u; tap < 16u; tap = tap + 1u) {
@@ -2398,7 +2404,11 @@ fn eye_seen(centre: vec4<f32>, frame_axis: vec3<f32>, frame_up: vec3<f32>, world
 // for a hair of that albedo at its roughness β, σa = (ln A / (5.969 − 0.215β + 2.532β² − 10.73β³
 // + 5.574β⁴ + 0.245β⁵))², so a light hair passes much and a dark one little, each its own hue
 fn fibre_transmittance(colour: vec3<f32>) -> vec3<f32> {
-    let b = clamp(draw.material.x, 0.0, 1.0);
+    return fibre_transmittance_at(colour, clamp(draw.material.x, 0.0, 1.0));
+}
+
+// (the same at an azimuthal roughness `b` of its own)
+fn fibre_transmittance_at(colour: vec3<f32>, b: f32) -> vec3<f32> {
     let b2 = b * b;
     let denominator = 5.969 - 0.215 * b + 2.532 * b2 - 10.73 * b2 * b + 5.574 * b2 * b2 + 0.245 * b2 * b2 * b;
     let ratio = log(clamp(colour, vec3<f32>(1e-4), vec3<f32>(1.0))) / denominator;
@@ -2536,7 +2546,20 @@ fn fibre_dual(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: ve
     // fibres comes out that colour (`fibre_transmittance`), which is what dual scattering does.
     // (Taken as the fibre's own, her brown, 0.08 0.026 0.016, passed so little on that the shade
     // inside her hair went black, L* 0.2)
-    let colour = clamp(fibre_transmittance(base), vec3<f32>(1e-4), vec3<f32>(1.0));
+    var colour = clamp(fibre_transmittance(base), vec3<f32>(1e-4), vec3<f32>(1.0));
+    if (HAIR_TRIAL == 7u || HAIR_TRIAL == 9u) {
+        colour = clamp(fibre_transmittance_at(base, 0.3), vec3<f32>(1e-4), vec3<f32>(1.0));
+    }
+    if (HAIR_TRIAL == 15u) {
+        colour = clamp(colour * vec3<f32>(1.08, 1.0, 0.92), vec3<f32>(1e-4), vec3<f32>(1.0));
+    }
+    if (HAIR_TRIAL >= 11u && HAIR_TRIAL <= 14u) {
+        let strength = select(1.6, 2.2, HAIR_TRIAL >= 13u);
+        colour = pow(colour, vec3<f32>(strength));
+        if (HAIR_TRIAL == 12u || HAIR_TRIAL == 14u) {
+            colour = clamp(colour * vec3<f32>(1.08, 1.0, 0.92), vec3<f32>(1e-4), vec3<f32>(1.0));
+        }
+    }
     let roughness = clamp(draw.material.x, 1.0 / 255.0, 1.0);
     let spread = draw.fibre_cut.y;
     let width = roughness * roughness * (1.0 - 0.5 * spread + spread * fract(fibre_strand * 7.13));
@@ -2585,7 +2608,10 @@ fn fibre_dual(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: ve
     let open = vec3<f32>(1.0) - forward2;
     let back2 = back * back;
     let back3 = back2 * back;
-    let attenuation_back = back * forward2 / open + back3 * forward2 / (open * open);
+    var attenuation_back = back * forward2 / open + back3 * forward2 / (open * open);
+    if (HAIR_TRIAL == 8u || HAIR_TRIAL == 9u) {
+        attenuation_back = min(attenuation_back, back);
+    }
     let shift_back = alpha_back * (vec3<f32>(1.0) - 2.0 * back2 / (open * open))
         + alpha_forward * (2.0 * open * open + 4.0 * forward2 * back2) / (open * open * open);
     let spread_root = sqrt(2.0 * beta_forward2 + beta_back2);
@@ -2736,7 +2762,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             // the mean number crossed (Poisson). A self-shadow baked once with her standing left
             // strands from deep inside black when lying or bent over brought them to the surface
             // (39, 2026-11-27); the bake now serves only lights without maps
-            if (hair_live >= 0.0) {
+            if (hair_live >= 0.0 && HAIR_TRIAL != 10u) {
                 let live = max(hair_live, 1e-4);
                 out = out + light.color.rgb * arriving * opaque * fibre_dual(base, strand, view, to_light, known, live, -log(live));
             } else if (dot(fibre_visibility, fibre_visibility) > 0.0) {
