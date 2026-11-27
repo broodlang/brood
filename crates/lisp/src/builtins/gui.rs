@@ -178,6 +178,20 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "How many garment vertices the push-out net moved out of her skin on recent frames, oldest first (at most 256): a :garment draw's vertices found inside a :garment contact, counted on the GPU and read back a frame or two later. A safety net, never the fit: every count above 0 is a fault in the garment, for the clip probe and the gate. Empty where nothing counts: the CPU painter, a scene with no garment. One log for the process. ADR-839.",
         gui_scene_push_outs);
     primitives.def(
+        "%gui-scene-request-posed",
+        Arity::exact(1),
+        Sig::new(vec![int], nil_ty),
+        &["draw"],
+        "Ask for draw `draw`'s posed vertices (its index in the first scene's :draws) as the GPU drew them at the next frame that draws it pressed (:deform): skinned with its centres, morphed, its flesh lagging, pressed, a garment pushed out. Read them with gui/scene-posed a frame or two later. ADR-841.",
+        gui_scene_request_posed);
+    primitives.def(
+        "%gui-scene-posed",
+        Arity::exact(0),
+        Sig::new(vec![], any),
+        &[],
+        "The newest posed vertices read back for gui/scene-request-posed: {:draw i :positions bytes :normals bytes}, little-endian f32, three a vertex, world space; nil until one is read. Only a pressed (:deform) draw's vertices are kept on the GPU: a request for any other is never served. ADR-841.",
+        gui_scene_posed);
+    primitives.def(
         "%gui-key-repeat?",
         Arity::exact(1),
         Sig::new(vec![int], bool_ty),

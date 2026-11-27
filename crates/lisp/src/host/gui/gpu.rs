@@ -64,6 +64,8 @@ mod run_cache;
 mod scene_timer;
 // the push-out net's count read back (ADR-839)
 mod push_outs;
+// a pressed draw's posed vertices read back for a probe (ADR-841)
+mod posed_reader;
 mod scenes;
 mod setup;
 mod shaders;
@@ -877,6 +879,7 @@ impl GpuWindow {
         // and the push-out net's count (ADR-839)
         if let Some(scenes) = self.scenes.as_mut() {
             scenes.push_outs.after_submit();
+            scenes.posed_reader.after_submit();
         }
         if let Some(path) = dump_path() {
             dump_frame(

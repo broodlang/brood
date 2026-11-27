@@ -3520,6 +3520,44 @@ pub(in crate::builtins) fn gui_scene_gpu_times(
     Ok(heap.alloc_vector(maps))
 }
 
+/// `(%gui-scene-request-posed draw)` — ask for draw `draw`'s posed vertices at the next frame (ADR-841).
+pub(in crate::builtins) fn gui_scene_request_posed(
+    args: &[Value],
+    _: EnvId,
+    _: &mut Heap,
+) -> LispResult {
+    let draw = match args.first() {
+        Some(Value::Int(draw)) if *draw >= 0 => *draw as usize,
+        _ => {
+            return Err(LispError::runtime(
+                "%gui-scene-request-posed: a draw's index in the scene's :draws, 0 or more",
+            ));
+        }
+    };
+    crate::host::gui::scene_posed::request(draw);
+    Ok(Value::Nil)
+}
+
+/// `(%gui-scene-posed)` — the newest posed vertices read back (ADR-841), or nil.
+pub(in crate::builtins) fn gui_scene_posed(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let Some(sample) = crate::host::gui::scene_posed::latest() else {
+        return Ok(Value::Nil);
+    };
+    let bytes_of = |floats: &[f32]| -> Vec<u8> {
+        floats
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    };
+    let positions = crate::builtins::bytes::bytes_to_value(bytes_of(&sample.positions), heap);
+    let normals = crate::builtins::bytes::bytes_to_value(bytes_of(&sample.normals), heap);
+    Ok(heap.map_from_pairs(vec![
+        (value::kw("draw"), Value::int(sample.draw as i64)),
+        (value::kw("positions"), positions),
+        (value::kw("normals"), normals),
+    ]))
+}
+
 /// `(%gui-scene-push-outs)` — how many garment vertices the push-out net moved on recent frames
 /// (ADR-839), oldest first.
 pub(in crate::builtins) fn gui_scene_push_outs(

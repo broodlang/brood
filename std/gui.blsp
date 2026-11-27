@@ -146,6 +146,18 @@
     (vector? (gui/scene-push-outs))   ;=> true"
   (%gui-scene-push-outs))
 
+(defn scene-request-posed (draw)
+  "Ask for draw `draw`'s posed vertices, its index in the first scene's `:draws`, as the GPU drew them at the next frame that draws it pressed (`:deform`): skinned with its centres, morphed, its flesh lagging, pressed by the scene's contacts, a garment pushed out of her. Read them with `gui/scene-posed` a frame or two later: a probe's ground truth for what is on the screen (ADR-841).
+
+    (gui/scene-request-posed 0)   ;=> nil"
+  (%gui-scene-request-posed draw))
+
+(defn scene-posed ()
+  "The newest posed vertices read back for `gui/scene-request-posed`: `{:draw i :positions bytes :normals bytes}`, little-endian f32, three a vertex, in world space; nil until one has been read. Only a pressed (`:deform`) draw's vertices are kept on the GPU, so a request for any other is never served (ADR-841).
+
+    (or (nil? (gui/scene-posed)) (map? (gui/scene-posed)))   ;=> true"
+  (%gui-scene-posed))
+
 (def- *empty-latency* {:count 0 :max-us 0 :buckets {}})
 
 (defn latency-merge (a b)

@@ -154,6 +154,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // the GPU's time on recent frames' scenes (ADR-801): a log a person reads, one GPU per process
     ("host/gui/scene_gpu_times.rs", "LOG", Diagnostic),
     ("host/gui/scene_push_outs.rs", "LOG", Diagnostic),
+    // a probe's asked draw and its posed vertices read back (ADR-841): one GPU per process
+    ("host/gui/scene_posed.rs", "REQUEST", Diagnostic),
+    ("host/gui/scene_posed.rs", "LATEST", Diagnostic),
     // the offscreen painter's one thread (gui/render-frame, ADR-609): text shaping cannot
     // move between threads, so every runtime in the process sends its frames to this one
     ("host/gui/backend/offscreen.rs", "T", OneMachine),

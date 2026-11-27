@@ -463,6 +463,8 @@ pub(super) struct MeshGpu {
     pub(super) timer: Option<super::scene_timer::SceneTimer>,
     /// The push-out net's count read back (ADR-839).
     pub(super) push_outs: super::push_outs::PushOutReader,
+    /// A pressed draw's posed vertices read back for a probe (ADR-841).
+    pub(super) posed_reader: super::posed_reader::PosedReader,
 }
 
 fn floats_bytes(values: &[f32]) -> Vec<u8> {
@@ -1383,6 +1385,7 @@ impl MeshGpu {
             targets: Vec::new(),
             timer: super::scene_timer::SceneTimer::new(device, queue),
             push_outs: super::push_outs::PushOutReader::new(device),
+            posed_reader: super::posed_reader::PosedReader::new(),
         }
     }
 
@@ -1748,6 +1751,10 @@ impl MeshGpu {
         // each scene's pressed vertices, all its `:deform` draws' (ADR-805): its posed buffer's size
         let mut pressed_totals: Vec<u32> = Vec::new();
         let mut shadow_plans: Vec<ShadowPlan> = Vec::new();
+        // the draw a probe asked to read back (ADR-841), and where its posed vertices lie this frame
+        let posed_asked =
+            crate::host::gui::scene_posed::requested().filter(|_| self.posed_reader.free());
+        let mut posed_wanted: Option<(usize, u32, u32)> = None;
         for scene in scenes {
             let world = scene.draws.iter().fold(None, |bounds, draw| {
                 let more = self
@@ -1902,6 +1909,15 @@ impl MeshGpu {
                 let deform = if pressed {
                     let start = pressed_vertices;
                     pressed_vertices += mesh.vertex_count;
+                    if plans.is_empty()
+                        && let Some(asked) = posed_asked
+                        && scene
+                            .draws
+                            .get(asked)
+                            .is_some_and(|wanted| std::ptr::eq(wanted, draw))
+                    {
+                        posed_wanted = Some((asked, start, mesh.vertex_count));
+                    }
                     [
                         1,
                         start,
@@ -2040,7 +2056,13 @@ impl MeshGpu {
                 {
                     let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
                     target.contacts = Some(ContactTarget {
-                        posed: buffer(device, "posed vertices", u64::from(pressed) * 48, storage),
+                        // (copied out for a probe's read-back too, ADR-841)
+                        posed: buffer(
+                            device,
+                            "posed vertices",
+                            u64::from(pressed) * 48,
+                            storage | wgpu::BufferUsages::COPY_SRC,
+                        ),
                         capacity: pressed,
                         contacts: buffer(
                             device,
@@ -2143,6 +2165,7 @@ impl MeshGpu {
             timer.begin_frame(device);
         }
         self.push_outs.begin_frame(device);
+        self.posed_reader.begin_frame(device);
         for (index, scene) in scenes.iter().enumerate() {
             // the material bind groups this scene's draws sample
             let materials: Vec<wgpu::BindGroup> = scene
@@ -2335,6 +2358,13 @@ impl MeshGpu {
                 drop(pass);
                 // (the push-out net's count, read back at a later frame, ADR-839)
                 self.push_outs.copy(encoder, &contacts.depths);
+                // (and the posed vertices a probe asked for, the first scene's, ADR-841)
+                if index == 0
+                    && let Some((draw, start, count)) = posed_wanted
+                {
+                    self.posed_reader
+                        .copy(device, encoder, &contacts.posed, draw, start, count);
+                }
             }
             // the shadow maps: every casting draw, once a view, the view by instance index, into
             // the layer of the array its `map` names (ADR-800)
