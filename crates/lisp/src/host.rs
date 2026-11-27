@@ -6,6 +6,7 @@
 
 pub mod audio; // optional audio output backend (feature "audio", pulled in by "gui")
 pub mod clipboard; // OS clipboard via `arboard` (feature "clipboard", pulled in by "gui"); no-ops without it
+pub mod cords; // a garment's cords drawn taut over her skin, natively: every cord in one call (ADR-843)
 pub(crate) mod dial; // dialling a TCP peer by name with the resolve and the connect both bounded (KI-97)
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file_watch; // file change notification as process messages (ADR-782); wasm has none

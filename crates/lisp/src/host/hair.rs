@@ -1154,7 +1154,7 @@ pub struct Local {
 }
 
 /// `b3d-math/quat-multiply`
-fn quat_multiply(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+pub(crate) fn quat_multiply(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
     let [ax, ay, az, aw] = a;
     let [bx, by, bz, bw] = b;
     [
@@ -1203,7 +1203,11 @@ fn y_axis_of([x, y, z, w]: [f64; 4]) -> Vector {
 }
 
 /// `b3d-math/mat4-from-trs`
-fn from_trs(translation: Vector, [x, y, z, w]: [f64; 4], [sx, sy, sz]: Vector) -> Matrix {
+pub(crate) fn from_trs(
+    translation: Vector,
+    [x, y, z, w]: [f64; 4],
+    [sx, sy, sz]: Vector,
+) -> Matrix {
     [
         sx * (1.0 - 2.0 * (y * y + z * z)),
         sx * (2.0 * (x * y + z * w)),
@@ -1225,7 +1229,7 @@ fn from_trs(translation: Vector, [x, y, z, w]: [f64; 4], [sx, sy, sz]: Vector) -
 }
 
 /// `b3d-math/mat4-transform-point`
-fn transform_point(m: &Matrix, [x, y, z]: Vector) -> Vector {
+pub(crate) fn transform_point(m: &Matrix, [x, y, z]: Vector) -> Vector {
     let w = m[3] * x + m[7] * y + m[11] * z + m[15];
     [
         (m[0] * x + m[4] * y + m[8] * z + m[12]) / w,

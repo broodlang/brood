@@ -83,6 +83,276 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Every link of `links` (`[a b rests]`, b3d-hair's `links-of`) between the locks of `locks` (maps of :points :previous :lengths :margins :limits :thickness :nears, :lengths as the curls stretch them now) brought back within its bounds as b3d-hair's `cohered` does (`link-constants`: :together :apart :laid [least most] :give), then each lock the links moved settled again against her body's `shapes` as its `settled-again` settles it (b3d-hair's settings in `constants`): a vector a lock, nil where its points are as they were, else `[points previous]` (ADR-821 amended, stage 3).",
         hair_linked,
     );
+    primitives.def(
+        "%cords-packed",
+        Arity::exact(3),
+        Sig::new(vec![vec_ty, vec_ty, map_ty], bytes_ty),
+        &["cords", "inverse-binds", "constants"],
+        "The cords of `cords` (maps of :rest [[x y z] …] its points in the bind pose, :skins a `[[joint weight] …]` a point, :near the indices into :spheres a point, :spheres `[[x y z] radius skin deltas pivot]` (deltas, optional, `[[target dx dy dz] …]`: the shape keys that move the skin the sphere was fitted at, in the bind pose; pivot, optional, its centre of rotation in the bind pose: a cord whose spheres all have one is posed about them as `gui/posed-positions` poses a mesh with `:centres`, ADR-814), :rotations each bone's rest quaternion), the skeleton's `inverse-binds` (16 numbers a joint, the skeleton the skins name) and the solve's `constants` (:passes :pull :step :radius :tries) packed once into bytes for `%cords-solved` to read each frame (ADR-843).",
+        cords_packed,
+    );
+    primitives.def(
+        "%cords-solved",
+        Arity::exact(3),
+        Sig::new(
+            vec![
+                bytes_ty,
+                vec_ty,
+                crate::types::Ty::of_tags(&[Tag::Vector, Tag::Nil]),
+            ],
+            vec_ty,
+        ),
+        &["packed", "worlds", "key-weights"],
+        "Every cord `packed` (`%cords-packed`) drawn taut over her skin as womanblend's `cords-solved` draws it: each sphere's centre moved by its keys at `key-weights` (`[[target weight] …]`, her body's keys this frame; nil or [] for none) and each point and sphere started where its skin carries it through `worlds` (16 numbers a joint), then `:passes` passes of each inner point drawn toward its neighbours' middle (`:pull` of the way, at most `:step` metres) and every point put out of the deepest of its spheres (their radius and `:radius`, up to `:tries` times), its ends pinned where their skin carries them. A vector a cord of `[points bone-worlds]`: its points `[[x y z] …]` and each bone's world matrix (16 numbers), turned from its rest direction to its segment and stretched along it (ADR-843).",
+        cords_solved,
+    );
+}
+
+/// `(%cords-packed cords inverse-binds constants)`
+fn cords_packed(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use crate::host::cords::{Constants as CordConstants, Cord, Skin, Sphere};
+    let who = "cords/packed";
+    let fail = |reason: String| LispError::runtime(format!("{who}: {reason}"));
+    let matrices = |value: Value, what: &str| -> Result<Vec<crate::host::hair::Matrix>, String> {
+        items(heap, value, what)?
+            .into_iter()
+            .map(|item| matrix(heap, item, what))
+            .collect()
+    };
+    let inverse_binds = matrices(arg(args, 1), "the inverse binds").map_err(fail)?;
+    let joints = inverse_binds.len();
+    let skin_of = |value: Value, what: &str| -> Result<Skin, String> {
+        items(heap, value, what)?
+            .into_iter()
+            .map(|pair| match numbers(heap, pair, what)?.as_slice() {
+                [joint, weight] if *joint >= 0.0 && (*joint as usize) < joints => {
+                    Ok((*joint as usize, *weight))
+                }
+                [joint, _] => Err(format!("{what} names joint {joint} of {joints}")),
+                _ => Err(format!("{what} is not [[joint weight] …]")),
+            })
+            .collect()
+    };
+    let given = arg(args, 2);
+    let get = |name: &str| number(heap, field(heap, given, name), &format!(":{name}"));
+    let constants = CordConstants {
+        passes: get("passes").map_err(fail)? as usize,
+        pull: get("pull").map_err(fail)?,
+        step: get("step").map_err(fail)?,
+        radius: get("radius").map_err(fail)?,
+        tries: get("tries").map_err(fail)? as usize,
+    };
+    let cords = items(heap, arg(args, 0), "the cords")
+        .map_err(fail)?
+        .into_iter()
+        .map(|map| -> Result<Cord, String> {
+            let rest = vectors(heap, field(heap, map, "rest"), ":rest")?;
+            let skins = items(heap, field(heap, map, "skins"), ":skins")?
+                .into_iter()
+                .map(|skin| skin_of(skin, ":skins"))
+                .collect::<Result<Vec<_>, String>>()?;
+            let spheres = items(heap, field(heap, map, "spheres"), ":spheres")?
+                .into_iter()
+                .map(|sphere| -> Result<Sphere, String> {
+                    match items(heap, sphere, ":spheres")?.as_slice() {
+                        [centre, radius, skin, rest @ ..] => {
+                            let centre = match numbers(heap, *centre, ":spheres")?.as_slice() {
+                                [x, y, z] => [*x, *y, *z],
+                                _ => return Err("a sphere's centre is not [x y z]".into()),
+                            };
+                            Ok(Sphere {
+                                centre,
+                                radius: number(heap, *radius, ":spheres")?,
+                                skin: skin_of(*skin, "a sphere's skin")?,
+                                deltas: match rest.first() {
+                                    None | Some(Value::Nil) => Vec::new(),
+                                    Some(deltas) => items(heap, *deltas, "a sphere's deltas")?
+                                        .into_iter()
+                                        .map(|delta| {
+                                            match numbers(heap, delta, "a sphere's deltas")?
+                                                .as_slice()
+                                            {
+                                                [target, x, y, z] if *target >= 0.0 => {
+                                                    Ok((*target as usize, [*x, *y, *z]))
+                                                }
+                                                _ => {
+                                                    Err("a sphere's delta is not [target dx dy dz]"
+                                                        .to_string())
+                                                }
+                                            }
+                                        })
+                                        .collect::<Result<Vec<_>, String>>()?,
+                                },
+                                pivot: match rest.get(1) {
+                                    None | Some(Value::Nil) => None,
+                                    Some(pivot) => {
+                                        match numbers(heap, *pivot, "a sphere's pivot")?.as_slice()
+                                        {
+                                            [x, y, z] => Some([*x, *y, *z]),
+                                            _ => {
+                                                return Err(
+                                                    "a sphere's pivot is not [x y z]".to_string()
+                                                );
+                                            }
+                                        }
+                                    }
+                                },
+                            })
+                        }
+                        _ => Err("a sphere is not [centre radius skin]".into()),
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let near = items(heap, field(heap, map, "near"), ":near")?
+                .into_iter()
+                .map(|indices| {
+                    numbers(heap, indices, ":near")?
+                        .into_iter()
+                        .map(|index| {
+                            let index = index as usize;
+                            if index < spheres.len() {
+                                Ok(index)
+                            } else {
+                                Err(format!(":near names sphere {index} of {}", spheres.len()))
+                            }
+                        })
+                        .collect::<Result<Vec<usize>, String>>()
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let rotations = items(heap, field(heap, map, "rotations"), ":rotations")?
+                .into_iter()
+                .map(
+                    |rotation| match numbers(heap, rotation, ":rotations")?.as_slice() {
+                        [x, y, z, w] => Ok([*x, *y, *z, *w]),
+                        _ => Err(":rotations is not [x y z w] a bone".to_string()),
+                    },
+                )
+                .collect::<Result<Vec<_>, String>>()?;
+            if skins.len() < rest.len() || near.len() < rest.len() {
+                return Err(format!(
+                    "a cord of {} points has {} skins and {} :near",
+                    rest.len(),
+                    skins.len(),
+                    near.len()
+                ));
+            }
+            if rest.len() >= 2 && rotations.len() + 1 < rest.len() {
+                return Err(format!(
+                    "a cord of {} points has {} :rotations",
+                    rest.len(),
+                    rotations.len()
+                ));
+            }
+            Ok(Cord {
+                rest,
+                skins,
+                near,
+                spheres,
+                rotations,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(fail)?;
+    let packed = crate::host::cords::pack(&cords, &inverse_binds, &constants);
+    Ok(heap.alloc_bytes(crate::core::blob::SharedBlob::new(&packed)))
+}
+
+thread_local! {
+    /// The cords last prepared from packed bytes, by the bytes' digest (ADR-843): the same bytes
+    /// are passed every frame, and reading them back with their sphere meshes is most of a
+    /// frame's work. A few kept, the newest first; the digest fully determines what it holds.
+    static PREPARED_CORDS: std::cell::RefCell<Vec<([u8; 32], std::rc::Rc<crate::host::cords::Prepared>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The cords prepared from `bytes` (digest `digest`), from the cache or read back now.
+fn prepared_cords(
+    digest: [u8; 32],
+    bytes: &[u8],
+) -> Result<std::rc::Rc<crate::host::cords::Prepared>, String> {
+    PREPARED_CORDS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(at) = cache.iter().position(|(key, _)| *key == digest) {
+            let entry = cache.remove(at);
+            let prepared = entry.1.clone();
+            cache.insert(0, entry);
+            return Ok(prepared);
+        }
+        let prepared = std::rc::Rc::new(crate::host::cords::prepare(bytes)?);
+        cache.insert(0, (digest, prepared.clone()));
+        cache.truncate(4);
+        Ok(prepared)
+    })
+}
+
+/// `(%cords-solved packed worlds key-weights)`
+fn cords_solved(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let who = "cords/solved";
+    let fail = |reason: String| LispError::runtime(format!("{who}: {reason}"));
+    let prepared = match arg(args, 0) {
+        Value::Bytes(id) => {
+            let blob = heap.bytes(id);
+            prepared_cords(blob.digest(), blob.as_bytes()).map_err(fail)?
+        }
+        _ => {
+            return Err(fail(
+                "the packed cords are not bytes (%cords-packed)".to_string(),
+            ));
+        }
+    };
+    let worlds = items(heap, arg(args, 1), "the worlds")
+        .and_then(|worlds| {
+            worlds
+                .into_iter()
+                .map(|world| matrix(heap, world, "a world matrix"))
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .map_err(fail)?;
+    let mut weights: Vec<f64> = Vec::new();
+    for pair in items(heap, arg(args, 2), "the key weights").map_err(fail)? {
+        match numbers(heap, pair, "the key weights")
+            .map_err(fail)?
+            .as_slice()
+        {
+            [target, weight] if *target >= 0.0 => {
+                let target = *target as usize;
+                if weights.len() <= target {
+                    weights.resize(target + 1, 0.0);
+                }
+                weights[target] = *weight;
+            }
+            _ => {
+                return Err(fail(
+                    "the key weights are not [[target weight] …]".to_string(),
+                ));
+            }
+        }
+    }
+    let solved = crate::host::cords::cords_solved(
+        &prepared.cords,
+        &prepared.meshes,
+        &worlds,
+        &prepared.inverse_binds,
+        &weights,
+        &prepared.constants,
+    );
+    let mut out = Vec::with_capacity(solved.len());
+    for (points, bones) in solved {
+        let points: Vec<Value> = points
+            .iter()
+            .map(|[x, y, z]| {
+                heap.alloc_vector(vec![Value::float(*x), Value::float(*y), Value::float(*z)])
+            })
+            .collect();
+        let points = heap.alloc_vector(points);
+        let bones: Vec<Value> = bones
+            .iter()
+            .map(|world| heap.alloc_vector(world.iter().map(|&n| Value::float(n)).collect()))
+            .collect();
+        let bones = heap.alloc_vector(bones);
+        out.push(heap.alloc_vector(vec![points, bones]));
+    }
+    Ok(heap.alloc_vector(out))
 }
 
 /// `(%hair-turned locks pose worlds base)`
@@ -418,7 +688,10 @@ fn items(heap: &Heap, value: Value, what: &str) -> Result<Vec<Value>, String> {
     match value {
         Value::Vector(id) => Ok(heap.vector(id).to_vec()),
         Value::Nil => Ok(Vec::new()),
-        _ => Err(format!("{what} is not a vector")),
+        // (a list too: `seq/keep` and `seq/filterv`'s cousins hand one back, and a cord's skin is one)
+        _ => heap
+            .list_items(value)
+            .ok_or_else(|| format!("{what} is not a vector or a list")),
     }
 }
 
