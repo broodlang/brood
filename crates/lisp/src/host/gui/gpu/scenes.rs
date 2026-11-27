@@ -1649,13 +1649,18 @@ impl MeshGpu {
                     } else {
                         0
                     }
-                    // (and 4096 when it was uploaded premultiplied, as a smooth texture is: its alpha
-                    // is the oil, so its other channels come back multiplied by it unless undone)
+                    // (and 4096 when it was uploaded premultiplied, as a smooth or coverage texture
+                    // is: its alpha is the oil, so its other channels come back multiplied by it
+                    // unless undone. A `:data` map, the one to use, is raw and never undone: where
+                    // its oil is 0 a premultiplied upload had lost its roughness outright, and
+                    // drew sharp glints there, b8 [aa6d3b] 2026-11-27)
                     | if material.surface == Surface::Skin
                         && material
                             .regions
                             .and_then(|handle| textures.get(&handle))
-                            .is_some_and(|texture| texture.filter != TextureFilter::Nearest)
+                            .is_some_and(|texture| {
+                                matches!(texture.filter, TextureFilter::Smooth | TextureFilter::Coverage)
+                            })
                     {
                         4096
                     } else {
