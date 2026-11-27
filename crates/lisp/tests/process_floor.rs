@@ -77,7 +77,14 @@
 
 use brood::Interp;
 
-const FLOOR_BYTES: i64 = 2620;
+//
+// Raised 2 620 → 2 640 (2026-11-27, later): 2 620 came from ONE reading of 2 586, and the
+// reading moves by about ±15 B from run to run on one binary (three runs of main read 2 601,
+// 2 610 and 2 609 that evening, other changes having landed since). The nursery's small-vector
+// arena adds one pointer to every process's slabs (`VecArena`, boxed so an unused one is that
+// pointer alone): three runs read 2 630, 2 608 and 2 617. Read three times before moving this.
+
+const FLOOR_BYTES: i64 = 2640;
 
 #[test]
 fn a_parked_process_costs_no_more_than_the_floor() {

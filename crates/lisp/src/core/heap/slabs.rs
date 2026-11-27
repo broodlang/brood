@@ -72,6 +72,101 @@ pub(crate) enum VecStore {
         len: u64,
         buf: Arc<AppendBuf>,
     },
+    /// `len` elements in the [`VecArena`] of the [`Slabs`] this store sits in: a vector made
+    /// in the nursery, its buffer bumped off the arena with no `malloc` and given back with
+    /// no `free` when the nursery's slabs are dropped. `ptr` and `len` sit where `Spill`'s
+    /// do, so the JIT reads all three the same way.
+    ///
+    /// It never leaves its `Slabs`: a collection copies a survivor's elements into a store
+    /// of the destination's own (`flush_vector`), a clone is a `Spill` (`Clone`), and the
+    /// arena is cut back with the slab (`Heap::reset_local_to`).
+    #[allow(dead_code)]
+    Arena { ptr: *const Value, len: u64 },
+}
+
+/// The buffers of a nursery's small vectors (`VecStore::Arena`): chunks bumped through and
+/// dropped whole with the [`Slabs`] that owns them.
+///
+/// A point `[x y z]`, a quaternion, a 4×4 matrix: longer than a slab slot holds inline, so
+/// each was a `malloc` when made and a `free` when its nursery was dropped, for a vector
+/// that mostly dies before its first collection (a 3D game makes tens of thousands a frame;
+/// inlining four items in EVERY slot instead cost the rows that hold many small vectors).
+/// The chunks start small and double, so a process that makes one such vector pays for
+/// sixteen items, not a page.
+///
+/// One pointer until the first vector is bumped (`Chunks` is boxed): every green process
+/// carries a `Slabs`, most make no such vector, and its size is the floor a parked process
+/// costs (`tests/process_floor.rs`).
+#[derive(Default)]
+pub(super) struct VecArena {
+    state: Option<Box<Chunks>>,
+}
+
+#[derive(Default)]
+struct Chunks {
+    chunks: Vec<Box<[std::mem::MaybeUninit<Value>]>>,
+    /// Items handed out of the last chunk.
+    used: usize,
+}
+
+impl VecArena {
+    /// The longest vector the arena holds; a longer one has a buffer of its own (`Spill`).
+    pub(super) const MAX_ITEMS: usize = 32;
+    const FIRST_CHUNK: usize = 16;
+    const LARGEST_CHUNK: usize = 4096;
+
+    /// Room for `len` items, uninitialised: the caller writes every one before the vector
+    /// over them is visible. The pointer holds until the arena is dropped or cut back past
+    /// it (`reset_to`); chunks never move.
+    #[inline]
+    pub(super) fn alloc(&mut self, len: usize) -> *mut Value {
+        let arena = self.state.get_or_insert_with(Box::default);
+        if let Some(chunk) = arena.chunks.last_mut()
+            && chunk.len() - arena.used >= len
+        {
+            // SAFETY: `used + len <= chunk.len()`, so the offset stays inside the chunk.
+            let at = unsafe { chunk.as_mut_ptr().add(arena.used) };
+            arena.used += len;
+            return at.cast();
+        }
+        arena.grow(len)
+    }
+
+    /// Where the arena stands, for [`Self::reset_to`].
+    #[inline]
+    pub(super) fn mark(&self) -> (usize, usize) {
+        self.state
+            .as_ref()
+            .map_or((0, 0), |arena| (arena.chunks.len(), arena.used))
+    }
+
+    /// Give back everything bumped since `mark`. The vectors over it must be gone already.
+    pub(super) fn reset_to(&mut self, mark: (usize, usize)) {
+        if let Some(arena) = self.state.as_mut()
+            && mark.0 <= arena.chunks.len()
+        {
+            arena.chunks.truncate(mark.0);
+            arena.used = if mark.0 == 0 { 0 } else { mark.1 };
+        }
+    }
+}
+
+impl Chunks {
+    #[cold]
+    fn grow(&mut self, len: usize) -> *mut Value {
+        let size = self
+            .chunks
+            .last()
+            .map_or(VecArena::FIRST_CHUNK, |chunk| {
+                (chunk.len() * 2).min(VecArena::LARGEST_CHUNK)
+            })
+            .max(len);
+        let mut chunk = Box::<[Value]>::new_uninit_slice(size);
+        let at = chunk.as_mut_ptr();
+        self.chunks.push(chunk);
+        self.used = len;
+        at.cast()
+    }
 }
 
 /// The buffer a [`VecStore::Shared`] vector reads its elements from (ADR-511): a `Vec`
@@ -167,6 +262,8 @@ impl Clone for VecStore {
             // A copy of its own elements: a clone may land in another heap, and an append
             // buffer never leaves the one it was made in (`AppendBuf`).
             VecStore::Shared { .. } => VecStore::spill(self.as_slice().to_vec()),
+            // As `Shared`: the arena stays with the slabs it was bumped from.
+            VecStore::Arena { .. } => VecStore::spill(self.as_slice().to_vec()),
         }
     }
 }
@@ -180,6 +277,9 @@ impl VecStore {
         match self {
             VecStore::Spill { vec, .. } => vec.capacity() * std::mem::size_of::<Value>(),
             VecStore::Shared { buf, .. } => buf.capacity() * std::mem::size_of::<Value>(),
+            // (its share of the arena: the collector's byte trigger counts it as it would
+            // the buffer it stands in for)
+            VecStore::Arena { len, .. } => *len as usize * std::mem::size_of::<Value>(),
             VecStore::Inline { .. } => 0,
         }
     }
@@ -249,6 +349,11 @@ impl VecStore {
             VecStore::Shared { ptr, len, .. } => unsafe {
                 std::slice::from_raw_parts(*ptr, *len as usize)
             },
+            // SAFETY: `ptr` is `len` written items in the arena of the slabs this store
+            // sits in, which outlives it (`VecArena`).
+            VecStore::Arena { ptr, len } => unsafe {
+                std::slice::from_raw_parts(*ptr, *len as usize)
+            },
         }
     }
 
@@ -269,6 +374,10 @@ impl VecStore {
             // SAFETY: as in `as_slice`, and `Arc::get_mut` above found no other holder, so
             // nothing else reads these elements.
             VecStore::Shared { ptr, len, .. } => unsafe {
+                std::slice::from_raw_parts_mut(*ptr as *mut Value, *len as usize)
+            },
+            // SAFETY: as in `as_slice`; one store reads each run of the arena.
+            VecStore::Arena { ptr, len } => unsafe {
                 std::slice::from_raw_parts_mut(*ptr as *mut Value, *len as usize)
             },
         }
@@ -303,6 +412,9 @@ impl VecStore {
     /// `ptr` and `len` sit at the same offsets (ADR-511).
     #[cfg(feature = "jit")]
     pub(crate) const JIT_SHARED_TAG: i64 = 2;
+    /// Discriminant value that means `Arena`, pointer-readable as `Spill` and `Shared` are.
+    #[cfg(feature = "jit")]
+    pub(crate) const JIT_ARENA_TAG: i64 = 3;
     /// `Spill.ptr` byte offset within a slot (u8 tag, padded to the pointer's align).
     #[cfg(feature = "jit")]
     pub(crate) const JIT_SPILL_PTR_OFF: i32 = 8;
@@ -318,6 +430,7 @@ impl VecStore {
 const _: () = assert!(
     VecStore::JIT_INLINE_TAG < VecStore::JIT_SPILL_TAG
         && VecStore::JIT_SPILL_TAG < VecStore::JIT_SHARED_TAG
+        && VecStore::JIT_SHARED_TAG < VecStore::JIT_ARENA_TAG
 );
 
 impl std::ops::Deref for VecStore {
@@ -403,6 +516,8 @@ impl<T> std::ops::DerefMut for LazyVec<T> {
 pub(super) struct Slabs {
     pub(super) pairs: Vec<(Value, Value)>,
     pub(super) vectors: Vec<VecStore>,
+    /// The buffers of the `VecStore::Arena` vectors in `vectors`, and of no other slabs'.
+    pub(super) vec_arena: VecArena,
     /// Maps as a flat slab of CHAMP nodes (ADR-040). Each [`MapNode`] is
     /// either a branch (two bitmaps + packed data/children arrays) or a
     /// max-depth collision leaf. The handle in `Value::Map(MapId)` points
@@ -479,6 +594,7 @@ impl Slabs {
         Slabs {
             pairs: Vec::with_capacity(like.pairs.len()),
             vectors: Vec::with_capacity(like.vectors.len()),
+            vec_arena: VecArena::default(),
             maps: Vec::with_capacity(like.maps.len()),
             strings: Vec::with_capacity(like.strings.len()),
             bigints: LazyVec::with_capacity(like.bigints.len()),

@@ -3377,3 +3377,18 @@ found on the way is fixed: an error raised under native code keeps its position 
 7cdd9009e). Left open: the fuller lift wants the receive-host check to see callees not yet
 compiled (`arm_hosts_receive`; a version that reads the shared cache is on branch
 `perf/lift-call-gate`'s history), and the spawn rows are not in `ab`'s default set.
+
+2026-11-27. **A nursery's small vectors take their room from an arena; the computed-call memo
+holds 32.** A vector of three to 32 items (a point, a quaternion, a 4×4 matrix) had a buffer
+of its own: a `malloc` when made, a `free` when its nursery was dropped, for a value that
+mostly dies before its first collection. `VecStore::Arena` takes its items from chunks of the
+nursery's own `VecArena`, bumped through and dropped whole with the slabs; a collection copies
+a survivor into the destination's arena (`flush_vector`), a clone or a promotion copies the
+items out, and `reset_local_to` cuts the arena back with the slab. Inlining four items in
+EVERY slot instead (tried the same day) cost `collatz` 10% and `bintree` 4%. The arena is boxed,
+so a process that makes no such vector carries one pointer for it. And the computed-call memo
+is 32 slots, not 8: every function native code reaches by a tail call is resolved through it
+since d9c8d1d75, and eight direct-mapped slots thrashed. womanblend's serial tick 95.5 → 89.1
+million instructions (three runs each, ±1.5); CI's `ab`: nbody −8.1%, no row slower.
+`process_floor`'s floor 2 620 → 2 640: set that afternoon from ONE reading, the probe moves by
+±15 B between runs, main reads 2 601–2 610, and the arena's pointer adds 8.

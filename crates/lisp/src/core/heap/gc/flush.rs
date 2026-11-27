@@ -419,6 +419,26 @@ pub(super) fn flush_vector(
                 }
             }
         },
+        // A vector in the source's arena goes into the destination's: its items are copied
+        // out of an arena dropped with the source slabs. Room first, then each item flushed
+        // into it — the flushes may bump more of the arena, whose chunks never move.
+        VecStore::Arena { ptr, len } => {
+            let len = len as usize;
+            let room = new.vec_arena.alloc(len);
+            for i in 0..len {
+                // SAFETY: `ptr` holds `len` written items of the source arena, alive until
+                // the source slabs are dropped after the collection; `room` is `len` items
+                // of the destination's arena, written once each here.
+                unsafe {
+                    let x = *ptr.add(i);
+                    room.add(i).write(flush_value(old, new, forward, x));
+                }
+            }
+            VecStore::Arena {
+                ptr: room,
+                len: len as u64,
+            }
+        }
         inline => {
             let items = inline.as_slice();
             VecStore::from_flushed(items.len(), |i| flush_value(old, new, forward, items[i]))

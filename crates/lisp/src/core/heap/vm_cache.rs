@@ -78,7 +78,10 @@ impl VmCacheCell {
 
 /// Slots in the computed-call memo. A power of two (the slot is a mask of the key).
 #[cfg(feature = "jit")]
-const COMPUTED_CALL_SLOTS: usize = 8;
+// (32: every function a native arm reaches by a tail call is resolved here too, since
+// d9c8d1d75, and eight slots thrashed between them: a 3D game's tick 2% heavier. The memo is
+// allocated at its first entry, so a process that makes no such call pays nothing.)
+const COMPUTED_CALL_SLOTS: usize = 32;
 
 #[cfg(feature = "jit")]
 type ComputedCalls = [Option<ComputedCallEntry>; COMPUTED_CALL_SLOTS];
