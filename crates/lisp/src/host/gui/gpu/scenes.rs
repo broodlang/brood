@@ -1431,6 +1431,18 @@ impl MeshGpu {
                         2048
                     } else {
                         0
+                    }
+                    // (and 4096 when it was uploaded premultiplied, as a smooth texture is: its alpha
+                    // is the oil, so its other channels come back multiplied by it unless undone)
+                    | if material.surface == Surface::Skin
+                        && material
+                            .regions
+                            .and_then(|handle| textures.get(&handle))
+                            .is_some_and(|texture| texture.filter != TextureFilter::Nearest)
+                    {
+                        4096
+                    } else {
+                        0
                     };
                 // its morphs blended here, sparse, into one offset a vertex (none when no target
                 // it names moves anything, or the frame's offsets would pass the binding limit)

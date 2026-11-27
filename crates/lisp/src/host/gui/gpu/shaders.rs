@@ -2555,7 +2555,8 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     // tile's strength (stored over two: 0.5 is the material's); its oil, which scales the coat (the
     // body's 0.3 is the material's)
     if ((draw.flags.y & 2048u) != 0u) {
-        let regions = textureSample(regions_texture, texture_sampler, fragment.uv);
+        // (un-premultiplied: its alpha is the oil, bit 4096)
+        let regions = straight(textureSample(regions_texture, texture_sampler, fragment.uv), (draw.flags.y & 4096u) != 0u);
         region = vec4<f32>(regions.x, max(1.0 + (0.7 - regions.y) * 1.5, 0.0), regions.z * 2.0, regions.w / 0.3);
     }
     // the texture's footprint at this pixel, for an eye's second read (taken before any branch)
