@@ -748,7 +748,9 @@ struct ContactList {
 };
 @group(3) @binding(8) var<storage, read> mesh_vertices: array<f32>;
 @group(3) @binding(9) var<uniform> contact_list: ContactList;
-@group(3) @binding(10) var<storage, read_write> contact_depths: array<atomic<u32>, 64>;
+@group(3) @binding(10) var<storage, read_write> contact_depths: array<atomic<u32>, 65>;
+// (its 65th: how many garment vertices the push-out net moved this frame, ADR-839)
+const PUSH_OUT_COUNTER: u32 = 64u;
 @group(3) @binding(11) var<storage, read_write> posed_out: array<vec4<f32>>;
 @group(3) @binding(12) var<storage, read> mesh_softness: array<f32>;
 
@@ -819,6 +821,16 @@ fn contact_skipped(slot: u32, input: VertexIn) -> bool {
     }
     return own > 0.5 || (only.x >= 0.0 && one <= 0.5);
 }
+
+// whether contact `slot` is a garment's (`:garment`, ADR-839, in its drag's fourth float): it pushes
+// `:garment` draws out of her and presses nothing else
+fn contact_garment(slot: u32) -> bool {
+    return contact_list.shapes[slot * 6u + 2u].w > 0.5;
+}
+
+// `mesh::GARMENT_MARGIN`: how far outside a garment contact the push-out net leaves a garment's
+// vertex, metres (ADR-839)
+const GARMENT_MARGIN: f32 = 0.0005;
 
 // `mesh::within_weight`: how much contact `slot` acts at `point`, on its `:within` side only,
 // eased in over `WITHIN_BAND` (ADR-816); everywhere when it has none (all zero)
@@ -899,7 +911,7 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         // (stopping its standoff short of the surface, ADR-824)
         let distance = contact_distance(slot, world).w - input.standoff;
-        if (distance < 0.0 && !contact_skipped(slot, input)) {
+        if (distance < 0.0 && !contact_skipped(slot, input) && !contact_garment(slot)) {
             // (as far as it acts there: its `:within` side, ADR-816)
             atomicMax(&contact_depths[slot], bitcast<u32>(-distance * contact_within(slot, world)));
         }
@@ -1079,7 +1091,8 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
     let input = vertex_at(id.x);
     let count = min(contact_list.count.x, 64u);
     for (var slot = 0u; slot < count; slot = slot + 1u) {
-        if (contact_skipped(slot, input)) {
+        // (a garment's contact pushes garments out, never her skin in, ADR-839)
+        if (contact_skipped(slot, input) || contact_garment(slot)) {
             continue;
         }
         // (as far as skin can be squashed, never a raw depth: `mesh::deform_by_contacts`)
@@ -1130,6 +1143,38 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
     posed_out[at] = vec4<f32>(point, 1.0);
     posed_out[at + 1u] = vec4<f32>(normal, 0.0);
     posed_out[at + 2u] = vec4<f32>(safe_normalize(tangent.xyz - normal * dot(normal, tangent.xyz)), tangent.w);
+}
+// ADR-839: the push-out net. A `:garment` draw's vertex found closer to one of the garment contacts
+// (her skin's spheres and capsules) than `GARMENT_MARGIN` is moved out to it along the contact's
+// own normal there, and counted: a safety net, never the fit, every use a fault the probes report
+// (`gui/scene-push-outs`). The last contact step; any other draw returns at once
+@compute @workgroup_size(64)
+fn cs_garment_push_out(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= draw.deform.w || (draw.flags.y & 8192u) == 0u) {
+        return;
+    }
+    let at = (draw.deform.y + id.x) * 3u;
+    var point = posed_out[at].xyz;
+    var pushed = false;
+    let count = min(contact_list.count.x, 64u);
+    for (var slot = 0u; slot < count; slot = slot + 1u) {
+        if (!contact_garment(slot)) {
+            continue;
+        }
+        let weight = contact_within(slot, point);
+        if (weight <= 0.0) {
+            continue;
+        }
+        let reached = contact_distance(slot, point);
+        if (reached.w < GARMENT_MARGIN) {
+            point = point + reached.xyz * (GARMENT_MARGIN - reached.w) * weight;
+            pushed = true;
+        }
+    }
+    if (pushed) {
+        posed_out[at] = vec4<f32>(point, 1.0);
+        atomicAdd(&contact_depths[PUSH_OUT_COUNTER], 1u);
+    }
 }
 @group(3) @binding(0) var base_texture: texture_2d<f32>;
 @group(3) @binding(1) var normal_texture: texture_2d<f32>;

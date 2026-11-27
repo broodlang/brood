@@ -1151,6 +1151,9 @@ pub struct Material {
     pub sheen_cloth: Option<[f32; 4]>,
     /// Its skin pressed by the scene's contacts (`:deform`, ADR-805).
     pub deform: bool,
+    /// A garment (`:garment`, ADR-839): with `deform`, its vertices pushed out of the scene's garment
+    /// contacts (her skin) on the GPU, each use counted as a fault (`gui/scene-push-outs`).
+    pub garment: bool,
     /// A `:fibres` surface (ADR-813): a `:strands` mesh at its real width, its coverage of a
     /// pixel worked out exactly and blended, the three nearest layers a pixel lit (TressFX
     /// ShortCut). The GPU painter alone draws it so; the CPU painter draws it as `:strands`.
@@ -1210,6 +1213,7 @@ impl Default for Material {
             surroundings: None,
             sheen_cloth: None,
             deform: false,
+            garment: false,
             fibres: false,
             clamp_planes: Vec::new(),
             fibre_density: 0.4,
@@ -1522,7 +1526,14 @@ pub struct Scene {
     /// `n · p > d` and faded in over [`WITHIN_BAND`]; all zero (or none): everywhere. A plane
     /// through her knee pressing only behind it, not over her kneecap. One a contact, or none.
     pub contact_withins: Vec<[f32; 4]>,
+    /// Whether each contact is a garment's (`:garment`, ADR-839): one of her skin's spheres and
+    /// capsules that pushes `:garment` draws out of her (the push-out net) and presses nothing
+    /// else, her skin never. One a contact, or none (no garment contacts).
+    pub contact_garments: Vec<bool>,
 }
+
+/// How far outside a garment contact the push-out net leaves a garment's vertex, metres (ADR-839)
+pub const GARMENT_MARGIN: f32 = 0.0005;
 
 /// The most contacts a scene presses its skin with (ADR-805). 64 since ADR-810: womanblend's
 /// room takes 4 and her two arms 42 (a forearm and twenty hand bones each), and at 16 the
@@ -5330,6 +5341,17 @@ fn press_posed(scene: &Scene, posed: &mut [Posed]) {
         return;
     }
     let contacts = &scene.contacts[..scene.contacts.len().min(MAX_CONTACTS)];
+    // (a garment's contacts push garments out on the GPU and press no skin here: the frozen CPU
+    // painter skips them, ADR-839)
+    let garments = scene
+        .contact_garments
+        .iter()
+        .take(MAX_CONTACTS)
+        .enumerate()
+        .fold(
+            0u64,
+            |mask, (slot, &garment)| if garment { mask | (1u64 << slot) } else { mask },
+        );
     // each contact's deepest press, over the soft skin it does press (not its own limb's)
     let mut depths = vec![0.0f32; contacts.len()];
     for item in posed.iter().filter(|item| pressed(item.draw)) {
@@ -5342,7 +5364,7 @@ fn press_posed(scene: &Scene, posed: &mut [Posed]) {
                 index,
                 &scene.contact_skips,
                 &scene.contact_onlys,
-            );
+            ) | garments;
             for (slot, (depth, contact)) in depths.iter_mut().zip(contacts).enumerate() {
                 if skipped & (1u64 << slot) == 0 {
                     // (as far as it acts there: its `:within` side, ADR-816)
@@ -5370,7 +5392,7 @@ fn press_posed(scene: &Scene, posed: &mut [Posed]) {
                     index,
                     &scene.contact_skips,
                     &scene.contact_onlys,
-                ),
+                ) | garments,
             );
             let tangent = [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]];
             let square = normalize(
@@ -5660,6 +5682,7 @@ mod tests {
             contacts: Vec::new(),
             contact_drags: Vec::new(),
             contact_skips: Vec::new(),
+            contact_garments: Vec::new(),
             contact_onlys: Vec::new(),
             contact_withins: Vec::new(),
             draws: vec![draw],

@@ -1860,6 +1860,8 @@ fn scene_spec(
             matches!(get(material_map, "double-sided"), Some(Value::Bool(true)));
         // its skin pressed by the scene's `:contacts` (ADR-805)
         material.deform = matches!(get(material_map, "deform"), Some(Value::Bool(true)));
+        // a garment (ADR-839): with `:deform`, pushed out of the scene's garment contacts
+        material.garment = matches!(get(material_map, "garment"), Some(Value::Bool(true)));
         // a `:fibres` surface's `:density`: how much of its baked hair count dims its light (a
         // number from 0; 0.4 without it); refused when not, as a wrong one would light hair
         // wrongly without a word
@@ -2136,6 +2138,8 @@ fn scene_spec(
     let mut contact_onlys = Vec::new();
     // and the side of a plane each acts on (`:within [px py pz nx ny nz]`, ADR-816), or everywhere
     let mut contact_withins = Vec::new();
+    // and whether each is a garment's (`:garment true`, ADR-839): it pushes garments out of her skin
+    let mut contact_garments = Vec::new();
     if let Some(given) = get(map, "contacts") {
         let Value::Vector(list) = given else {
             return Err(":contacts is a vector of contact maps".into());
@@ -2175,6 +2179,7 @@ fn scene_spec(
                 }
             }
             contact_onlys.push(only);
+            contact_garments.push(matches!(get(contact, "garment"), Some(Value::Bool(true))));
             contact_withins.push(match numbers(get(contact, "within"), 6) {
                 None => [0.0; 4],
                 Some(within) => {
@@ -2241,6 +2246,7 @@ fn scene_spec(
         contact_skips,
         contact_onlys,
         contact_withins,
+        contact_garments,
     }))
 }
 
@@ -3494,6 +3500,20 @@ pub(in crate::builtins) fn gui_scene_gpu_times(
     Ok(heap.alloc_vector(maps))
 }
 
+/// `(%gui-scene-push-outs)` — how many garment vertices the push-out net moved on recent frames
+/// (ADR-839), oldest first.
+pub(in crate::builtins) fn gui_scene_push_outs(
+    _: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let counts = crate::host::gui::scene_push_outs::scene_push_outs()
+        .into_iter()
+        .map(|count| Value::int(i64::try_from(count).unwrap_or(i64::MAX)))
+        .collect();
+    Ok(heap.alloc_vector(counts))
+}
+
 pub(in crate::builtins) fn gui_windows(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let ids = crate::host::gui::window_ids()
         .into_iter()
@@ -4585,6 +4605,23 @@ mod gui_scene_light_tests {
         );
         let plain = scene_with("[]", "{}").expect("a scene");
         assert_eq!(plain.draws[0].material.sheen_cloth, None);
+    }
+
+    #[test]
+    fn a_garments_contacts_and_draws_are_read_and_packed() {
+        // ADR-839: `:garment` on a contact and on a material; the contact's flag in its drag's
+        // fourth float, the material's as texture bit 8192 (the GPU push-out net reads both)
+        let scene = scene_keyed(
+            "[]",
+            "{:deform true :garment true}",
+            ":contacts [{:sphere [0 1 0 0.1] :garment true} {:sphere [0 2 0 0.1]}]",
+        )
+        .expect("a scene");
+        assert_eq!(scene.contact_garments, vec![true, false]);
+        assert!(scene.draws[0].material.garment && scene.draws[0].material.deform);
+        let plain = scene_keyed("[]", "{}", ":contacts [{:sphere [0 1 0 0.1]}]").expect("a scene");
+        assert_eq!(plain.contact_garments, vec![false]);
+        assert!(!plain.draws[0].material.garment);
     }
 
     #[test]

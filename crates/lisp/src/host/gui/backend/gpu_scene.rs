@@ -68,6 +68,7 @@ fn scene() -> Scene {
         contacts: Vec::new(),
         contact_drags: Vec::new(),
         contact_skips: Vec::new(),
+        contact_garments: Vec::new(),
         contact_onlys: Vec::new(),
         contact_withins: Vec::new(),
         draws: vec![Draw {

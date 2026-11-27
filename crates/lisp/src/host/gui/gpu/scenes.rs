@@ -242,7 +242,7 @@ struct ContactTarget {
 /// A scene's `:contacts` as the shader's `ContactList` holds them (ADR-805): how many, then six
 /// vec4 each (the third its `:drag`, the fourth its `:skip` joints, the fifth its `:only`, the sixth its `:within`), `[x y z kind]` and `[x y z w]`: a plane's normal and offset (kind 0), a sphere's
 /// centre and radius (1), a capsule's start, end and radius (2).
-fn contact_words(scene: &Scene) -> Vec<u8> {
+pub(super) fn contact_words(scene: &Scene) -> Vec<u8> {
     use crate::host::gui::mesh::{Contact, MAX_CONTACTS};
     let contacts = &scene.contacts[..scene.contacts.len().min(MAX_CONTACTS)];
     let mut bytes = words_bytes(&[contacts.len() as u32, 0, 0, 0]);
@@ -268,6 +268,10 @@ fn contact_words(scene: &Scene) -> Vec<u8> {
         // the third: how far it drags the skin it presses along its surface
         if let Some(drag) = scene.contact_drags.get(slot) {
             floats[at + 8..at + 11].copy_from_slice(drag);
+        }
+        // (and its fourth: 1 for a garment's contact, the push-out net's, ADR-839)
+        if scene.contact_garments.get(slot).copied().unwrap_or(false) {
+            floats[at + 11] = 1.0;
         }
         // the fourth: its own limb's joints, whose skin it never presses (-1: none)
         let skip = scene
@@ -357,6 +361,8 @@ pub(super) struct MeshGpu {
     contact_layout: wgpu::BindGroupLayout,
     contact_depth_pipeline: wgpu::ComputePipeline,
     contact_deform_pipeline: wgpu::ComputePipeline,
+    /// The push-out net (ADR-839): a garment's vertices moved out of her skin's garment contacts.
+    garment_push_out_pipeline: wgpu::ComputePipeline,
     /// The relax passes (ADR-822): gather, mask, even, odd, scatter.
     contact_relax_pipelines: [wgpu::ComputePipeline; 5],
     no_ring: wgpu::Buffer,
@@ -392,6 +398,8 @@ pub(super) struct MeshGpu {
     pub(super) targets: Vec<SceneTarget>,
     /// The scene passes' timestamps where the device has them (ADR-801).
     pub(super) timer: Option<super::scene_timer::SceneTimer>,
+    /// The push-out net's count read back (ADR-839).
+    pub(super) push_outs: super::push_outs::PushOutReader,
 }
 
 fn floats_bytes(values: &[f32]) -> Vec<u8> {
@@ -1135,6 +1143,8 @@ impl MeshGpu {
         };
         let contact_depth_pipeline = contact_pipeline("cs_contact_depth");
         let contact_deform_pipeline = contact_pipeline("cs_contact_deform");
+        // (and the push-out net for garments, last, ADR-839)
+        let garment_push_out_pipeline = contact_pipeline("cs_garment_push_out");
         let contact_relax_pipelines = [
             contact_pipeline("cs_relax_gather"),
             contact_pipeline("cs_relax_mask"),
@@ -1153,6 +1163,7 @@ impl MeshGpu {
             contact_layout,
             contact_depth_pipeline,
             contact_deform_pipeline,
+            garment_push_out_pipeline,
             contact_relax_pipelines,
             no_posed,
             no_ring,
@@ -1210,6 +1221,7 @@ impl MeshGpu {
             meshes: HashMap::new(),
             targets: Vec::new(),
             timer: super::scene_timer::SceneTimer::new(device, queue),
+            push_outs: super::push_outs::PushOutReader::new(device),
         }
     }
 
@@ -1665,7 +1677,9 @@ impl MeshGpu {
                         4096
                     } else {
                         0
-                    };
+                    }
+                    // (and 8192 for a garment, its vertices pushed out of her skin, ADR-839)
+                    | if material.garment { 8192 } else { 0 };
                 // its morphs blended here, sparse, into one offset a vertex (none when no target
                 // it names moves anything, or the frame's offsets would pass the binding limit)
                 let vertex_count = mesh.vertex_count as usize;
@@ -1829,8 +1843,9 @@ impl MeshGpu {
                         depths: buffer(
                             device,
                             "contact depths",
-                            crate::host::gui::mesh::MAX_CONTACTS as u64 * 4,
-                            storage,
+                            // (and the push-out net's count after them, ADR-839)
+                            (crate::host::gui::mesh::MAX_CONTACTS as u64 + 1) * 4,
+                            storage | wgpu::BufferUsages::COPY_SRC,
                         ),
                     });
                 }
@@ -1919,6 +1934,7 @@ impl MeshGpu {
         if let Some(timer) = &mut self.timer {
             timer.begin_frame(device);
         }
+        self.push_outs.begin_frame(device);
         for (index, scene) in scenes.iter().enumerate() {
             // the material bind groups this scene's draws sample
             let materials: Vec<wgpu::BindGroup> = scene
@@ -2091,6 +2107,8 @@ impl MeshGpu {
                 steps.push((scatter, false));
                 steps.push((&self.contact_deform_pipeline, false));
                 let last = steps.len() - 1;
+                // (then the push-out net: a garment's vertices, every other draw returning at once)
+                steps.push((&self.garment_push_out_pipeline, false));
                 for (step, (pipeline, by_point)) in steps.iter().enumerate() {
                     let relaxing = step > 0 && step < last;
                     pass.set_pipeline(pipeline);
@@ -2106,6 +2124,9 @@ impl MeshGpu {
                         pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
                     }
                 }
+                drop(pass);
+                // (the push-out net's count, read back at a later frame, ADR-839)
+                self.push_outs.copy(encoder, &contacts.depths);
             }
             // the shadow maps: every casting draw, once a view, the view by instance index, into
             // the layer of the array its `map` names (ADR-800)
@@ -2585,6 +2606,7 @@ impl MeshGpu {
         if let Some(timer) = &mut self.timer {
             timer.end_frame(encoder);
         }
+        self.push_outs.end_frame();
     }
 }
 
@@ -2888,11 +2910,10 @@ fn scene_uniform(
     bytes
 }
 
-/// How many bytes [`scene_uniform`] fills before its padding, for the test that holds it to
-/// the shader's `SceneU`.
+/// A scene with nothing in it, for the tests to fill what they need.
 #[cfg(test)]
-pub(super) fn scene_uniform_len() -> usize {
-    let scene = Scene {
+pub(super) fn bare_scene() -> Scene {
+    Scene {
         x: 0.0,
         y: 0.0,
         w: 1.0,
@@ -2911,10 +2932,17 @@ pub(super) fn scene_uniform_len() -> usize {
         contacts: Vec::new(),
         contact_drags: Vec::new(),
         contact_skips: Vec::new(),
+        contact_garments: Vec::new(),
         contact_onlys: Vec::new(),
         contact_withins: Vec::new(),
         draws: Vec::new(),
-    };
+    }
+}
+
+/// How many bytes [`scene_uniform`] fills before its padding (the shader's `SceneU`).
+#[cfg(test)]
+pub(super) fn scene_uniform_len() -> usize {
+    let scene = bare_scene();
     scene_words(
         &scene,
         &shadow_plan(&scene, None),

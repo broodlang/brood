@@ -1595,6 +1595,9 @@ pub mod centres;
 // the GPU's own time on a frame's scenes, empty where nothing measures it (ADR-801)
 pub mod scene_gpu_times;
 
+// the push-out net's uses, a frame's garment vertices pushed out of her skin (ADR-839)
+pub mod scene_push_outs;
+
 #[cfg(feature = "gui-gpu")]
 pub(crate) mod gpu; // the wgpu render target behind `BROOD_GUI_GPU=1`
 

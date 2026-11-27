@@ -140,6 +140,12 @@
     (vector? (gui/scene-gpu-times))   ;=> true"
   (%gui-scene-gpu-times))
 
+(defn scene-push-outs ()
+  "How many garment vertices the push-out net moved out of her skin on recent frames, oldest first (at most 256): a `:garment` draw's vertices found inside a `:garment` contact (her skin's spheres and capsules), counted on the GPU and read back a frame or two later. A safety net, never the fit: every count above 0 is a fault in the garment's build, for the clip probe and the gate. Empty where nothing counts: the CPU painter, a scene with no garment (ADR-839).
+
+    (vector? (gui/scene-push-outs))   ;=> true"
+  (%gui-scene-push-outs))
+
 (def- *empty-latency* {:count 0 :max-us 0 :buckets {}})
 
 (defn latency-merge (a b)

@@ -171,6 +171,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "How long the GPU itself took on the 3D scenes of recent frames, oldest first (at most 64), each a map of milliseconds: :shadow (from the start of the first shadow-map pass to the end of the last) and :scene (the colour pass: rasterising, shading, the multisample resolve), summed over the frame's scenes, with :scenes, how many were timed (at most 4). Read from the card's timestamp queries a few frames after the frame they measure, so nothing waits on it. Empty where nothing measures: the CPU painter, an adapter without timestamp queries, BROOD_GUI_GPU_TIMES=0. One log for the process. BROOD_GUI_TRACE=1 prints the newest beside each paint line. ADR-801.",
         gui_scene_gpu_times);
     primitives.def(
+        "%gui-scene-push-outs",
+        Arity::exact(0),
+        Sig::new(vec![], vec_ty),
+        &[],
+        "How many garment vertices the push-out net moved out of her skin on recent frames, oldest first (at most 256): a :garment draw's vertices found inside a :garment contact, counted on the GPU and read back a frame or two later. A safety net, never the fit: every count above 0 is a fault in the garment, for the clip probe and the gate. Empty where nothing counts: the CPU painter, a scene with no garment. One log for the process. ADR-839.",
+        gui_scene_push_outs);
+    primitives.def(
         "%gui-key-repeat?",
         Arity::exact(1),
         Sig::new(vec![int], bool_ty),

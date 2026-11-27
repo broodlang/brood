@@ -110,14 +110,18 @@ fn the_mesh_shader_validates() {
     // vec4 a contact), and both loops bounded by it — the WGSL spells them as literals
     use crate::host::gui::mesh::MAX_CONTACTS;
     assert!(MESH_SRC.contains(&format!("shapes: array<vec4<f32>, {}>", MAX_CONTACTS * 6)));
+    // (and one word more: the push-out net's count after the depths, ADR-839)
     assert!(MESH_SRC.contains(&format!(
-        "contact_depths: array<atomic<u32>, {MAX_CONTACTS}>"
+        "contact_depths: array<atomic<u32>, {}>",
+        MAX_CONTACTS + 1
     )));
+    assert!(MESH_SRC.contains(&format!("const PUSH_OUT_COUNTER: u32 = {MAX_CONTACTS}u;")));
     assert_eq!(
         MESH_SRC
             .matches(&format!("min(contact_list.count.x, {MAX_CONTACTS}u)"))
             .count(),
-        2
+        // (the depth pass, the press, and the push-out net, ADR-839)
+        3
     );
     let module = wgpu::naga::front::wgsl::parse_str(MESH_SRC).expect("parses");
     let scene_type = module
@@ -999,4 +1003,37 @@ fn the_sheens_albedo_fit_stays_within_the_integral() {
         );
     }
     assert!(MESH_SRC.contains("return clamp(-0.30065 + 1.4614 * rough"));
+}
+
+#[test]
+fn a_garments_contact_is_flagged_in_its_drags_fourth_float() {
+    // ADR-839: the push-out net reads a garment contact by its drag vec4's w; every other
+    // contact pass skips it, and the net's own pass and the counter's slot are in the shader
+    use crate::host::gui::mesh::{Contact, MAX_CONTACTS, Scene};
+    let scene = Scene {
+        contacts: vec![
+            Contact::Sphere {
+                centre: [0.0, 1.0, 0.0],
+                radius: 0.1,
+            },
+            Contact::Sphere {
+                centre: [0.0, 2.0, 0.0],
+                radius: 0.1,
+            },
+        ],
+        contact_garments: vec![true, false],
+        ..scenes::bare_scene()
+    };
+    let words = scenes::contact_words(&scene);
+    let float =
+        |at: usize| f32::from_le_bytes(words[at * 4..at * 4 + 4].try_into().expect("a float"));
+    // (16 bytes of count, then six vec4 a contact; the drag is the third)
+    assert_eq!(float(4 + 11), 1.0, "the garment's flag");
+    assert_eq!(float(4 + 24 + 11), 0.0, "an ordinary contact's");
+    assert!(MESH_SRC.contains("fn cs_garment_push_out("));
+    assert!(MESH_SRC.contains(&format!(
+        "var<storage, read_write> contact_depths: array<atomic<u32>, {}>;",
+        MAX_CONTACTS + 1
+    )));
+    assert!(MESH_SRC.contains("if (contact_skipped(slot, input) || contact_garment(slot)) {"));
 }

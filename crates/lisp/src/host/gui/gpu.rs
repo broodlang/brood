@@ -62,6 +62,8 @@ mod passes;
 mod pipelines;
 mod run_cache;
 mod scene_timer;
+// the push-out net's count read back (ADR-839)
+mod push_outs;
 mod scenes;
 mod setup;
 mod shaders;
@@ -871,6 +873,10 @@ impl GpuWindow {
             .and_then(|scenes| scenes.timer.as_mut())
         {
             timer.after_submit();
+        }
+        // and the push-out net's count (ADR-839)
+        if let Some(scenes) = self.scenes.as_mut() {
+            scenes.push_outs.after_submit();
         }
         if let Some(path) = dump_path() {
             dump_frame(
