@@ -3351,7 +3351,9 @@ hundred calls. The call's site is recorded as the error comes back to native cod
 and the arm's error block reads its position from the arm's own `site_pos`
 (`brood_rt_trace_push`): the error's, when nothing nearer the raise gave one, and the entered
 frame's. A native arm run at the driver's loop top gets its frame's place from the pending
-VM caller (`attach_vm_trace_callers`). Still without one: a frame entered by a computed-head
+VM caller (`attach_vm_trace_callers`). And when the native callee's own error has no position at all (a builtin's refusal, `%raise`
+in a native `error`) and its caller is NOT hot, the driver tags it from its pending callers as
+`attach_vm_trace` does. Still without one: a frame entered by a computed-head
 call from native code, which has no site. Found by lifting the `call-mediated-boxed` gate on
 a branch (`perf/lift-call-gate`: womanblend's tick 7% lighter, the eleven default rows within
 noise in CI's `ab`), where `tests/rethrow_position_test.blsp` and the crash report's trace

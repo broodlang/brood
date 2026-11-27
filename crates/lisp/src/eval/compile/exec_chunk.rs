@@ -1932,6 +1932,24 @@ pub(crate) fn attach_vm_trace_callers(e: &mut LispError, frames: &[BcFrame]) {
             entered.file = file;
         }
     }
+    // And the error its position, when nothing nearer the raise gave it one: the innermost
+    // pending call that has one, as `attach_vm_trace` gives an error raised in positionless
+    // code. Reached here the callee ran natively, and what it raised (a builtin's refusal,
+    // `%raise` in the prelude's `error`) came out with no position: `(+ 1 (error "bad"))` in
+    // a function not yet hot described `{:file nil :line nil}` once `error` was native.
+    if e.pos.is_none()
+        && let Some((file, Some(pos))) = frames
+            .iter()
+            .rev()
+            .filter(|f| !is_contract_arm(&f.arm, contract_module))
+            .map(call_site)
+            .find(|(_, pos)| pos.is_some())
+    {
+        e.pos = Some(pos);
+        if e.file.is_none() {
+            e.file = file.map(|file| file.to_string());
+        }
+    }
     for k in (0..frames.len()).rev() {
         if e.trace_full() {
             break;

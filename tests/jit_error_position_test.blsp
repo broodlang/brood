@@ -13,6 +13,12 @@
 
 (defn- jep-outer (items x) (+ (nth items 0) (jep-raise items x)))
 
+;; (a builtin's refusal raised IN native code, come back to a caller that is not hot: the
+;; driver that ran the native callee tags it from its pending callers)
+(defn- jep-builtin (items x) (+ (nth items 0) (string/length x)))
+
+(defn- jep-cold-caller (items x) (+ 1 (jep-builtin items x)))
+
 (defn- described (thunk)
   (%try-described (fn () (thunk) :returned) (fn (_ description) description)))
 
@@ -39,6 +45,14 @@
           (fold (range 200) nil (fn (_ index) (described (fn () (function [1 2] index)))))
           (let (native? (fn () (= :native (get (%jit-arm-state function 2) :state))))
             (or (native?) (do (proc/sleep 20) (native?)))))))))
+
+(describe "an error a builtin raises in native code, under a caller that is not hot"
+  (test "is located where it is before the callee is hot"
+    (let (cold (described (fn () (jep-cold-caller [1 2] 7))))
+      (is (int? (second (where cold))))
+      (when (%native-tier?)
+        (is (warm jep-builtin)))
+      (assert= (where (described (fn () (jep-cold-caller [1 2] 7)))) (where cold)))))
 
 (describe "an error raised under native code"
   (test "is located where it is before the function is hot"
