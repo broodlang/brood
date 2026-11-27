@@ -662,7 +662,8 @@ struct Emitter {
 struct ShadowView {
     view_proj: mat4x4<f32>,
     info: vec4<f32>,            // texel size (at 1 m for a perspective view), resolution, near, far
-    map: vec4<f32>,             // where its map is kept (ADR-800): its array's side, the array (0 or 1), its layer, spare
+    map: vec4<f32>,             // where its map is kept (ADR-800): its array's side, the array (0 or 1), its layer; 1 for a perspective view (ADR-827)
+    hair: vec4<f32>,            // where its hair can be in its opacity maps, in their texels: left, top, right, bottom (ADR-827; left past right: none)
 };
 struct SceneU {
     view_proj: mat4x4<f32>,
@@ -714,6 +715,13 @@ struct DrawU {
 // (`shadow_maps` holds the largest); a view's `map.y` says which, read through `map_gather` and
 // `map_load`
 @group(0) @binding(5) var smaller_shadow_maps: texture_depth_2d_array;
+// ADR-827: the hair's opacity maps, a layer a shadow view by its index, at `HAIR_OPACITY_SIDE`: the
+// nearest hair's depth, and the hair's density (each fragment's `-ln(1 - :shadow-keep)`) summed in
+// the four slices behind it that end `HAIR_SLICES` metres past it (`hair_transmittance`)
+@group(0) @binding(7) var hair_nearest: texture_depth_2d_array;
+@group(0) @binding(8) var hair_opacity: texture_2d_array<f32>;
+const HAIR_OPACITY_SIDE: f32 = 1024.0;
+const HAIR_SLICES: vec4<f32> = vec4<f32>(0.02, 0.05, 0.10, 0.25);
 @group(1) @binding(0) var<uniform> draw: DrawU;
 // this frame's morph offsets, blended on the CPU from the sparse targets (`mesh::add_morphs`):
 // two vec4s a vertex (position, normal), a morphed draw's from `morph_info.w`, so a vertex
@@ -1783,6 +1791,109 @@ fn hair_shadow(light: Light, world: vec3<f32>, turn: f32) -> f32 {
     return exp(-draw.fibre_cut.z * way / 16.0);
 }
 
+// the shadow view of `light` that `world` is in: its own, or a cube's face
+fn light_view(light: Light, world: vec3<f32>) -> u32 {
+    if (light.shadow.z == 6u) {
+        return light.shadow.y + cube_face(world - light.position.xyz);
+    }
+    return light.shadow.y;
+}
+
+// ADR-827: the hair's density between view `view_index`'s light and a point `distance` along it,
+// at a texel of its opacity maps: none before the nearest hair, each slice's sum at its end, and
+// straight between (a slice's hair taken as spread evenly through it)
+fn hair_density_at(view_index: u32, texel: vec2<i32>, view: ShadowView, perspective: bool, distance: f32) -> f32 {
+    let nearest = textureLoad(hair_nearest, texel, i32(view_index), 0);
+    let beyond = distance - view_distance(view, perspective, nearest);
+    if (beyond <= 0.0) {
+        return 0.0;
+    }
+    let sums = textureLoad(hair_opacity, texel, i32(view_index), 0);
+    var start = 0.0;
+    var before = 0.0;
+    for (var slice = 0u; slice < 4u; slice = slice + 1u) {
+        let end = HAIR_SLICES[slice];
+        if (beyond < end) {
+            return mix(before, sums[slice], (beyond - start) / (end - start));
+        }
+        start = end;
+        before = sums[slice];
+    }
+    return sums.w;
+}
+
+// ADR-827: how much of `light` the hair lets through to `world` (in view `view_index`): `exp(-density)`
+// averaged over the light's penumbra there, as `soft_shadow` widens an opaque one: the gap from
+// the nearest hair to the point times the light's size (over the hair's distance, for a
+// perspective view), 16 taps of a disc that wide; read bilinearly from the four texels about it
+// where that is under a texel (or the light has no size). A lock lifted off her forehead stamped
+// a hard-edged blotch on it under the key, a light 55 cm wide
+fn hair_transmittance(light: Light, view_index: u32, world: vec3<f32>, turn: f32) -> f32 {
+    let view = scene.shadows[view_index];
+    let projected = project_into(view, world);
+    if (!projected.inside) {
+        return 1.0;
+    }
+    let perspective = view.map.w > 0.5;
+    let distance = view_distance(view, perspective, projected.depth);
+    let at = projected.at * (HAIR_OPACITY_SIDE / max(view.info.y, 1.0)) - vec2<f32>(0.5);
+    // (outside where its hair can be, no texel loaded: most of what a light falls on)
+    if (at.x < view.hair.x || at.y < view.hair.y || at.x > view.hair.z || at.y > view.hair.w) {
+        return 1.0;
+    }
+    let last = vec2<i32>(i32(HAIR_OPACITY_SIDE) - 1);
+    // the penumbra's radius in the opacity map's texels (each `HAIR_OPACITY_SIDE / resolution` of
+    // the view's), from the mean distance of the hair before the point over the widest penumbra
+    // (16 texels), as `soft_shadow` finds its blockers: the one texel under the point alone left
+    // a lit square where its own hair lay behind the skin
+    var radius = 0.0;
+    let size = light.direction.w;
+    var nearest = 0.0;
+    var found = 0u;
+    if (size > 0.0) {
+        for (var tap = 0u; tap < 16u; tap = tap + 1u) {
+            let offset = disc_tap(tap * 2u + 1u, turn) * 16.0;
+            let texel_at = clamp(vec2<i32>(floor(at + vec2<f32>(0.5) + offset)), vec2<i32>(0), last);
+            let hair_at = view_distance(view, perspective, textureLoad(hair_nearest, texel_at, i32(view_index), 0));
+            if (hair_at < distance) {
+                nearest = nearest + hair_at;
+                found = found + 1u;
+            }
+        }
+        if (found == 0u) {
+            return 1.0;
+        }
+        nearest = nearest / f32(found);
+    }
+    if (size > 0.0 && distance > nearest) {
+        var penumbra = size * (distance - nearest);
+        var texel = view.info.x * max(view.info.y, 1.0) / HAIR_OPACITY_SIDE;
+        if (perspective) {
+            penumbra = penumbra / max(nearest, 1e-4);
+            texel = texel * distance;
+        }
+        radius = min(penumbra * 0.5 / max(texel, 1e-9), 16.0);
+    }
+    if (radius > 1.0) {
+        var through = 0.0;
+        for (var tap = 0u; tap < 16u; tap = tap + 1u) {
+            let offset = disc_tap(tap * 2u, turn) * radius;
+            let texel_at = clamp(vec2<i32>(floor(at + vec2<f32>(0.5) + offset)), vec2<i32>(0), last);
+            through = through + exp(-hair_density_at(view_index, texel_at, view, perspective, distance));
+        }
+        return through / 16.0;
+    }
+    let corner = floor(at);
+    let fraction = at - corner;
+    let base = vec2<i32>(corner);
+    let top_left = hair_density_at(view_index, clamp(base, vec2<i32>(0), last), view, perspective, distance);
+    let top_right = hair_density_at(view_index, clamp(base + vec2<i32>(1, 0), vec2<i32>(0), last), view, perspective, distance);
+    let bottom_left = hair_density_at(view_index, clamp(base + vec2<i32>(0, 1), vec2<i32>(0), last), view, perspective, distance);
+    let bottom_right = hair_density_at(view_index, clamp(base + vec2<i32>(1, 1), vec2<i32>(0), last), view, perspective, distance);
+    let density = mix(mix(top_left, top_right, fraction.x), mix(bottom_left, bottom_right, fraction.x), fraction.y);
+    return exp(-density);
+}
+
 // `mesh::hair_light`: that light channel by channel, taking the hair's colour as it passes
 // (HAIR_TINT 0.45)
 fn hair_light(seen: f32, base: vec3<f32>) -> vec3<f32> {
@@ -2356,10 +2467,20 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         let arriving = arrival.amount;
         var seen = 1.0;
         var contact = 1.0;
+        // what is opaque in a strand's way (ADR-827): her head shadows her hair
+        var opaque = 1.0;
         if (light.shadow.z > 0u) {
-            if (draw.flags.x == 4u || draw.flags.x == 5u) {
+            // the `:fibres` hair in the way (ADR-827: its opacity maps; none, 1)
+            let view_index = light_view(light, world);
+            let hair_through = hair_transmittance(light, view_index, world, turn);
+            if (draw.flags.x == 5u) {
+                // a strand: the opaque maps a centimetre toward the light (its own scalp, under
+                // it, does not shadow it), and the hair before it
+                opaque = shadow_sample(view_index, world + arrival.to_light * 0.01);
+                seen = opaque * hair_through;
+            } else if (draw.flags.x == 4u) {
                 // hair shades hair by how much of it the light crossed, not in or out
-                seen = hair_shadow(light, world, turn);
+                seen = hair_shadow(light, world, turn) * hair_through;
             } else {
                 // (and the shadow of what is too near and small for its map, ADR-818)
                 // (never on skin: light travels millimetres under it, so its own creases never show
@@ -2367,7 +2488,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
                 if (draw.flags.x != 0u) {
                     contact = contact_shadow(world, arrival.to_light, surface_normal, view);
                 }
-                seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn) * contact;
+                seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn) * contact * hair_through;
             }
         }
         let to_light = arrival.to_light;
@@ -2399,12 +2520,15 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         if ((draw.flags.y & 512u) != 0u) {
             // its baked self-shadow where it has one (ADR-813): the hairs crossed toward this light, each
             // passing some of it as ITS OWN colour lets it through (`fibre_transmittance`) and scattering
-            // a little away; the shadow maps' estimate otherwise. (A fixed ginger fibre once tinted
+            // a little away; the opacity maps' estimate otherwise. (A fixed ginger fibre once tinted
             // every hair colour the same orange by the lamp and from behind: 39, 2026-11-26)
+            // Either way under what is opaque in its way: the bake counts hair alone, so without
+            // it the key in front of her lit the back of her hair through her head, a brighter,
+            // purer red the more hair it crossed (ADR-827)
             var through = vec3<f32>(seen);
             if (dot(fibre_visibility, fibre_visibility) > 0.0) {
                 let crossed = draw.material.z * max(0.0, fibre_visibility.x + dot(fibre_visibility.yzw, to_light));
-                through = pow(fibre_transmittance(base), vec3<f32>(crossed)) * exp(-0.03 * crossed);
+                through = pow(fibre_transmittance(base), vec3<f32>(crossed)) * exp(-0.03 * crossed) * opaque;
             }
             let shadowed = dot(through, vec3<f32>(0.2126, 0.7152, 0.0722));
             out = out + light.color.rgb * arriving * through * karis_hair(base, strand, view, to_light, shadowed, select(0.0, 1.0, light.shadow.z > 0u));
@@ -2821,20 +2945,9 @@ fn fs_fibre_front(fragment: VertexOut, @builtin(front_facing) front: bool) -> @l
 struct ShadowOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    // (a `:fibres` strand's own number, `_STRAND`: which strand a shadow fragment is of)
-    @location(1) @interpolate(flat) strand: f32,
+    // (the shadow view it is drawn for: the hair's opacity pass reads that view's nearest depth)
+    @location(1) @interpolate(flat) view: u32,
 };
-
-// lowbias32, for the fibres' stochastic shadow
-fn shadow_hash(x: u32) -> u32 {
-    var v = x;
-    v = v ^ (v >> 16u);
-    v = v * 0x7feb352du;
-    v = v ^ (v >> 15u);
-    v = v * 0x846ca68bu;
-    v = v ^ (v >> 16u);
-    return v;
-}
 
 @vertex
 fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> ShadowOut {
@@ -2843,7 +2956,7 @@ fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> Shado
         var pressed: ShadowOut;
         pressed.clip = scene.shadows[view_index].view_proj * vec4<f32>(posed_vertices[(draw.deform.y + input.index) * 3u].xyz, 1.0);
         pressed.uv = input.uv;
-        pressed.strand = input.curvature;
+        pressed.view = view_index;
         return pressed;
     }
     let posed = pose(input);
@@ -2857,7 +2970,7 @@ fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> Shado
     }
     out.clip = scene.shadows[view_index].view_proj * vec4<f32>(world, 1.0);
     out.uv = input.uv;
-    out.strand = input.curvature;
+    out.view = view_index;
     return out;
 }
 
@@ -2870,17 +2983,36 @@ fn fs_shadow(fragment: ShadowOut) {
     if ((draw.flags.x == 2u || draw.flags.x == 3u || draw.flags.x == 4u || draw.flags.x == 5u || draw.flags.x == 6u) && alpha < draw.material.w) {
         discard;
     }
-    // a `:fibres` strand blocks only part of the light it crosses: each of its shadow fragments is
-    // kept with that share (`clamp_info.w`), drawn by strand and texel, so the shadow map's filter
-    // averages a thin layer of hair into a faint shadow and only many layers into a full one
-    // (stochastic transparent shadows, Enderton et al. 2010). Whole, a strand drawn wide for the
-    // strands it stands for stamped full shadow: dark blotches on her forehead under thin hair
-    if (draw.flags.x == 5u) {
-        let texel = vec2<u32>(fragment.clip.xy);
-        let drawn = shadow_hash(bitcast<u32>(fragment.strand) ^ shadow_hash(texel.x + texel.y * 7919u));
-        if (f32(drawn & 0xffffu) / 65535.0 >= draw.clamp_info.w) {
-            discard;
-        }
+}
+
+// ADR-827, the hair's opacity maps (deep opacity maps, Yuksel and Keyser 2008): a `:fibres`
+// strand blocks only part of the light it crosses, so it is not in the depth maps at all (as a
+// solid it stamped dark blotches on thin-hair skin; kept at random, Enderton et al. 2010, each
+// kept stamp was still hard). First its nearest depth from the light, every fragment
+// (`fs_hair_opacity_front`, alpha-tested as `fs_shadow`), then each fragment's density added into
+// the slices behind that depth it lies before (`fs_hair_opacity`): `-ln(1 - :shadow-keep)` a
+// fragment, so light through n of them is `(1 - keep)^n`, the share `:shadow-keep` always meant
+@fragment
+fn fs_hair_opacity_front(fragment: ShadowOut) {
+    let base_texel = straight(textureSampleLevel(base_texture, texture_sampler, fragment.uv, 0.0), (draw.flags.y & 2u) != 0u);
+    let alpha = select(1.0, base_texel.a, (draw.flags.y & 1u) != 0u) * draw.color.a;
+    if (alpha < draw.material.w) {
+        discard;
     }
+}
+
+@fragment
+fn fs_hair_opacity(fragment: ShadowOut) -> @location(0) vec4<f32> {
+    let base_texel = straight(textureSampleLevel(base_texture, texture_sampler, fragment.uv, 0.0), (draw.flags.y & 2u) != 0u);
+    let alpha = select(1.0, base_texel.a, (draw.flags.y & 1u) != 0u) * draw.color.a;
+    if (alpha < draw.material.w) {
+        discard;
+    }
+    let view = scene.shadows[fragment.view];
+    let perspective = view.map.w > 0.5;
+    let nearest = textureLoad(hair_nearest, vec2<i32>(fragment.clip.xy), i32(fragment.view), 0);
+    let beyond = view_distance(view, perspective, fragment.clip.z) - view_distance(view, perspective, nearest);
+    let density = -log(1.0 - clamp(draw.clamp_info.w, 0.0, 0.99));
+    return density * select(vec4<f32>(0.0), vec4<f32>(1.0), vec4<f32>(beyond) < HAIR_SLICES);
 }
 "#;

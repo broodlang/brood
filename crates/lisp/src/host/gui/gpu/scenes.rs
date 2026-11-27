@@ -6,9 +6,10 @@
 
 use super::*;
 use crate::host::gui::mesh::{
-    EmitterPlan, LightKind, MAX_EMITTERS, MAX_EYES, MAX_LIGHTS, MAX_SHADOW_VIEWS, Mesh, MeshBounds,
-    Morph, SKIN_TABLE_HEIGHT, SKIN_TABLE_WIDTH, Scene, ShadowArrays, ShadowPlan, Surface,
-    add_morphs_packed, draw_bounds, emitter_plan, shadow_plan, skin_table, union,
+    Bounds, EmitterPlan, LightKind, MAX_EMITTERS, MAX_EYES, MAX_LIGHTS, MAX_SHADOW_VIEWS, Mesh,
+    MeshBounds, Morph, SKIN_TABLE_HEIGHT, SKIN_TABLE_WIDTH, Scene, ShadowArrays, ShadowPlan,
+    Surface, add_morphs_packed, draw_bounds, emitter_plan, shadow_plan, skin_table, transform,
+    union,
 };
 
 /// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4,
@@ -19,9 +20,14 @@ pub(super) const VERTEX_FLOATS: usize = 28;
 /// strand's random number, so the first share is an even choice), each drawn this many times as
 /// wide, so the shadow covers as much (ADR-813): the shadow pass was most of a head's cost.
 pub(super) const FIBRE_SHADOW_SHARE: u32 = 8;
-/// The `SceneU` uniform (3744 bytes: each shadow view says where its map is kept, ADR-800),
-/// padded to the dynamic-offset alignment.
-pub(super) const SCENE_BYTES: u64 = 3840;
+/// The side of a scene's hair opacity maps (ADR-827), one layer a shadow view whatever its own
+/// resolution: hair's density through the light is smooth, so it needs fewer texels than a
+/// depth does. Its four slices behind the nearest hair are `HAIR_SLICES` in the shader.
+pub(super) const HAIR_OPACITY_SIDE: u32 = 1024;
+const HAIR_OPACITY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// The `SceneU` uniform (4128 bytes: each shadow view says where its map is kept, ADR-800, and
+/// where its hair can be, ADR-827), padded to the dynamic-offset alignment.
+pub(super) const SCENE_BYTES: u64 = 4352;
 /// The `DrawU` uniform (336 bytes with an `:eye` surface's optics, ADR-796, and a hair's `:sheen`, ADR-799), padded to the
 /// dynamic-offset alignment.
 pub(super) const DRAW_BYTES: u64 = 512;
@@ -308,6 +314,14 @@ struct ShadowTarget {
     layers: [Vec<wgpu::TextureView>; 2],
     /// Each whole array, for the colour pass to sample (none: array 1 has no layers).
     whole: [Option<wgpu::TextureView>; 2],
+    /// The hair's opacity maps (ADR-827), a layer a view by its index, at `HAIR_OPACITY_SIDE`:
+    /// the nearest hair's depth, and the hair's density summed in four slices behind it. Each
+    /// view's layers for the passes that render them, and each whole array to read.
+    views: u32,
+    opacity_front_layers: Vec<wgpu::TextureView>,
+    opacity_layers: Vec<wgpu::TextureView>,
+    opacity_front: wgpu::TextureView,
+    opacity: wgpu::TextureView,
 }
 
 /// The mesh pipelines and buffers, made the first time a mesh is uploaded.
@@ -326,8 +340,17 @@ pub(super) struct MeshGpu {
     fibre_front_pipelines: [wgpu::RenderPipeline; 2],
     fibre_full: super::fibres::FibreFullScreen,
     scene_layout: wgpu::BindGroupLayout,
-    /// Depth only, both faces, alpha-tested: what renders a shadow map (ADR-788).
+    /// Depth only, both faces, alpha-tested: what renders a shadow map (ADR-788), of what is
+    /// opaque (hair has its own maps).
     shadow_pipeline: wgpu::RenderPipeline,
+    /// The hair's opacity maps (ADR-827): its nearest depth, then its density in slices behind
+    /// it (its own scene group: the nearest depth read); and the empty ones bound where a scene
+    /// has none.
+    opacity_front_pipeline: wgpu::RenderPipeline,
+    opacity_pipeline: wgpu::RenderPipeline,
+    opacity_scene_layout: wgpu::BindGroupLayout,
+    no_opacity_front: wgpu::TextureView,
+    no_opacity: wgpu::TextureView,
     /// The contact passes' layouts and pipelines (ADR-805), and the posed buffer bound where a
     /// scene presses nothing.
     contact_morph_layout: wgpu::BindGroupLayout,
@@ -594,7 +617,27 @@ impl MeshGpu {
                 count: None,
             },
             shadow_maps(5),
+            // the hair's opacity maps (ADR-827): its nearest depth, and its density in four
+            // slices behind it (loaded texel by texel: not filterable)
+            shadow_maps(7),
+            wgpu::BindGroupLayoutEntry {
+                binding: 8,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
         ];
+        // the hair opacity pass's (ADR-827): the shadow passes' scene group, and the hair's
+        // nearest depth it measures each fragment from
+        let opacity_scene_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("hair opacity scene"),
+                entries: &[uniform(0, true), storage(1), shadow_maps(7)],
+            });
         let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh scene"),
             entries: &scene_entries,
@@ -938,6 +981,114 @@ impl MeshGpu {
             multiview_mask: None,
             cache: None,
         });
+        // the hair's opacity maps (ADR-827): its nearest depth, every fragment kept, then its
+        // density, each fragment added into the slices behind that depth it falls before
+        let opacity_front_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("hair nearest depth"),
+                layout: Some(&shadow_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_shadow"),
+                    compilation_options: Default::default(),
+                    buffers: std::slice::from_ref(&vertex_layout),
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_hair_opacity_front"),
+                    compilation_options: Default::default(),
+                    targets: &[],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+        let opacity_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("hair opacity"),
+            bind_group_layouts: &[
+                Some(&opacity_scene_layout),
+                Some(&draw_layout),
+                Some(&morph_layout),
+                Some(&material_layout),
+            ],
+            immediate_size: 0,
+        });
+        let adding = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let opacity_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("hair opacity"),
+            layout: Some(&opacity_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_shadow"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_hair_opacity"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HAIR_OPACITY_FORMAT,
+                    blend: Some(wgpu::BlendState {
+                        color: adding,
+                        alpha: adding,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        // the hair's opacity maps bound where a scene has none: one layer each (a nearest depth
+        // of 0 and no density: nothing in the way)
+        let empty_array = |label, format| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                })
+        };
+        let no_opacity_front = empty_array("no hair nearest depth", DEPTH_FORMAT);
+        let no_opacity = empty_array("no hair opacity", HAIR_OPACITY_FORMAT);
         let no_shadows = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("no shadow maps"),
@@ -1015,6 +1166,11 @@ impl MeshGpu {
             fibre_full,
             shadow_pipeline,
             shadow_scene_layout,
+            opacity_front_pipeline,
+            opacity_pipeline,
+            opacity_scene_layout,
+            no_opacity_front,
+            no_opacity,
             shadow_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("mesh shadows"),
                 address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -1263,19 +1419,63 @@ impl MeshGpu {
     /// Keep scene `index`'s shadow maps as the two arrays `arrays` says (ADR-800), making
     /// them anew when either's size or layer count changed; none when the scene has no shadow
     /// this frame.
-    fn shadow_target(&mut self, device: &wgpu::Device, index: usize, arrays: ShadowArrays) {
+    fn shadow_target(
+        &mut self,
+        device: &wgpu::Device,
+        index: usize,
+        arrays: ShadowArrays,
+        views: u32,
+    ) {
         let target = &mut self.targets[index];
-        if arrays.layers[0] == 0 {
+        if arrays.layers[0] == 0 || views == 0 {
             target.shadow = None;
             return;
         }
         if target
             .shadow
             .as_ref()
-            .is_some_and(|shadow| shadow.arrays == arrays)
+            .is_some_and(|shadow| shadow.arrays == arrays && shadow.views == views)
         {
             return;
         }
+        // the hair's opacity maps (ADR-827): its nearest depth and its density, a layer a view
+        let opacity_array = |label, format| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: HAIR_OPACITY_SIDE,
+                    height: HAIR_OPACITY_SIDE,
+                    depth_or_array_layers: views,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let layers: Vec<_> = (0..views)
+                .map(|layer| {
+                    texture.create_view(&wgpu::TextureViewDescriptor {
+                        label: Some(label),
+                        dimension: Some(wgpu::TextureViewDimension::D2),
+                        base_array_layer: layer,
+                        array_layer_count: Some(1),
+                        ..Default::default()
+                    })
+                })
+                .collect();
+            let whole = texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(label),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+            (layers, whole)
+        };
+        let (opacity_front_layers, opacity_front) =
+            opacity_array("scene hair nearest depth", DEPTH_FORMAT);
+        let (opacity_layers, opacity) = opacity_array("scene hair opacity", HAIR_OPACITY_FORMAT);
         let mut layers: [Vec<wgpu::TextureView>; 2] = [Vec::new(), Vec::new()];
         let mut whole: [Option<wgpu::TextureView>; 2] = [None, None];
         for array in 0..2 {
@@ -1319,6 +1519,11 @@ impl MeshGpu {
             arrays,
             layers,
             whole,
+            views,
+            opacity_front_layers,
+            opacity_layers,
+            opacity_front,
+            opacity,
         });
     }
 
@@ -1356,7 +1561,19 @@ impl MeshGpu {
                 union(bounds, more)
             });
             let shadows = shadow_plan(scene, world);
-            scene_bytes.extend(scene_uniform(scene, &shadows, &emitter_plan(scene)));
+            // where its casting hair can be (ADR-827: each view's `hair_rect`)
+            let hair = scene
+                .draws
+                .iter()
+                .filter(|draw| draw.material.fibres && draw.material.cast_shadow)
+                .fold(None, |bounds, draw| {
+                    let more = self
+                        .meshes
+                        .get(&draw.mesh)
+                        .and_then(|mesh| draw_bounds(scene, draw, &mesh.bounds));
+                    union(bounds, more)
+                });
+            scene_bytes.extend(scene_uniform(scene, &shadows, &emitter_plan(scene), hair));
             shadow_plans.push(shadows);
             let mut pressed_vertices = 0u32;
             // the scene's palettes, placed after the ones before
@@ -1513,6 +1730,11 @@ impl MeshGpu {
                     surface: material.surface,
                     pressed,
                     fibres: material.fibres,
+                    hair_bounds: if material.fibres && material.cast_shadow {
+                        draw_bounds(scene, draw, &mesh.bounds)
+                    } else {
+                        None
+                    },
                 });
             }
             plans.push(plan);
@@ -1576,7 +1798,7 @@ impl MeshGpu {
         for (index, scene) in scenes.iter().enumerate() {
             self.target(device, index, scene.pixel_size(), tex_layout, smooth);
             let shadows = &shadow_plans[index];
-            self.shadow_target(device, index, shadows.arrays);
+            self.shadow_target(device, index, shadows.arrays, shadows.views.len() as u32);
             // its contact buffers (ADR-805): only while it presses any skin, so a scene without
             // contacts costs nothing for them
             let pressed = pressed_totals[index];
@@ -1901,13 +2123,12 @@ impl MeshGpu {
                     Some(timer) if !drawn.is_empty() => timer.shadow_stamps(index),
                     _ => None,
                 };
-                let last = drawn.len().saturating_sub(1);
+                // (the span ends on the last hair opacity pass, below: they are shadow passes too)
                 for (order, (view_index, view, layer)) in drawn.into_iter().enumerate() {
-                    let timestamp_writes = stamps.and_then(|(start, end)| {
-                        self.timer.as_ref()?.writes(
-                            (order == 0).then_some(start),
-                            (order == last).then_some(end),
-                        )
+                    let timestamp_writes = stamps.and_then(|(start, _)| {
+                        self.timer
+                            .as_ref()?
+                            .writes((order == 0).then_some(start), None)
                     });
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("scene shadow"),
@@ -1929,8 +2150,9 @@ impl MeshGpu {
                     pass.set_pipeline(&self.shadow_pipeline);
                     pass.set_bind_group(0, &shadow_scene_group, &[scene_offset]);
                     let instance = view_index as u32;
+                    // (what is opaque: a `:fibres` mesh's shadow is its opacity maps', below)
                     for (draw, material) in plans[index].iter().zip(&materials) {
-                        if !draw.casts {
+                        if !draw.casts || draw.fibres {
                             continue;
                         }
                         let mesh = &self.meshes[&draw.mesh];
@@ -1943,13 +2165,114 @@ impl MeshGpu {
                         pass.set_bind_group(3, material, &[]);
                         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                         pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                        // (a `:fibres` mesh: the first share of its strands, ordered at random)
-                        let drawn = if draw.fibres {
-                            (mesh.index_count / FIBRE_SHADOW_SHARE).max(3) / 3 * 3
-                        } else {
-                            mesh.index_count
-                        };
-                        pass.draw_indexed(0..drawn, 0, instance..instance + 1);
+                        pass.draw_indexed(0..mesh.index_count, 0, instance..instance + 1);
+                    }
+                }
+                // the hair's opacity maps (ADR-827), a layer each view: its nearest depth, then
+                // its density in the slices behind it; cleared where no hair casts, so a scene
+                // without hair reads none
+                let opacity_scene_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("hair opacity scene"),
+                    layout: &self.opacity_scene_layout,
+                    entries: &[
+                        scene_uniform_entry(),
+                        palette_entry(),
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(&shadow.opacity_front),
+                        },
+                    ],
+                });
+                let hair: Vec<_> = plans[index]
+                    .iter()
+                    .zip(&materials)
+                    .filter(|(draw, _)| draw.casts && draw.fibres)
+                    .collect();
+                let side = HAIR_OPACITY_SIDE as f32;
+                let last_view = shadow_plans[index].views.len().saturating_sub(1);
+                for (view_index, view) in shadow_plans[index].views.iter().enumerate() {
+                    let instance = view_index as u32;
+                    // (only the hair this view can see: a box beyond its frustum is not drawn;
+                    // one with no bounds known always is)
+                    let in_view: Vec<_> = hair
+                        .iter()
+                        .filter(|(draw, _)| {
+                            draw.hair_bounds
+                                .is_none_or(|bounds| seen_by(&view.view_proj, bounds, 0.05))
+                        })
+                        .collect();
+                    let draw_hair = |pass: &mut wgpu::RenderPass| {
+                        for (draw, material) in &in_view {
+                            let mesh = &self.meshes[&draw.mesh];
+                            pass.set_bind_group(
+                                1,
+                                &draw_group,
+                                &[(draw.at as u64 * DRAW_BYTES) as u32],
+                            );
+                            pass.set_bind_group(2, &morph_group, &[]);
+                            pass.set_bind_group(3, *material, &[]);
+                            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                            pass.set_index_buffer(
+                                mesh.indices.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            // (the first share of its strands, ordered at random, each drawn as
+                            // wide as the strands it stands for)
+                            let drawn = (mesh.index_count / FIBRE_SHADOW_SHARE).max(3) / 3 * 3;
+                            pass.draw_indexed(0..drawn, 0, instance..instance + 1);
+                        }
+                    };
+                    {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("hair nearest depth"),
+                            color_attachments: &[],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: &shadow.opacity_front_layers[view_index],
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(1.0),
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        if !in_view.is_empty() {
+                            pass.set_viewport(0.0, 0.0, side, side, 0.0, 1.0);
+                            pass.set_pipeline(&self.opacity_front_pipeline);
+                            pass.set_bind_group(0, &shadow_scene_group, &[scene_offset]);
+                            draw_hair(&mut pass);
+                        }
+                    }
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("hair opacity"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &shadow.opacity_layers[view_index],
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        // (the shadow passes' span ends here, ADR-801)
+                        timestamp_writes: stamps.and_then(|(_, end)| {
+                            self.timer
+                                .as_ref()?
+                                .writes(None, (view_index == last_view).then_some(end))
+                        }),
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    if !in_view.is_empty() {
+                        pass.set_viewport(0.0, 0.0, side, side, 0.0, 1.0);
+                        pass.set_pipeline(&self.opacity_pipeline);
+                        pass.set_bind_group(0, &opacity_scene_group, &[scene_offset]);
+                        draw_hair(&mut pass);
                     }
                 }
             }
@@ -1962,6 +2285,11 @@ impl MeshGpu {
                     .unwrap_or(&self.no_shadows)
             };
             let (shadow_maps, smaller_shadow_maps) = (shadow_array(0), shadow_array(1));
+            // the hair's opacity maps (ADR-827), or the empty ones
+            let (hair_nearest_maps, hair_opacity_maps) = match &target.shadow {
+                Some(shadow) => (&shadow.opacity_front, &shadow.opacity),
+                None => (&self.no_opacity_front, &self.no_opacity),
+            };
             let scene_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("mesh scene"),
                 layout: &self.scene_layout,
@@ -1983,6 +2311,14 @@ impl MeshGpu {
                     wgpu::BindGroupEntry {
                         binding: 5,
                         resource: wgpu::BindingResource::TextureView(smaller_shadow_maps),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(hair_nearest_maps),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(hair_opacity_maps),
                     },
                 ],
             });
@@ -2111,6 +2447,14 @@ impl MeshGpu {
                     wgpu::BindGroupEntry {
                         binding: 5,
                         resource: wgpu::BindingResource::TextureView(smaller_shadow_maps),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(hair_nearest_maps),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(hair_opacity_maps),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
@@ -2408,11 +2752,87 @@ struct DrawPlan {
     pressed: bool,
     /// A `:fibres` draw (ADR-813): drawn by the fibre passes after the colour pass, not in it.
     fibres: bool,
+    /// A casting `:fibres` draw's world bounds this frame (ADR-827): the shadow views it is in
+    /// (`seen_by`) are the only ones it is drawn into for its opacity maps.
+    hair_bounds: Option<Bounds>,
+}
+
+/// Whether a world box (grown by `margin` each way, for strands drawn wider than their centres)
+/// may be in the view `view_proj` looks through: not when all eight corners lie beyond one of its
+/// clip planes (ADR-827: a cube light's faces mostly never see her hair).
+fn seen_by(view_proj: &[f32; 16], bounds: Bounds, margin: f32) -> bool {
+    let corners: Vec<[f32; 4]> = box_corners(bounds, margin)
+        .into_iter()
+        .map(|corner| transform(view_proj, corner, 1.0))
+        .collect();
+    let beyond = |plane: fn(&[f32; 4]) -> bool| corners.iter().all(plane);
+    !(beyond(|clip| clip[0] < -clip[3])
+        || beyond(|clip| clip[0] > clip[3])
+        || beyond(|clip| clip[1] < -clip[3])
+        || beyond(|clip| clip[1] > clip[3])
+        || beyond(|clip| clip[2] < 0.0)
+        || beyond(|clip| clip[2] > clip[3]))
+}
+
+/// The eight corners of a world box grown by `margin` each way.
+fn box_corners(bounds: Bounds, margin: f32) -> [[f32; 3]; 8] {
+    std::array::from_fn(|corner| {
+        std::array::from_fn(|axis| {
+            if corner >> axis & 1 == 0 {
+                bounds[0][axis] - margin
+            } else {
+                bounds[1][axis] + margin
+            }
+        })
+    })
+}
+
+/// Where a scene's casting hair can be in a shadow view's opacity maps (ADR-827): its world box
+/// projected, in their texels (left, top, right, bottom), grown by the widest penumbra search
+/// (16 texels, and one for the bilinear read); `[1, 1, 0, 0]`, nothing, without hair in the view.
+/// A receiver outside it reads no hair without a texel loaded.
+fn hair_rect(view_proj: &[f32; 16], hair: Option<Bounds>) -> [f32; 4] {
+    let nothing = [1.0, 1.0, 0.0, 0.0];
+    let side = HAIR_OPACITY_SIDE as f32;
+    let Some(bounds) = hair else {
+        return nothing;
+    };
+    if !seen_by(view_proj, bounds, 0.05) {
+        return nothing;
+    }
+    let mut rect = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for corner in box_corners(bounds, 0.05) {
+        let clip = transform(view_proj, corner, 1.0);
+        // (a corner behind a perspective view's eye: the whole map)
+        if clip[3] <= 1e-6 {
+            return [0.0, 0.0, side, side];
+        }
+        let x = (clip[0] / clip[3] * 0.5 + 0.5) * side;
+        let y = (0.5 - clip[1] / clip[3] * 0.5) * side;
+        rect = [
+            rect[0].min(x),
+            rect[1].min(y),
+            rect[2].max(x),
+            rect[3].max(y),
+        ];
+    }
+    let grow = 17.0;
+    [
+        (rect[0] - grow).max(0.0),
+        (rect[1] - grow).max(0.0),
+        (rect[2] + grow).min(side),
+        (rect[3] + grow).min(side),
+    ]
 }
 
 /// `scene`'s `SceneU` uniform (the WGSL struct in `MESH_SRC`), padded to [`SCENE_BYTES`].
-fn scene_uniform(scene: &Scene, shadows: &ShadowPlan, emitters: &EmitterPlan) -> Vec<u8> {
-    let mut bytes = words_bytes(&scene_words(scene, shadows, emitters));
+fn scene_uniform(
+    scene: &Scene,
+    shadows: &ShadowPlan,
+    emitters: &EmitterPlan,
+    hair: Option<Bounds>,
+) -> Vec<u8> {
+    let mut bytes = words_bytes(&scene_words(scene, shadows, emitters, hair));
     bytes.resize(SCENE_BYTES as usize, 0);
     bytes
 }
@@ -2444,12 +2864,24 @@ pub(super) fn scene_uniform_len() -> usize {
         contact_withins: Vec::new(),
         draws: Vec::new(),
     };
-    scene_words(&scene, &shadow_plan(&scene, None), &emitter_plan(&scene)).len() * 4
+    scene_words(
+        &scene,
+        &shadow_plan(&scene, None),
+        &emitter_plan(&scene),
+        None,
+    )
+    .len()
+        * 4
 }
 
 /// The words of `scene`'s `SceneU`: its camera, its lights, its ambient and exposure, and the
 /// shadow views `shadows` plans.
-fn scene_words(scene: &Scene, shadows: &ShadowPlan, emitters: &EmitterPlan) -> Vec<u32> {
+fn scene_words(
+    scene: &Scene,
+    shadows: &ShadowPlan,
+    emitters: &EmitterPlan,
+    hair: Option<Bounds>,
+) -> Vec<u32> {
     let mut words: Vec<u32> = Vec::with_capacity(SCENE_BYTES as usize / 4);
     let floats = |words: &mut Vec<u32>, values: &[f32]| {
         words.extend(values.iter().map(|value| value.to_bits()));
@@ -2532,18 +2964,21 @@ fn scene_words(scene: &Scene, shadows: &ShadowPlan, emitters: &EmitterPlan) -> V
                         view.depth_range[1],
                     ],
                 );
-                // where its map is kept (ADR-800): its array's side, the array, its layer
+                // where its map is kept (ADR-800): its array's side, the array, its layer; and
+                // whether it is a perspective view (1), for the hair's opacity maps (ADR-827)
                 floats(
                     &mut words,
                     &[
                         view.map.side.max(1) as f32,
                         view.map.array as f32,
                         view.map.layer as f32,
-                        0.0,
+                        if view.perspective { 1.0 } else { 0.0 },
                     ],
                 );
+                // where its hair can be in its opacity maps (ADR-827)
+                floats(&mut words, &hair_rect(&view.view_proj, hair));
             }
-            None => words.extend_from_slice(&[0; 24]),
+            None => words.extend_from_slice(&[0; 28]),
         }
     }
     // the ambient occlusion: its radius (0: none), strength, and view (one past its index, 0:
