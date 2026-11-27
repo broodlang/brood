@@ -329,6 +329,59 @@ struct ShadowTarget {
     opacity_layers: Vec<wgpu::TextureView>,
     opacity_front: wgpu::TextureView,
     opacity: wgpu::TextureView,
+    /// The casters' pyramid (ADR-837), while the scene has a `:contact-caster` view.
+    caster_pyramid: Option<CasterPyramid>,
+}
+
+/// The `:contact-caster` view's depth halved level by level to a single texel, each texel the
+/// nearest of the 2×2 below it (ADR-837, `CASTER_PYRAMID_SRC`): made at the view's size, filled
+/// every frame right after the shadow passes, read by the colour pass to skip the contact march
+/// on skin where no caster lies within reach.
+struct CasterPyramid {
+    side: u32,
+    /// Every level, for the colour pass.
+    whole: wgpu::TextureView,
+    /// Each level alone, for the passes that fill them.
+    levels: Vec<wgpu::TextureView>,
+}
+
+impl CasterPyramid {
+    fn new(device: &wgpu::Device, side: u32) -> CasterPyramid {
+        let level_count = u32::BITS - side.max(1).leading_zeros();
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("casters' pyramid"),
+            size: wgpu::Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: level_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let levels = (0..level_count)
+            .map(|level| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("casters' pyramid level"),
+                    base_mip_level: level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let whole = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("casters' pyramid"),
+            ..Default::default()
+        });
+        CasterPyramid {
+            side,
+            whole,
+            levels,
+        }
+    }
 }
 
 /// The mesh pipelines and buffers, made the first time a mesh is uploaded.
@@ -378,6 +431,13 @@ pub(super) struct MeshGpu {
     /// One cleared layer, bound for a scene without shadows, and for array 1 when a scene's
     /// maps are all in array 0 (ADR-800).
     no_shadows: wgpu::TextureView,
+    /// The casters' pyramid's passes (ADR-837): level 0 from the casters' depth, each level
+    /// after from the one before; their layouts; and a 1×1 level bound without a casters' view.
+    pyramid_first_pipeline: wgpu::ComputePipeline,
+    pyramid_next_pipeline: wgpu::ComputePipeline,
+    pyramid_first_layout: wgpu::BindGroupLayout,
+    pyramid_next_layout: wgpu::BindGroupLayout,
+    no_pyramid: wgpu::TextureView,
     /// `mesh::skin_table` as the colour passes read it (ADR-794): `Rgba32Float`, the CPU
     /// painter's own numbers.
     skin_table: wgpu::TextureView,
@@ -637,6 +697,17 @@ impl MeshGpu {
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // the casters' pyramid (ADR-837), loaded texel by texel at a chosen level
+            wgpu::BindGroupLayoutEntry {
+                binding: 9,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
                 count: None,
@@ -1119,6 +1190,88 @@ impl MeshGpu {
                 dimension: Some(wgpu::TextureViewDimension::D2Array),
                 ..Default::default()
             });
+        // the casters' pyramid (ADR-837): its own module, as its group 0 is not the scene's
+        let pyramid_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("casters' pyramid"),
+            source: wgpu::ShaderSource::Wgsl(CASTER_PYRAMID_SRC.into()),
+        });
+        let pyramid_level_out = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: wgpu::TextureFormat::R32Float,
+                view_dimension: wgpu::TextureViewDimension::D2,
+            },
+            count: None,
+        };
+        let pyramid_first_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("casters' pyramid first"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    pyramid_level_out(1),
+                ],
+            });
+        let pyramid_next_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("casters' pyramid next"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    pyramid_level_out(3),
+                ],
+            });
+        let pyramid_pipeline = |layout: &wgpu::BindGroupLayout, entry: &str| {
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(entry),
+                bind_group_layouts: &[Some(layout)],
+                immediate_size: 0,
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pipeline_layout),
+                module: &pyramid_module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let pyramid_first_pipeline = pyramid_pipeline(&pyramid_first_layout, "first");
+        let pyramid_next_pipeline = pyramid_pipeline(&pyramid_next_layout, "next");
+        let no_pyramid = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("no casters' pyramid"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let uniforms = wgpu::BufferUsages::UNIFORM;
         let storage_usage = wgpu::BufferUsages::STORAGE;
         // the contact passes (ADR-805): each pressed vertex posed once, each contact's deepest press
@@ -1195,6 +1348,11 @@ impl MeshGpu {
                 ..Default::default()
             }),
             no_shadows,
+            pyramid_first_pipeline,
+            pyramid_next_pipeline,
+            pyramid_first_layout,
+            pyramid_next_layout,
+            no_pyramid,
             skin_table: skin_table_texture(device, queue),
             scene_buffer: buffer(device, "mesh scenes", SCENE_BYTES, uniforms),
             scene_capacity: SCENE_BYTES,
@@ -1552,6 +1710,7 @@ impl MeshGpu {
             opacity_layers,
             opacity_front,
             opacity,
+            caster_pyramid: None,
         });
     }
 
@@ -1840,6 +1999,22 @@ impl MeshGpu {
             self.target(device, index, scene.pixel_size(), tex_layout, smooth);
             let shadows = &shadow_plans[index];
             self.shadow_target(device, index, shadows.arrays, shadows.views.len() as u32);
+            // the casters' pyramid (ADR-837), at the casters' view's size while there is one
+            let casters_side = shadows
+                .casters
+                .and_then(|view| shadows.views.get(view as usize))
+                .map(|view| view.resolution);
+            if let Some(shadow) = self.targets[index].shadow.as_mut() {
+                match casters_side {
+                    Some(side)
+                        if shadow
+                            .caster_pyramid
+                            .as_ref()
+                            .is_some_and(|pyramid| pyramid.side == side) => {}
+                    Some(side) => shadow.caster_pyramid = Some(CasterPyramid::new(device, side)),
+                    None => shadow.caster_pyramid = None,
+                }
+            }
             // its contact buffers (ADR-805): only while it presses any skin, so a scene without
             // contacts costs nothing for them
             let pressed = pressed_totals[index];
@@ -2217,6 +2392,65 @@ impl MeshGpu {
                         pass.draw_indexed(0..mesh.index_count, 0, instance..instance + 1);
                     }
                 }
+                // the casters' pyramid (ADR-837): level 0 the casters' depth as drawn just now,
+                // each level after it the nearest of the 2×2 below
+                let casters_view = shadow_plans[index]
+                    .casters
+                    .and_then(|view| shadow_plans[index].views.get(view as usize));
+                if let (Some(pyramid), Some(casters_view)) = (&shadow.caster_pyramid, casters_view)
+                    && let Some(depth) = shadow
+                        .layers
+                        .get(casters_view.map.array as usize)
+                        .and_then(|layers| layers.get(casters_view.map.layer as usize))
+                {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("casters' pyramid"),
+                        timestamp_writes: None,
+                    });
+                    let first_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("casters' pyramid first"),
+                        layout: &self.pyramid_first_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(depth),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&pyramid.levels[0]),
+                            },
+                        ],
+                    });
+                    pass.set_pipeline(&self.pyramid_first_pipeline);
+                    pass.set_bind_group(0, &first_group, &[]);
+                    let mut level_side = pyramid.side;
+                    // (each level half the one before, rounded down, as wgpu sizes them)
+                    pass.dispatch_workgroups(level_side.div_ceil(8), level_side.div_ceil(8), 1);
+                    pass.set_pipeline(&self.pyramid_next_pipeline);
+                    for level in 1..pyramid.levels.len() {
+                        level_side = (level_side / 2).max(1);
+                        let next_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("casters' pyramid next"),
+                            layout: &self.pyramid_next_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &pyramid.levels[level - 1],
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &pyramid.levels[level],
+                                    ),
+                                },
+                            ],
+                        });
+                        pass.set_bind_group(0, &next_group, &[]);
+                        pass.dispatch_workgroups(level_side.div_ceil(8), level_side.div_ceil(8), 1);
+                    }
+                }
                 // the hair's opacity maps (ADR-827), a layer each view: its nearest depth, then
                 // its density in the slices behind it; cleared where no hair casts, so a scene
                 // without hair reads none
@@ -2339,6 +2573,12 @@ impl MeshGpu {
                 Some(shadow) => (&shadow.opacity_front, &shadow.opacity),
                 None => (&self.no_opacity_front, &self.no_opacity),
             };
+            // the casters' pyramid (ADR-837), or the 1×1 stand-in
+            let caster_pyramid = target
+                .shadow
+                .as_ref()
+                .and_then(|shadow| shadow.caster_pyramid.as_ref())
+                .map_or(&self.no_pyramid, |pyramid| &pyramid.whole);
             let scene_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("mesh scene"),
                 layout: &self.scene_layout,
@@ -2368,6 +2608,10 @@ impl MeshGpu {
                     wgpu::BindGroupEntry {
                         binding: 8,
                         resource: wgpu::BindingResource::TextureView(hair_opacity_maps),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::TextureView(caster_pyramid),
                     },
                 ],
             });
@@ -2504,6 +2748,10 @@ impl MeshGpu {
                     wgpu::BindGroupEntry {
                         binding: 8,
                         resource: wgpu::BindingResource::TextureView(hair_opacity_maps),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::TextureView(caster_pyramid),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,

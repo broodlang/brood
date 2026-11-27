@@ -651,6 +651,53 @@ fn fs_particle(in: ParticleOut) -> @location(0) vec4<f32> {
 /// premultiplied, sRGB-encoded colour, the space the scene's picture is composited in.
 /// `vs_shadow` / `fs_shadow` render a shadow map: the same posing, seen through the shadow
 /// view the instance index names, alpha-tested for a `:cutout`, `:blend` or `:eye` surface.
+/// The casters' pyramid (ADR-837): the `:contact-caster` view's depth halved level by level,
+/// each texel the nearest of the 2×2 below it (an odd row or column left over taken by the last), so
+/// one level's few texels say whether any caster lies anywhere near a pixel. `first` copies the
+/// view's depth layer into level 0; `next` makes each level from the one before. Apart from
+/// `MESH_SRC`, whose group 0 holds other bindings.
+pub(super) const CASTER_PYRAMID_SRC: &str = r#"
+@group(0) @binding(0) var depth_in: texture_depth_2d;
+@group(0) @binding(1) var first_out: texture_storage_2d<r32float, write>;
+@group(0) @binding(2) var level_in: texture_2d<f32>;
+@group(0) @binding(3) var next_out: texture_storage_2d<r32float, write>;
+
+@compute @workgroup_size(8, 8)
+fn first(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(first_out);
+    if (id.x >= size.x || id.y >= size.y) {
+        return;
+    }
+    let depth = textureLoad(depth_in, vec2<i32>(id.xy), 0);
+    textureStore(first_out, vec2<i32>(id.xy), vec4<f32>(depth, 0.0, 0.0, 1.0));
+}
+
+@compute @workgroup_size(8, 8)
+fn next(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(next_out);
+    if (id.x >= size.x || id.y >= size.y) {
+        return;
+    }
+    let below = vec2<i32>(textureDimensions(level_in));
+    let last = below - vec2<i32>(1);
+    let corner = vec2<i32>(id.xy) * 2;
+    // (a level is half the one below rounded down: its last texel takes the odd row or column
+    // left over too, so no caster at the view's edge is lost)
+    let here = vec2<i32>(id.xy);
+    let edge = vec2<i32>(size) - vec2<i32>(1);
+    let wide = select(2, 3, here.x == edge.x && below.x > 2 * i32(size.x));
+    let tall = select(2, 3, here.y == edge.y && below.y > 2 * i32(size.y));
+    var nearest = 1.0;
+    for (var row = 0; row < tall; row = row + 1) {
+        for (var column = 0; column < wide; column = column + 1) {
+            let texel = min(corner + vec2<i32>(column, row), last);
+            nearest = min(nearest, textureLoad(level_in, texel, 0).r);
+        }
+    }
+    textureStore(next_out, vec2<i32>(id.xy), vec4<f32>(nearest, 0.0, 0.0, 1.0));
+}
+"#;
+
 pub(super) const MESH_SRC: &str = r#"
 struct Light {
     position: vec4<f32>,        // xyz, range (0: no window)
@@ -727,6 +774,9 @@ struct DrawU {
 // the four slices behind it that end `HAIR_SLICES` metres past it (`hair_transmittance`)
 @group(0) @binding(7) var hair_nearest: texture_depth_2d_array;
 @group(0) @binding(8) var hair_opacity: texture_2d_array<f32>;
+// the casters' pyramid (ADR-837, `CASTER_PYRAMID_SRC`): the `:contact-caster` view's nearest depth
+// over ever larger squares, 1.0 where no caster is drawn (a 1×1 stand-in without a casters' view)
+@group(0) @binding(9) var caster_pyramid: texture_2d<f32>;
 const HAIR_OPACITY_SIDE: f32 = 1024.0;
 const HAIR_SLICES: vec4<f32> = vec4<f32>(0.02, 0.05, 0.10, 0.25);
 @group(1) @binding(0) var<uniform> draw: DrawU;
@@ -2218,7 +2268,48 @@ fn contact_shadow(light: Light, world: vec3<f32>, to_light: vec3<f32>, surface_n
 // on skin (ADR-837): the same march, through the depth of the `:contact-caster` draws alone
 // (cloth), so what lies on her shades her and her own creases, never in that view, do not
 fn contact_shadow_on_skin(light: Light, world: vec3<f32>, to_light: vec3<f32>, surface_normal: vec3<f32>, to_eye: vec3<f32>) -> f32 {
+    // (most of her skin has no cloth near it: the march, 12 steps toward each light, only where
+    // the casters' pyramid holds a caster within reach, else she paid 2.5 ms at her bust for nothing)
+    if (!caster_within_reach(u32(scene.occlusion.w), world)) {
+        return 1.0;
+    }
     return screen_blocked_in(u32(scene.occlusion.w), world, to_light, CONTACT_REACH, surface_normal, to_eye, light_spread(light, world), CASTER_THICKNESS);
+}
+// whether any caster lies within `CONTACT_REACH` of `world` as the casters' view (one before `at`)
+// sees it, in any direction, so for every light at once: the casters' pyramid at the level whose
+// texel spans twice the reach in that view's pixels there, its 2×2 texels nearest the point (a
+// disc of the reach then lies inside them), any nearer than the far plane (ADR-837). It cannot
+// miss: what blocks a light from `world` within the reach lies inside that disc. (Probes along
+// each light's way missed up to 94 % of the shade: a hem is crossed in the march's first
+// millimetres.) Where the view cannot say, it answers yes, and the march decides.
+fn caster_within_reach(at: u32, world: vec3<f32>) -> bool {
+    if (at == 0u) {
+        return false;
+    }
+    let view = scene.shadows[at - 1u];
+    let side = f32(view.info.y);
+    let clip = view.view_proj * vec4<f32>(world, 1.0);
+    if (clip.w <= 1e-6) {
+        return true;
+    }
+    let at_texel = vec2<f32>(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5) * side;
+    // the reach in the view's pixels at this depth, a quarter more for a point of the march
+    // nearer the camera than `world`, and a pixel for the texel the march rounds to
+    let row_scale = length(vec3<f32>(view.view_proj[0].x, view.view_proj[1].x, view.view_proj[2].x));
+    let reach = 1.25 * CONTACT_REACH * side * max(row_scale, 1e-6) / (2.0 * clip.w) + 1.0;
+    let levels = i32(textureNumLevels(caster_pyramid));
+    let level = clamp(i32(ceil(log2(2.0 * reach))), 0, levels - 1);
+    let size = vec2<i32>(textureDimensions(caster_pyramid, level));
+    let corner = vec2<i32>(floor(at_texel / f32(1 << u32(level)) - vec2<f32>(0.5)));
+    for (var row = 0; row < 2; row = row + 1) {
+        for (var column = 0; column < 2; column = column + 1) {
+            let texel = clamp(corner + vec2<i32>(column, row), vec2<i32>(0), size - vec2<i32>(1));
+            if (textureLoad(caster_pyramid, texel, level).r < 1.0) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 // how wide a light is seen from `world`: the tangent of half the angle it spans (ADR-837
 // amended): a point light 0 (its contact shadow hard), her 1.3 m key two metres off about 0.33

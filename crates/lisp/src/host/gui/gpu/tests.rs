@@ -98,6 +98,40 @@ fn the_text_shaders_validate_the_lcd_one_only_with_dual_source_blending() {
 }
 
 #[test]
+fn the_casters_pyramid_shader_validates() {
+    // ADR-837: the casters' depth halved level by level, apart from the mesh shader's group 0
+    validate_wgsl(
+        CASTER_PYRAMID_SRC,
+        wgpu::naga::valid::Capabilities::default(),
+    );
+}
+
+#[test]
+fn the_casters_pyramid_texels_read_cover_the_whole_reach() {
+    // ADR-837's early exit cannot miss a caster: for a point at `at` (level 0 texels) and a reach
+    // `reach` texels, the 2×2 texels the shader reads, at the level it picks, hold the whole disc
+    // of the reach round the point (as `caster_within_reach` picks them)
+    let picked = |at: f32, reach: f32| -> (f32, f32) {
+        let level = (2.0 * reach).log2().ceil().max(0.0);
+        let span = 2f32.powf(level);
+        let corner = (at / span - 0.5).floor();
+        (corner * span, (corner + 2.0) * span)
+    };
+    for reach_tenths in 10..400 {
+        let reach = reach_tenths as f32 * 0.1;
+        for at_tenths in 0..2000 {
+            let at = at_tenths as f32 * 0.37;
+            let (low, high) = picked(at, reach);
+            assert!(
+                low <= at - reach && at + reach <= high,
+                "at {at} reach {reach}: {low}..{high}"
+            );
+        }
+    }
+    assert!(MESH_SRC.contains("if (!caster_within_reach(u32(scene.occlusion.w), world)) {"));
+}
+
+#[test]
 fn the_mesh_shader_validates() {
     // ADR-786: the WGSL twin of `host::gui::mesh`'s shading model, checked without a device
     validate_wgsl(MESH_SRC, wgpu::naga::valid::Capabilities::default());
