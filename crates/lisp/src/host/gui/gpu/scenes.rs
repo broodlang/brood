@@ -1732,6 +1732,7 @@ impl MeshGpu {
                     double_sided: material.double_sided,
                     blended: material.surface == Surface::Blend,
                     casts: material.cast_shadow,
+                    contact_caster: material.contact_caster,
                     surface: material.surface,
                     pressed,
                     fibres: material.fibres,
@@ -2157,7 +2158,8 @@ impl MeshGpu {
                     let instance = view_index as u32;
                     // (what is opaque: a `:fibres` mesh's shadow is its opacity maps', below)
                     for (draw, material) in plans[index].iter().zip(&materials) {
-                        if !draw.casts || draw.fibres {
+                        if !draw.casts || draw.fibres || (view.casters_only && !draw.contact_caster)
+                        {
                             continue;
                         }
                         let mesh = &self.meshes[&draw.mesh];
@@ -2796,6 +2798,8 @@ struct DrawPlan {
     double_sided: bool,
     blended: bool,
     casts: bool,
+    /// drawn into the camera's casters-only view too (ADR-837)
+    contact_caster: bool,
     /// How it is shaded: what a draw's GPU time is told by (ADR-801).
     surface: Surface,
     /// Pressed by the scene's contacts (ADR-805): its vertices posed and deformed by the compute
@@ -3044,7 +3048,8 @@ fn scene_words(
             radius,
             strength,
             shadows.occlusion.map_or(0.0, |view| (view + 1) as f32),
-            0.0,
+            // the casters' view (ADR-837), one past its index, 0 none
+            shadows.casters.map_or(0.0, |view| (view + 1) as f32),
         ],
     );
     // the picture's size in pixels, for a strand's pixel width (`mesh::strand_vertex`)

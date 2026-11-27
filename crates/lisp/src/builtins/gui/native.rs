@@ -1825,6 +1825,10 @@ fn scene_spec(
         // as before when not given
         // a cloth's sheen, [r g b roughness] (ADR-836; glTF's KHR_materials_sheen colour and
         // roughness): the colour kept to 0 … 1, the roughness to 0.07 … 1
+        // what shades skin under it at millimetres (ADR-837): `:contact-caster true`
+        if let Some(Value::Bool(caster)) = get(material_map, "contact-caster") {
+            material.contact_caster = caster;
+        }
         if let Some(sheen) = numbers(get(material_map, "sheen-cloth"), 4) {
             material.sheen_cloth = Some([
                 sheen[0].clamp(0.0, 1.0),
@@ -4576,10 +4580,22 @@ mod gui_scene_light_tests {
     }
 
     #[test]
+    fn contact_caster_read_and_false_by_default() {
+        // ADR-837
+        let given = scene_with("[]", "{:contact-caster true}").expect("a scene");
+        assert!(given.draws[0].material.contact_caster);
+        let plain = scene_with("[]", "{}").expect("a scene");
+        assert!(!plain.draws[0].material.contact_caster);
+    }
+
+    #[test]
     fn sheen_cloth_read_clamped_and_absent_by_default() {
         // ADR-836: [r g b roughness], the colour to 0 … 1, the roughness to 0.07 … 1
         let given = scene_with("[]", "{:sheen-cloth [0.9 1.4 0.5 0.01]}").expect("a scene");
-        assert_eq!(given.draws[0].material.sheen_cloth, Some([0.9, 1.0, 0.5, 0.07]));
+        assert_eq!(
+            given.draws[0].material.sheen_cloth,
+            Some([0.9, 1.0, 0.5, 0.07])
+        );
         let plain = scene_with("[]", "{}").expect("a scene");
         assert_eq!(plain.draws[0].material.sheen_cloth, None);
     }

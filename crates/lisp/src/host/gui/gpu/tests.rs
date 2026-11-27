@@ -919,12 +919,10 @@ fn the_bounce_is_never_darker_than_the_occlusion_and_tinted_by_the_surroundings(
 
 #[test]
 fn a_light_without_a_shadow_map_still_has_its_contact_shadow() {
-    // ADR-818, amended 2026-11-27: every light but on skin and hair
-    assert!(
-        MESH_SRC.contains(
-            "} else if (draw.flags.x != 0u && draw.flags.x != 4u && draw.flags.x != 5u) {"
-        )
-    );
+    // ADR-818, amended 2026-11-27: every light but on hair; skin takes its own branch first,
+    // marching only the `:contact-caster` view (ADR-837)
+    assert!(MESH_SRC.contains("} else if (draw.flags.x == 0u) {"));
+    assert!(MESH_SRC.contains("} else if (draw.flags.x != 4u && draw.flags.x != 5u) {"));
     assert!(MESH_SRC.contains("            contact = contact_shadow(world, arrival.to_light, surface_normal, view);\n            seen = contact;"));
 }
 
@@ -999,4 +997,13 @@ fn the_sheens_albedo_fit_stays_within_the_integral() {
         );
     }
     assert!(MESH_SRC.contains("return clamp(-0.30065 + 1.4614 * rough"));
+}
+
+#[test]
+fn skin_marches_its_contact_shadow_through_the_casters_view_alone() {
+    // ADR-837: on skin the contact march reads the `:contact-caster` view (scene.occlusion.w),
+    // under shadowed and unshadowed lights alike; every other surface keeps the camera's own
+    assert!(MESH_SRC.contains("return screen_blocked_in(u32(scene.occlusion.w), world, to_light, CONTACT_REACH, surface_normal, to_eye);"));
+    assert!(MESH_SRC.contains("} else {\n                    contact = contact_shadow_on_skin(world, arrival.to_light, surface_normal, view);"));
+    assert!(MESH_SRC.contains("} else if (draw.flags.x == 0u) {"));
 }
