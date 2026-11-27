@@ -2555,11 +2555,17 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             // it the key in front of her lit the back of her hair through her head, a brighter,
             // purer red the more hair it crossed (ADR-827)
             var through = vec3<f32>(seen);
+            // the shaded share the scattered light's tint is raised by (ADR-825): none where the
+            // bake already coloured the light by the fibres it crossed, or it was coloured twice,
+            // each channel apart the second time (the under-layer behind her jaw a near-black
+            // crimson, G/R 0.10)
+            var baked = false;
             if (dot(fibre_visibility, fibre_visibility) > 0.0) {
+                baked = true;
                 let crossed = draw.material.z * max(0.0, fibre_visibility.x + dot(fibre_visibility.yzw, to_light));
                 through = pow(fibre_transmittance(base), vec3<f32>(crossed)) * exp(-0.03 * crossed) * opaque;
             }
-            let shadowed = dot(through, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let shadowed = select(dot(through, vec3<f32>(0.2126, 0.7152, 0.0722)), 1.0, baked);
             out = out + light.color.rgb * arriving * through * karis_hair(base, strand, view, to_light, shadowed, select(0.0, 1.0, light.shadow.z > 0u));
             continue;
         }
