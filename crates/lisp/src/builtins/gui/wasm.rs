@@ -41,6 +41,7 @@ wasm_unsupported_builtins!(
     gui_latency,
     gui_latency_histogram,
     gui_scene_gpu_times,
+    gui_scene_push_outs,
     gui_key_repeat,
     gui_key_repeats,
     gui_settle,
