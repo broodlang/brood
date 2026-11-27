@@ -1,0 +1,49 @@
+(defmodule jit-leaf-admit-test (:use test))
+
+;;; A named function whose only calls the leaf inliner takes — `math/clamp`, a small helper
+;;; of its own — is native. The JIT's cost gate (`call-mediated-boxed`) refuses a first
+;;; lowering to a named function that holds a call and no vector op or loop, because a native
+;;; call costs more than the VM's; and the inlined upgrade only follows a first lowering. So
+;;; a function whose calls would ALL have been spliced away stayed on the VM for good: a
+;;; `smoothstep` over `math/clamp` took 559 ns a call where its spliced body takes 26. The gate
+;;; admits an arm whose spliced body holds no call (`plan_general_lowering`).
+
+(defn la-smoothstep (low high value)
+  (let (share (math/clamp (/ (- value low) (- high low)) 0.0 1.0))
+    (* share share (- 3.0 (* 2.0 share)))))
+
+(defn la-written-out (low high value)
+  (let (share (math/max 0.0 (math/min 1.0 (/ (- value low) (- high low)))))
+    (* share share (- 3.0 (* 2.0 share)))))
+
+(defn la-sum (count x sum)
+  (if (= count 0) sum (la-sum (- count 1) (+ x 0.0001) (+ sum (la-smoothstep 0.1 0.9 x)))))
+
+(defn la-sum-written-out (count x sum)
+  (if (= count 0)
+    sum
+    (la-sum-written-out (- count 1) (+ x 0.0001) (+ sum (la-written-out 0.1 0.9 x)))))
+
+(defn- settled? ()
+  ;; `la-smoothstep` native within a few thousand calls and a short wait for the compiler
+  (fold (range 80)
+    false
+    (fn (done _)
+      (or done
+        (do
+          (la-sum 500 0.0 0.0)
+          (let (native? (fn () (= :native (get (%jit-arm-state la-smoothstep 3) :state))))
+            (or (native?) (do (proc/sleep 25) (native?)))))))))
+
+(describe "a function whose calls all inline away"
+  (test "is native, where the cost gate left it on the VM"
+    (when (%native-tier?)
+      (is (settled?))))
+
+  (test "answers what the same arithmetic written out does, before and after it tiers"
+    (assert= (la-sum 2000 -0.2 0.0) (la-sum-written-out 2000 -0.2 0.0))
+    (la-sum 60000 -0.2 0.0)
+    (assert= (la-sum 20000 -0.2 0.0) (la-sum-written-out 20000 -0.2 0.0))
+    (assert= (la-smoothstep 0.0 2.0 1.0) 0.5)
+    (assert= (la-smoothstep 0.0 1.0 5.0) 1.0)
+    (assert= (la-smoothstep 0.0 1.0 -5.0) 0.0)))
