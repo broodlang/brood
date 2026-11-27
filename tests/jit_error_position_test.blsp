@@ -15,7 +15,7 @@
 
 ;; (a builtin's refusal raised IN native code, come back to a caller that is not hot: the
 ;; driver that ran the native callee tags it from its pending callers)
-(defn- jep-builtin (items x) (+ (nth items 0) (string/length x)))
+(defn- jep-builtin (items x) (+ (nth items 0) (%string-length x)))
 
 (defn- jep-cold-caller (items x) (+ 1 (jep-builtin items x)))
 
