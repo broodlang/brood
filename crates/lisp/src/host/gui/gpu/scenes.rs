@@ -222,6 +222,9 @@ pub(super) struct SceneTarget {
     color: wgpu::TextureView,
     depth: wgpu::TextureView,
     resolve: wgpu::TextureView,
+    /// What the colour pass drew before its see-through draws (ADR-842), resolved: the colour
+    /// they are mixed toward. Written only on a frame that has one.
+    behind: wgpu::TextureView,
     /// The resolved picture bound for the textured pipeline.
     pub(super) composite: wgpu::BindGroup,
     /// Its shadow maps, kept while their number and size stay (ADR-788).
@@ -438,6 +441,8 @@ pub(super) struct MeshGpu {
     pyramid_first_layout: wgpu::BindGroupLayout,
     pyramid_next_layout: wgpu::BindGroupLayout,
     no_pyramid: wgpu::TextureView,
+    /// What a see-through draw reads when nothing was split off behind it (ADR-842): one texel.
+    no_behind: wgpu::TextureView,
     /// `mesh::skin_table` as the colour passes read it (ADR-794): `Rgba32Float`, the CPU
     /// painter's own numbers.
     skin_table: wgpu::TextureView,
@@ -706,6 +711,17 @@ impl MeshGpu {
             // the casters' pyramid (ADR-837), loaded texel by texel at a chosen level
             wgpu::BindGroupLayoutEntry {
                 binding: 9,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // what lies behind the see-through draws (ADR-842), loaded at the fragment's pixel
+            wgpu::BindGroupLayoutEntry {
+                binding: 10,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: false },
@@ -1274,6 +1290,22 @@ impl MeshGpu {
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let no_behind = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("nothing behind the see-through"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: COLOR_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let uniforms = wgpu::BufferUsages::UNIFORM;
         let storage_usage = wgpu::BufferUsages::STORAGE;
         // the contact passes (ADR-805): each pressed vertex posed once, each contact's deepest press
@@ -1355,6 +1387,7 @@ impl MeshGpu {
             pyramid_first_layout,
             pyramid_next_layout,
             no_pyramid,
+            no_behind,
             skin_table: skin_table_texture(device, queue),
             scene_buffer: buffer(device, "mesh scenes", SCENE_BYTES, uniforms),
             scene_capacity: SCENE_BYTES,
@@ -1583,6 +1616,13 @@ impl MeshGpu {
             1,
             attachment | wgpu::TextureUsages::TEXTURE_BINDING,
         );
+        // (what lies behind the see-through draws, ADR-842: the first part's resolve)
+        let behind = texture(
+            "scene behind the see-through",
+            COLOR_FORMAT,
+            1,
+            attachment | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
         let composite = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene picture"),
             layout: tex_layout,
@@ -1602,6 +1642,7 @@ impl MeshGpu {
             color,
             depth,
             resolve,
+            behind,
             composite,
             shadow: None,
             contacts: None,
@@ -1872,7 +1913,9 @@ impl MeshGpu {
                     // (and 8192 for a garment, its vertices pushed out of her skin, ADR-839)
                     | if material.garment { 8192 } else { 0 }
                     // (and 16384 for a garment's stretch read from its second UV set, ADR-840)
-                    | if material.stretch_from_uv2 { 16384 } else { 0 };
+                    | if material.stretch_from_uv2 { 16384 } else { 0 }
+                    // (and 32768 for its stretch shown as a diagnostic, ADR-842)
+                    | if material.show_stretch { 32768 } else { 0 };
                 // its morphs blended here, sparse, into one offset a vertex (none when no target
                 // it names moves anything, or the frame's offsets would pass the binding limit)
                 let vertex_count = mesh.vertex_count as usize;
@@ -1957,6 +2000,7 @@ impl MeshGpu {
                     surface: material.surface,
                     pressed,
                     fibres: material.fibres,
+                    see_through: see_through_share(material) > 0.0,
                     hair_bounds: if material.fibres && material.cast_shadow {
                         draw_bounds(scene, draw, &mesh.bounds)
                     } else {
@@ -2620,42 +2664,57 @@ impl MeshGpu {
                 .as_ref()
                 .and_then(|shadow| shadow.caster_pyramid.as_ref())
                 .map_or(&self.no_pyramid, |pyramid| &pyramid.whole);
-            let scene_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("mesh scene"),
-                layout: &self.scene_layout,
-                entries: &[
-                    scene_uniform_entry(),
-                    palette_entry(),
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(shadow_maps),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&self.skin_table),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(smaller_shadow_maps),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::TextureView(hair_nearest_maps),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
-                        resource: wgpu::BindingResource::TextureView(hair_opacity_maps),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 9,
-                        resource: wgpu::BindingResource::TextureView(caster_pyramid),
-                    },
-                ],
-            });
+            // (built for each part of the colour pass: the part before a split reads the stand-in at
+            // binding 10, since it writes the texture the part after reads, ADR-842)
+            let scene_group_over = |behind: &wgpu::TextureView| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mesh scene"),
+                    layout: &self.scene_layout,
+                    entries: &[
+                        scene_uniform_entry(),
+                        palette_entry(),
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(shadow_maps),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&self.skin_table),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(smaller_shadow_maps),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(hair_nearest_maps),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: wgpu::BindingResource::TextureView(hair_opacity_maps),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::TextureView(caster_pyramid),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: wgpu::BindingResource::TextureView(behind),
+                        },
+                    ],
+                })
+            };
+            // the colour pass split where its see-through draws begin (ADR-842): everything else
+            // that is opaque first, resolved into `behind`, then the see-through draws and what
+            // blends over them, mixed toward it. A scene without one is one pass, as before.
+            let split = plans[index]
+                .iter()
+                .any(|draw| draw.see_through && !draw.fibres);
+            let scene_group = scene_group_over(&self.no_behind);
             let background = scene.background;
             let opacity = background[3].clamp(0.0, 1.0);
             let clear = wgpu::Color {
@@ -2668,49 +2727,122 @@ impl MeshGpu {
                 .timer
                 .as_mut()
                 .and_then(|timer| timer.colour_stamps(index));
-            let timestamp_writes = colour_stamps
-                .and_then(|(start, end)| self.timer.as_ref()?.writes(Some(start), Some(end)));
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("scene"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.color,
-                    depth_slice: None,
-                    resolve_target: Some(&target.resolve),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
-                        store: wgpu::StoreOp::Discard,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &target.depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        // kept for the fibres' passes when the scene has them (ADR-813)
-                        store: if target.fibres.is_some() {
-                            wgpu::StoreOp::Store
-                        } else {
-                            wgpu::StoreOp::Discard
-                        },
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_bind_group(0, &scene_group, &[scene_offset]);
             let is_hair =
                 |draw: &DrawPlan| matches!(draw.surface, Surface::Hair | Surface::Strands);
             let prepass = hair_prepass();
-            // the hair's coverage to depth first (ADR-802), so its colour is shaded only where
-            // it is the hair in front: every layer of wisps behind is rejected before shading
-            if prepass {
+            // which part of a split colour pass a draw is in (ADR-842): the first, what lies
+            // behind the see-through draws (opaque, not hair); the second, those and everything
+            // that is drawn over them (blended, hair). Unsplit, every draw is in the one part.
+            let in_first = |draw: &DrawPlan| !draw.see_through && !draw.blended && !is_hair(draw);
+            let parts: &[bool] = if split { &[true, false] } else { &[true] };
+            for &first in parts {
+                let last = !split || !first;
+                let timestamp_writes = colour_stamps.and_then(|(start, end)| {
+                    self.timer
+                        .as_ref()?
+                        .writes(first.then_some(start), last.then_some(end))
+                });
+                let part_group;
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(if !split {
+                        "scene"
+                    } else if first {
+                        "scene behind the see-through"
+                    } else {
+                        "scene see-through"
+                    }),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target.color,
+                        depth_slice: None,
+                        // (the first part of a split resolves into what the second reads)
+                        resolve_target: Some(if last {
+                            &target.resolve
+                        } else {
+                            &target.behind
+                        }),
+                        ops: wgpu::Operations {
+                            load: if first {
+                                wgpu::LoadOp::Clear(clear)
+                            } else {
+                                wgpu::LoadOp::Load
+                            },
+                            store: if last {
+                                wgpu::StoreOp::Discard
+                            } else {
+                                wgpu::StoreOp::Store
+                            },
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &target.depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: if first {
+                                wgpu::LoadOp::Clear(1.0)
+                            } else {
+                                wgpu::LoadOp::Load
+                            },
+                            // kept for the fibres' passes when the scene has them (ADR-813), and
+                            // for the second part of a split
+                            store: if target.fibres.is_some() || !last {
+                                wgpu::StoreOp::Store
+                            } else {
+                                wgpu::StoreOp::Discard
+                            },
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                if split && !first {
+                    part_group = scene_group_over(&target.behind);
+                    pass.set_bind_group(0, &part_group, &[scene_offset]);
+                } else {
+                    pass.set_bind_group(0, &scene_group, &[scene_offset]);
+                }
+                let wanted = |draw: &DrawPlan| !split || in_first(draw) == first;
+                // the hair's coverage to depth first (ADR-802), so its colour is shaded only where
+                // it is the hair in front: every layer of wisps behind is rejected before shading
+                if prepass {
+                    for (draw, material) in plans[index].iter().zip(&materials) {
+                        if !is_hair(draw) || draw.fibres || !wanted(draw) {
+                            continue;
+                        }
+                        let mesh = &self.meshes[&draw.mesh];
+                        pass.set_pipeline(&self.hair_depth_pipelines[draw.double_sided as usize]);
+                        pass.set_bind_group(
+                            1,
+                            &draw_group,
+                            &[(draw.at as u64 * DRAW_BYTES) as u32],
+                        );
+                        pass.set_bind_group(2, &morph_group, &[]);
+                        pass.set_bind_group(3, material, &[]);
+                        pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                        pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    }
+                }
                 for (draw, material) in plans[index].iter().zip(&materials) {
-                    if !is_hair(draw) || draw.fibres {
+                    // (a `:fibres` draw is drawn by the fibre passes after this one, ADR-813)
+                    if draw.fibres || !wanted(draw) {
                         continue;
                     }
                     let mesh = &self.meshes[&draw.mesh];
-                    pass.set_pipeline(&self.hair_depth_pipelines[draw.double_sided as usize]);
+                    // each draw's own time on the card, under BROOD_GUI_GPU_TIMES=draws (ADR-801)
+                    let stamp = self.timer.as_mut().and_then(|timer| {
+                        timer.draw_stamp(index, draw.mesh, draw.surface, mesh.index_count / 3)
+                    });
+                    if let (Some(query), Some(timer)) = (stamp, &self.timer) {
+                        pass.write_timestamp(timer.query_set(), query);
+                    }
+                    if prepass && is_hair(draw) {
+                        pass.set_pipeline(&self.hair_front_pipelines[draw.double_sided as usize]);
+                    } else {
+                        pass.set_pipeline(
+                            &self.pipelines[draw.double_sided as usize * 2 + draw.blended as usize],
+                        );
+                    }
                     pass.set_bind_group(1, &draw_group, &[(draw.at as u64 * DRAW_BYTES) as u32]);
                     pass.set_bind_group(2, &morph_group, &[]);
                     pass.set_bind_group(3, material, &[]);
@@ -2718,42 +2850,17 @@ impl MeshGpu {
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                 }
-            }
-            for (draw, material) in plans[index].iter().zip(&materials) {
-                // (a `:fibres` draw is drawn by the fibre passes after this one, ADR-813)
-                if draw.fibres {
-                    continue;
+                if last {
+                    let end = self
+                        .timer
+                        .as_mut()
+                        .and_then(|timer| timer.draws_end_stamp(index));
+                    if let (Some(query), Some(timer)) = (end, &self.timer) {
+                        pass.write_timestamp(timer.query_set(), query);
+                    }
                 }
-                let mesh = &self.meshes[&draw.mesh];
-                // each draw's own time on the card, under BROOD_GUI_GPU_TIMES=draws (ADR-801)
-                let stamp = self.timer.as_mut().and_then(|timer| {
-                    timer.draw_stamp(index, draw.mesh, draw.surface, mesh.index_count / 3)
-                });
-                if let (Some(query), Some(timer)) = (stamp, &self.timer) {
-                    pass.write_timestamp(timer.query_set(), query);
-                }
-                if prepass && is_hair(draw) {
-                    pass.set_pipeline(&self.hair_front_pipelines[draw.double_sided as usize]);
-                } else {
-                    pass.set_pipeline(
-                        &self.pipelines[draw.double_sided as usize * 2 + draw.blended as usize],
-                    );
-                }
-                pass.set_bind_group(1, &draw_group, &[(draw.at as u64 * DRAW_BYTES) as u32]);
-                pass.set_bind_group(2, &morph_group, &[]);
-                pass.set_bind_group(3, material, &[]);
-                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                drop(pass);
             }
-            let end = self
-                .timer
-                .as_mut()
-                .and_then(|timer| timer.draws_end_stamp(index));
-            if let (Some(query), Some(timer)) = (end, &self.timer) {
-                pass.write_timestamp(timer.query_set(), query);
-            }
-            drop(pass);
             // the scene's `:fibres` (ADR-813: `fibres.rs`): after its colour pass, over it
             let Some(fibre_target) = &target.fibres else {
                 continue;
@@ -2793,6 +2900,10 @@ impl MeshGpu {
                     wgpu::BindGroupEntry {
                         binding: 9,
                         resource: wgpu::BindingResource::TextureView(caster_pyramid),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: wgpu::BindingResource::TextureView(&self.no_behind),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
@@ -2959,11 +3070,16 @@ pub(super) fn draw_uniform(
     // strength and roughness (ADR-795; 0: none)
     let [coat_strength, coat_roughness] = material.coat.unwrap_or([0.0, 0.0]);
     floats.extend_from_slice(&[material.scatter_scale(), coat_strength, coat_roughness, 0.0]);
-    // (the third: a `:fibres` surface's `:density`, how much of its baked hair count dims its light)
+    // (the third: a `:fibres` surface's `:density`, how much of its baked hair count dims its light;
+    // any other surface's `:see-through`, ADR-842: no surface has both)
     floats.extend_from_slice(&[
         material.roughness,
         material.specular,
-        material.fibre_density,
+        if material.fibres {
+            material.fibre_density
+        } else {
+            see_through_share(material)
+        },
         material.cutoff,
     ]);
     let lobes = material.lobes();
@@ -3127,6 +3243,16 @@ fn eye_floats(material: &crate::host::gui::mesh::Material) -> [f32; 32] {
     floats
 }
 
+/// How much of what is drawn behind a draw shows through it (`:see-through`, ADR-842): 0 on a
+/// blended, hair or `:fibres` surface, which have their own coverage.
+fn see_through_share(material: &crate::host::gui::mesh::Material) -> f32 {
+    match material.surface {
+        Surface::Blend | Surface::Hair | Surface::Strands => 0.0,
+        _ if material.fibres => 0.0,
+        _ => material.see_through,
+    }
+}
+
 /// One draw of a scene as the passes issue it.
 struct DrawPlan {
     /// Its `DrawU`'s slot in the frame's draw buffer.
@@ -3144,6 +3270,9 @@ struct DrawPlan {
     pressed: bool,
     /// A `:fibres` draw (ADR-813): drawn by the fibre passes after the colour pass, not in it.
     fibres: bool,
+    /// A see-through draw (ADR-842): drawn after the colour pass is split, opaque, mixed toward
+    /// what the first part drew at its pixel.
+    see_through: bool,
     /// A casting `:fibres` draw's world bounds this frame (ADR-827): the shadow views it is in
     /// (`seen_by`) are the only ones it is drawn into for its opacity maps.
     hair_bounds: Option<Bounds>,

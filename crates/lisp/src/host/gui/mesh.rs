@@ -1228,6 +1228,17 @@ pub struct Material {
     /// alpha.
     pub knit_cover: f32,
     pub knit_layers: f32,
+    /// How much of what the scene draws behind it shows through it, 0 … 1 (`:see-through`; 0, the
+    /// default: none). The draw stays opaque (depth written, nothing sorted) and its lit colour is
+    /// mixed by this share toward the colour already drawn at its pixel before the see-through
+    /// draws: the scene's colour pass is split there (ADR-842), so no other see-through piece, a
+    /// hem under a panel or a garment's own inside, is ever what shows. Not on a blended, hair or
+    /// `:fibres` surface. The GPU painter only.
+    pub see_through: f32,
+    /// A diagnostic (`:show-stretch`, ADR-842): its albedo replaced by its cloth's stretch, live, a
+    /// colour from slack (blue) through rest (white) to stretched (yellow, red), with fine strokes
+    /// along the stronger stretch. The GPU painter only.
+    pub show_stretch: bool,
     /// A `:fibres` surface (ADR-813): a `:strands` mesh at its real width, its coverage of a
     /// pixel worked out exactly and blended, the three nearest layers a pixel lit (TressFX
     /// ShortCut). The GPU painter alone draws it so; the CPU painter draws it as `:strands`.
@@ -1293,6 +1304,8 @@ impl Default for Material {
             stretch_from_uv2: false,
             knit_cover: 0.0,
             knit_layers: 1.0,
+            see_through: 0.0,
+            show_stretch: false,
             fibres: false,
             clamp_planes: Vec::new(),
             fibre_density: 0.4,

@@ -1880,6 +1880,13 @@ fn scene_spec(
         if let Some(layers) = number("knit-layers") {
             material.knit_layers = layers.clamp(1.0, 8.0);
         }
+        // what shows through it, drawn opaque and mixed toward what is behind (ADR-842)
+        if let Some(share) = number("see-through") {
+            material.see_through = share.clamp(0.0, 1.0);
+        }
+        // and its stretch shown as a diagnostic (ADR-842)
+        material.show_stretch =
+            matches!(get(material_map, "show-stretch"), Some(Value::Bool(true)));
         // a `:fibres` surface's `:density`: how much of its baked hair count dims its light (a
         // number from 0; 0.4 without it); refused when not, as a wrong one would light hair
         // wrongly without a word
@@ -4709,6 +4716,21 @@ mod gui_scene_light_tests {
         let material = &plain.draws[0].material;
         assert!(!material.stretch_from_uv2);
         assert_eq!((material.knit_cover, material.knit_layers), (0.0, 1.0));
+    }
+
+    #[test]
+    fn see_through_and_show_stretch_are_read_clamped_and_off_by_default() {
+        // ADR-842: the share of what is behind that shows through (0 … 1), and the stretch shown
+        let scene = scene_with("[]", "{:see-through 0.2 :show-stretch true}").expect("a scene");
+        let material = &scene.draws[0].material;
+        assert_eq!(material.see_through, 0.2);
+        assert!(material.show_stretch);
+        let clamped = scene_with("[]", "{:see-through 1.5}").expect("a scene");
+        assert_eq!(clamped.draws[0].material.see_through, 1.0);
+        let plain = scene_with("[]", "{}").expect("a scene");
+        let material = &plain.draws[0].material;
+        assert_eq!(material.see_through, 0.0);
+        assert!(!material.show_stretch);
     }
 
     #[test]

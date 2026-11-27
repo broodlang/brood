@@ -777,6 +777,9 @@ struct DrawU {
 // the casters' pyramid (ADR-837, `CASTER_PYRAMID_SRC`): the `:contact-caster` view's nearest depth
 // over ever larger squares, 1.0 where no caster is drawn (a 1×1 stand-in without a casters' view)
 @group(0) @binding(9) var caster_pyramid: texture_2d<f32>;
+// what the colour pass drew before its see-through draws (ADR-842: the first part of the split,
+// resolved; display-encoded as the picture is), a 1×1 stand-in when it is not split
+@group(0) @binding(10) var behind_picture: texture_2d<f32>;
 const HAIR_OPACITY_SIDE: f32 = 1024.0;
 const HAIR_SLICES: vec4<f32> = vec4<f32>(0.02, 0.05, 0.10, 0.25);
 @group(1) @binding(0) var<uniform> draw: DrawU;
@@ -1364,6 +1367,9 @@ struct VertexOut {
     @location(9) visibility: vec4<f32>,
     // its second UV set (`mesh::Mesh::uvs2`, ADR-817): what `:wrinkles {:uv 1}` reads by
     @location(10) uv2: vec2<f32>,
+    // its position in the mesh as it was made, before any morph, skinning or press: what a
+    // garment's live stretch is measured against (`:show-stretch`, ADR-842)
+    @location(11) made: vec3<f32>,
 };
 
 // the garment's stretch at this fragment (ADR-840, `:stretch-from-uv2`: its second UV set holds
@@ -1394,6 +1400,71 @@ fn knit_alpha(fragment: VertexOut) -> f32 {
 // along each axis by the stretch, so the knit's loops grow as the cloth is pulled (ADR-840)
 fn detail_uv(fragment: VertexOut) -> vec2<f32> {
     return fragment.uv * draw.detail.xy / fabric_stretch(fragment);
+}
+
+// a garment's stretch shown (`:show-stretch`, texture bit 32768, ADR-842): its cloth's principal
+// stretch now against its cut, as a colour, and the direction of the stronger one as fine strokes.
+// Live: the pose's own stretch is measured in the cloth's plane from the screen's derivatives,
+// F = ∂position/∂uv for the drawn position and for the made one (UVs in metres of fabric), the
+// principal stretches the square roots of the eigenvalues of G_made⁻¹ G_drawn (G = FᵀF), times
+// the stretch the cloth was fitted with (its second UV set, weft × warp, as one mean). The derivatives
+// are taken by the caller in uniform control flow. Returns the albedo it is lit with.
+fn stretch_shown(fragment: VertexOut, world_dx: vec3<f32>, world_dy: vec3<f32>, made_dx: vec3<f32>, made_dy: vec3<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>) -> vec3<f32> {
+    // ∂uv/∂screen inverted: the screen's step a unit of uv takes
+    let turn = uv_dx.x * uv_dy.y - uv_dy.x * uv_dx.y;
+    if (abs(turn) < 1e-14) {
+        return vec3<f32>(0.5);
+    }
+    let du = vec2<f32>(uv_dy.y, -uv_dx.y) / turn;
+    let dv = vec2<f32>(-uv_dy.x, uv_dx.x) / turn;
+    let drawn_u = world_dx * du.x + world_dy * du.y;
+    let drawn_v = world_dx * dv.x + world_dy * dv.y;
+    let made_u = made_dx * du.x + made_dy * du.y;
+    let made_v = made_dx * dv.x + made_dy * dv.y;
+    let g_drawn = mat2x2<f32>(dot(drawn_u, drawn_u), dot(drawn_u, drawn_v), dot(drawn_u, drawn_v), dot(drawn_v, drawn_v));
+    let made_uu = dot(made_u, made_u);
+    let made_uv = dot(made_u, made_v);
+    let made_vv = dot(made_v, made_v);
+    let made_det = made_uu * made_vv - made_uv * made_uv;
+    if (made_det < 1e-20) {
+        return vec3<f32>(0.5);
+    }
+    let made_inverse = mat2x2<f32>(made_vv, -made_uv, -made_uv, made_uu) * (1.0 / made_det);
+    let m = made_inverse * g_drawn;
+    let half_trace = 0.5 * (m[0][0] + m[1][1]);
+    let det = m[0][0] * m[1][1] - m[1][0] * m[0][1];
+    let spread = sqrt(max(half_trace * half_trace - det, 0.0));
+    let major = sqrt(max(half_trace + spread, 0.0));
+    // its eigenvector: the direction in uv the cloth is pulled most
+    var along = vec2<f32>(m[1][0], half_trace + spread - m[0][0]);
+    if (dot(along, along) < 1e-12) {
+        along = vec2<f32>(half_trace + spread - m[1][1], m[0][1]);
+    }
+    if (dot(along, along) < 1e-12) {
+        along = vec2<f32>(1.0, 0.0);
+    }
+    along = normalize(along);
+    let fitted = fabric_stretch(fragment);
+    let stretch = major * sqrt(fitted.x * fitted.y);
+    // slack blue (0.85) → rest white (1) → yellow (1.15) → red (1.3)
+    let blue = vec3<f32>(0.08, 0.25, 0.9);
+    let white = vec3<f32>(0.85);
+    let yellow = vec3<f32>(0.95, 0.8, 0.1);
+    let red = vec3<f32>(0.9, 0.08, 0.04);
+    var colour = mix(blue, white, smoothstep(0.85, 1.0, stretch));
+    colour = mix(colour, yellow, smoothstep(1.0, 1.15, stretch));
+    colour = mix(colour, red, smoothstep(1.15, 1.3, stretch));
+    // the strokes: lines along the pull, 6 mm apart across it, about a pixel wide, darker as
+    // the pose pulls harder; none near rest
+    if (major > 1.02 && abs(stretch - 1.0) > 0.03) {
+        let across = vec2<f32>(-along.y, along.x);
+        let stripe = dot(fragment.uv, across) / 0.006;
+        let width = max(abs(dot(uv_dx, across)) + abs(dot(uv_dy, across)), 1e-6) / 0.006;
+        let line = 1.0 - smoothstep(0.0, width, abs(fract(stripe + 0.5) - 0.5));
+        let strength = clamp((major - 1.0) / 0.25, 0.25, 0.85);
+        colour = colour * (1.0 - strength * line);
+    }
+    return colour;
 }
 
 // a vertex morphed, and the matrix that skins and places it
@@ -1488,6 +1559,7 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
         pressed.normal = posed_vertices[at + 1u].xyz;
         pressed.uv = input.uv;
         pressed.uv2 = input.uv2;
+        pressed.made = input.position;
         pressed.tangent = posed_vertices[at + 2u];
         pressed.curvature = input.curvature;
         pressed.eye_centre = vec4<f32>(0.0);
@@ -1503,6 +1575,7 @@ fn vs_mesh(input: VertexIn) -> VertexOut {
     out.normal = (posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz;
     out.uv = input.uv;
     out.uv2 = input.uv2;
+    out.made = input.position;
     out.tangent = vec4<f32>((posed.matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz, input.tangent.w);
     out.curvature = input.curvature;
     out.eye_centre = vec4<f32>(0.0);
@@ -3180,6 +3253,11 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
     let uv_turn = uv_dx.x * uv_dy.y - uv_dy.x * uv_dx.y;
     let image_up = -(world_dy * uv_dx.x - world_dx * uv_dy.x) * sign(uv_turn);
     var base = srgb_to_linear(texel.rgb) * draw.color.rgb;
+    // a garment's stretch shown in its albedo's place (ADR-842; the flag is the draw's, uniform)
+    let stretch_view = (draw.flags.y & 32768u) != 0u;
+    if (stretch_view) {
+        base = stretch_shown(fragment, world_dx, world_dy, dpdx(fragment.made), dpdy(fragment.made), uv_dx, uv_dy);
+    }
     // a `:fibres` strand (ADR-813): its own lightness (`_STRAND`, ±`:colour-spread`), darker toward its
     // root, its last third lighter toward its tip (`:tip-lighten`: sun and wear, ADR-825), and its
     // value and baked self-shadow handed to the light loop
@@ -3287,7 +3365,16 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
     if (draw.flags.x == 5u) {
         strand = safe_normalize(fragment.tangent.xyz);
     }
-    let lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand, curvature, specular_kept, diffuse_normal, mirror_surface, under_cornea), scene.params.x);
+    var lit = tone(shade(base, normal, view, fragment.world, surface_normal, occlusion, turn, strand, curvature, specular_kept, diffuse_normal, mirror_surface, under_cornea), scene.params.x);
+    // a see-through draw (ADR-842: `:see-through`, `DrawU::material.z` on any surface but
+    // `:fibres`): opaque, its colour mixed by the share toward what was drawn behind it at this
+    // pixel before the see-through draws (never another of them: the colour pass is split), both
+    // as displayed, decoded to light to be mixed; none while its stretch is shown
+    let see_through = select(draw.material.z, 0.0, (draw.flags.y & 512u) != 0u || stretch_view);
+    if (see_through > 0.0) {
+        let behind = textureLoad(behind_picture, vec2<i32>(fragment.clip.xy), 0).rgb;
+        lit = linear_to_srgb(mix(srgb_to_linear(lit), srgb_to_linear(behind), see_through));
+    }
     return vec4<f32>(lit * alpha, alpha);
 }
 

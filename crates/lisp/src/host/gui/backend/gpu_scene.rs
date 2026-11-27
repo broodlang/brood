@@ -1851,3 +1851,232 @@ fn a_normal_maps_green_tilts_toward_the_images_up_whatever_the_tangents_w_on_the
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn a_see_through_draw_shows_what_is_behind_it_never_another_see_through_draw_on_the_gpu() {
+    // seen from above, lit straight down: a red floor, over it a green see-through card, over that
+    // a smaller blue one (ADR-842: both `:see-through 0.5`). Where the blue card lies over the
+    // green, what shows through it is the red floor, never the green card between: the pixel is
+    // the same as with no green card at all. Where the green card alone lies, the floor shows
+    // through it. With a share of 0 both cards are opaque, as any draw. The GPU painter only.
+    let side = 128u32;
+    let floor = Arc::new(square(0.0, 2.0));
+    let middle = Arc::new(square(0.01, 0.2));
+    let top = Arc::new(square(0.02, 0.1));
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    // x → clip x × 4, z → clip −y × 4, height → depth (as the contact shadow's test)
+    scene.view_proj = [
+        4.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1, 0.0, 0.0, -4.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0,
+    ];
+    scene.eye = [0.0, 10.0, 0.0];
+    scene.lights = vec![Light::directional([0.0, -1.0, 0.0], [1.0, 1.0, 1.0])];
+    scene.sky = [0.0, 0.0, 0.0];
+    scene.ground = [0.0, 0.0, 0.0];
+    let draw = |mesh: u32, color: [f32; 4], see_through: f32| Draw {
+        loose: None,
+        mesh,
+        model: [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+        palette: None,
+        morphs: vec![],
+        material: Material {
+            color,
+            double_sided: true,
+            specular: 0.0,
+            see_through,
+            ..Material::default()
+        },
+    };
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let green = [0.0, 1.0, 0.0, 1.0];
+    let blue = [0.0, 0.0, 1.0, 1.0];
+    let mut both = scene.clone();
+    both.draws = vec![draw(1, red, 0.0), draw(2, green, 0.5), draw(3, blue, 0.5)];
+    let mut top_alone = scene.clone();
+    top_alone.draws = vec![draw(1, red, 0.0), draw(3, blue, 0.5)];
+    let mut opaque = scene.clone();
+    opaque.draws = vec![draw(1, red, 0.0), draw(2, green, 0.0), draw(3, blue, 0.0)];
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    // (the middle at column 64; the green card alone at x 0.15 m, column 64 + 0.15 × 4 × 64 = 102)
+    let at = |pixels: &[u8], column: u32| {
+        let start = (64 * side + column) as usize * 3;
+        [0, 1, 2].map(|channel| i32::from(pixels[start + channel]))
+    };
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &floor);
+        gpu.upload_mesh(2, &middle);
+        gpu.upload_mesh(3, &top);
+        let mut paint = |scene: &Scene| {
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            renderer.set_bg(Some([0, 0, 0]));
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            gpu.read_pixels()
+        };
+        let (both, top_alone, opaque) = (paint(&both), paint(&top_alone), paint(&opaque));
+        let centre = (at(&both, 64), at(&top_alone, 64), at(&opaque, 64));
+        let green_alone = (at(&both, 102), at(&opaque, 102));
+        eprintln!(
+            "{name}: centre (both, top alone, opaque) {centre:?}; green alone (see-through, opaque) {green_alone:?}"
+        );
+        if (0..3).any(|channel| (centre.0[channel] - centre.1[channel]).abs() > 2) {
+            failures.push(format!(
+                "{name}: the green card shows through the blue: {:?} against {:?} without it",
+                centre.0, centre.1
+            ));
+        }
+        // (the tonemap greys a saturated colour a little: opaque blue is about [19 19 255])
+        if centre.0[0] < centre.2[0] + 100 || centre.0[2] < 150 {
+            failures.push(format!(
+                "{name}: the blue card does not show the floor half through: {:?}",
+                centre.0
+            ));
+        }
+        if green_alone.0[0] < green_alone.1[0] + 100 || green_alone.0[1] < 150 {
+            failures.push(format!(
+                "{name}: the green card does not show the floor half through: {:?}",
+                green_alone.0
+            ));
+        }
+        if centre.2[2] < 240 || centre.2[0] > 40 || green_alone.1[1] < 240 || green_alone.1[0] > 70
+        {
+            failures.push(format!(
+                "{name}: a share of 0 is not opaque: {:?} {:?}",
+                centre.2, green_alone.1
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_cloths_stretch_is_shown_live_red_where_drawn_wider_than_made_on_the_gpu() {
+    // ADR-842 `:show-stretch`: a square of cloth, UVs in metres as made, seen from above. Drawn as
+    // made it is at rest: white. Drawn 30 % wider (its model matrix: the pose's stretch, which the
+    // view measures against the mesh as made) it is red; drawn 20 % smaller both ways, slack in
+    // every direction, blue (20 % narrower one way only is white: its stronger stretch is rest's).
+    // The GPU only.
+    let side = 128u32;
+    let half = 0.2f32;
+    let corners = [[-half, half], [half, half], [half, -half], [-half, -half]];
+    let positions: Vec<f32> = corners.iter().flat_map(|[x, z]| [*x, 0.0, *z]).collect();
+    let normals: Vec<f32> = (0..4).flat_map(|_| [0.0, 1.0, 0.0]).collect();
+    let uvs: Vec<f32> = corners.iter().flat_map(|[x, z]| [*x, -*z]).collect();
+    let indices: Vec<u8> = [0u16, 1, 2, 0, 2, 3]
+        .iter()
+        .flat_map(|index| index.to_le_bytes())
+        .collect();
+    let cloth = Arc::new(
+        Mesh::from_parts(MeshParts {
+            positions: bytes_of(&positions),
+            normals: bytes_of(&normals),
+            uvs: bytes_of(&uvs),
+            indices,
+            ..MeshParts::default()
+        })
+        .expect("a whole square"),
+    );
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    scene.view_proj = [
+        4.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1, 0.0, 0.0, -4.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0,
+    ];
+    scene.eye = [0.0, 10.0, 0.0];
+    scene.lights = vec![Light::directional([0.0, -1.0, 0.0], [1.0, 1.0, 1.0])];
+    scene.sky = [0.0, 0.0, 0.0];
+    scene.ground = [0.0, 0.0, 0.0];
+    let widened = |across: f32, along: f32| {
+        let mut scene = scene.clone();
+        scene.draws = vec![Draw {
+            loose: None,
+            mesh: 1,
+            model: [
+                across, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, along, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            palette: None,
+            morphs: vec![],
+            material: Material {
+                double_sided: true,
+                specular: 0.0,
+                show_stretch: true,
+                ..Material::default()
+            },
+        }];
+        scene
+    };
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    // (a pixel off any stroke: the strokes run along x when it is pulled along x, 6 mm apart in v
+    // across them; the middle row's average over a few columns)
+    let at = |pixels: &[u8]| {
+        let mut sum = [0i32; 3];
+        for column in 60..68u32 {
+            for row in 60..68u32 {
+                let start = (row * side + column) as usize * 3;
+                for channel in 0..3 {
+                    sum[channel] += i32::from(pixels[start + channel]);
+                }
+            }
+        }
+        sum.map(|total| total / 64)
+    };
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &cloth);
+        let mut paint = |scene: &Scene| {
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            renderer.set_bg(Some([0, 0, 0]));
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            gpu.read_pixels()
+        };
+        let (rest, wide, narrow, smaller) = (
+            at(&paint(&widened(1.0, 1.0))),
+            at(&paint(&widened(1.3, 1.0))),
+            at(&paint(&widened(0.8, 1.0))),
+            at(&paint(&widened(0.8, 0.8))),
+        );
+        eprintln!(
+            "{name}: as made {rest:?}, 30 % wider {wide:?}, 20 % narrower {narrow:?}, 20 % smaller {smaller:?}"
+        );
+        if (rest[0] - rest[2]).abs() > 12 || rest[1] < 150 {
+            failures.push(format!("{name}: at rest it is not white: {rest:?}"));
+        }
+        if wide[0] < wide[2] + 80 || wide[0] < wide[1] + 40 {
+            failures.push(format!("{name}: 30 % wider is not red: {wide:?}"));
+        }
+        if narrow != rest {
+            failures.push(format!(
+                "{name}: 20 % narrower one way is not rest's white: {narrow:?}"
+            ));
+        }
+        if smaller[2] < smaller[0] + 60 {
+            failures.push(format!(
+                "{name}: 20 % smaller both ways is not blue: {smaller:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

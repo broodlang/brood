@@ -292,8 +292,9 @@ fn the_mesh_shader_validates() {
         floats[..4],
         [Material::default().scatter_scale(), 0.5, 0.15, 0.0]
     );
-    // (where the rim was: a `:fibres` surface's `:density` now, its default on any other, ADR-813)
-    assert_eq!(floats[6], Material::default().fibre_density);
+    // (where the rim was: a `:fibres` surface's `:density` now, ADR-813; any other surface's
+    // `:see-through`, 0 by default, ADR-842)
+    assert_eq!(floats[6], 0.0);
     // (the coat's strength scaled by a skin region's oil, ADR-826; its roughness as given)
     assert!(MESH_SRC.contains("coat = vec2<f32>(draw.skin.y * region.w, draw.skin.z);"));
     // ADR-796: an eye's optics are `DrawU`'s last eight vec4s, zeros for any other surface; the
@@ -1132,4 +1133,49 @@ fn a_stretched_knits_cover_rides_in_the_clamp_slots() {
     assert!(
         MESH_SRC.contains("textureSample(detail_texture, texture_sampler, detail_uv(fragment))")
     );
+}
+
+#[test]
+fn a_see_through_share_rides_in_the_materials_third_float_and_its_stretch_in_bit_32768() {
+    // ADR-842: `:see-through` in DrawU::material.z on a standard surface, never on a blended or
+    // `:fibres` one (whose own coverage it would double, and whose density the slot holds); the
+    // shader mixes toward the picture behind by it, and shows the stretch under bit 32768
+    use crate::host::gui::mesh::{Draw, Material, Surface};
+    let draw = |material: Material| Draw {
+        loose: None,
+        mesh: 1,
+        model: [0.0; 16],
+        palette: None,
+        morphs: Vec::new(),
+        material,
+    };
+    let third = |material: Material| {
+        let packed = scenes::draw_uniform(&draw(material), [0; 4], [0; 4], [0; 4], [0.0; 4]);
+        f32::from_le_bytes(packed[104..108].try_into().expect("a float"))
+    };
+    let garment = Material {
+        see_through: 0.2,
+        ..Material::default()
+    };
+    assert_eq!(third(garment.clone()), 0.2);
+    assert_eq!(
+        third(Material {
+            surface: Surface::Blend,
+            ..garment.clone()
+        }),
+        0.0
+    );
+    assert_eq!(
+        third(Material {
+            fibres: true,
+            fibre_density: 0.4,
+            ..garment
+        }),
+        0.4
+    );
+    assert!(MESH_SRC.contains("@group(0) @binding(10) var behind_picture: texture_2d<f32>;"));
+    assert!(MESH_SRC.contains(
+        "lit = linear_to_srgb(mix(srgb_to_linear(lit), srgb_to_linear(behind), see_through));"
+    ));
+    assert!(MESH_SRC.contains("let stretch_view = (draw.flags.y & 32768u) != 0u;"));
 }
