@@ -3103,6 +3103,7 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         uvs: mesh_bytes(heap, map, "uvs")?,
         uvs2: mesh_bytes(heap, map, "uvs2")?,
         loose_weight: mesh_bytes(heap, map, "loose-weight")?,
+        standoff: mesh_bytes(heap, map, "standoff")?,
         tangents: mesh_bytes(heap, map, "tangents")?,
         joints: mesh_bytes(heap, map, "joints")?,
         joints_wide,

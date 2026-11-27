@@ -278,6 +278,9 @@ pub struct Mesh {
     /// How much of its draw's lag each vertex takes (`:loose-weight`, ADR-823), 0 … 1; empty: all
     /// of it.
     pub loose_weight: Vec<f32>,
+    /// How far short of a contact's surface each vertex stops when pressed, metres (`:standoff`,
+    /// ADR-824: the hair lying between her skin and a pane); empty: none.
+    pub standoff: Vec<f32>,
     /// Tangents with the bitangent's sign in `w` (glTF's convention), for a normal map.
     pub tangents: Option<Vec<[f32; 4]>>,
     /// The four joints each vertex is skinned to (indices into a draw's palette) and their
@@ -508,6 +511,9 @@ pub struct MeshParts {
     /// How much of its draw's lag (`:loose`) each vertex takes, 1 f32 a vertex, 0 … 1
     /// (`:loose-weight`, ADR-823); empty: all of it.
     pub loose_weight: Vec<u8>,
+    /// How far short of a contact's surface each vertex stops when pressed, 1 f32 a vertex in metres
+    /// (`:standoff`, ADR-824); empty: none.
+    pub standoff: Vec<u8>,
     pub tangents: Vec<u8>,
     /// `u8` or `u16` joint indices, four a vertex, per `joints_wide`.
     pub joints: Vec<u8>,
@@ -668,6 +674,14 @@ impl Mesh {
             floats::<1>("loose-weight", &parts.loose_weight, count)?
                 .into_iter()
                 .map(|[value]| value.clamp(0.0, 1.0))
+                .collect()
+        };
+        let standoff = if parts.standoff.is_empty() {
+            Vec::new()
+        } else {
+            floats::<1>("standoff", &parts.standoff, count)?
+                .into_iter()
+                .map(|[value]| value.clamp(0.0, 0.05))
                 .collect()
         };
         let tangents = if parts.tangents.is_empty() {
@@ -890,6 +904,7 @@ impl Mesh {
             uvs,
             uvs2,
             loose_weight,
+            standoff,
             tangents,
             joints,
             weights,
@@ -9787,6 +9802,29 @@ mod tests {
 
     /// ADR-817: a zone's mask times its weight lays the compress map's tilt where the weight is
     /// above 0 and the stretch map's where it is below; another zone's mask does nothing for it.
+    #[test]
+    fn a_mesh_reads_how_far_short_of_a_contact_each_vertex_stops_clamped() {
+        // (ADR-824) given, each vertex's standoff kept within 0 … 5 cm; not given, none kept
+        let bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let base = MeshParts {
+            positions: bytes(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+            normals: bytes(&[0.0, 0.0, 1.0].repeat(3)),
+            ..MeshParts::default()
+        };
+        let held = Mesh::from_parts(MeshParts {
+            standoff: bytes(&[0.004, 0.2, -0.01]),
+            ..base.clone()
+        })
+        .expect("held");
+        assert_eq!(held.standoff, vec![0.004, 0.05, 0.0]);
+        assert!(Mesh::from_parts(base).expect("plain").standoff.is_empty());
+    }
+
     #[test]
     fn a_mesh_reads_how_much_of_its_lag_each_vertex_takes_clamped() {
         // (ADR-823) given, each vertex's share kept within 0 … 1; not given, none kept (all of it)

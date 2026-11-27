@@ -814,9 +814,9 @@ fn contact_within(slot: u32, point: vec3<f32>) -> f32 {
     return smoothstep(0.0, WITHIN_BAND, dot(within.xyz, point) - within.w);
 }
 
-// a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 27 a vertex)
+// a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 28 a vertex)
 fn vertex_at(index: u32) -> VertexIn {
-    let at = index * 27u;
+    let at = index * 28u;
     var input: VertexIn;
     input.index = index;
     input.position = vec3<f32>(mesh_vertices[at], mesh_vertices[at + 1u], mesh_vertices[at + 2u]);
@@ -829,6 +829,7 @@ fn vertex_at(index: u32) -> VertexIn {
     input.centre = vec3<f32>(mesh_vertices[at + 21u], mesh_vertices[at + 22u], mesh_vertices[at + 23u]);
     input.uv2 = vec2<f32>(mesh_vertices[at + 24u], mesh_vertices[at + 25u]);
     input.loose_weight = mesh_vertices[at + 26u];
+    input.standoff = mesh_vertices[at + 27u];
     return input;
 }
 
@@ -879,7 +880,8 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let count = min(contact_list.count.x, 64u);
     for (var slot = 0u; slot < count; slot = slot + 1u) {
-        let distance = contact_distance(slot, world).w;
+        // (stopping its standoff short of the surface, ADR-824)
+        let distance = contact_distance(slot, world).w - input.standoff;
         if (distance < 0.0 && !contact_skipped(slot, input)) {
             // (as far as it acts there: its `:within` side, ADR-816)
             atomicMax(&contact_depths[slot], bitcast<u32>(-distance * contact_within(slot, world)));
@@ -1065,7 +1067,9 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         // (as far as skin can be squashed, never a raw depth: `mesh::deform_by_contacts`)
         let depth = min(bitcast<f32>(atomicLoad(&contact_depths[slot])), MAX_SQUASH);
-        let measured = contact_distance(slot, point);
+        let reached = contact_distance(slot, point);
+        // (stopping its standoff short of the surface: hair lying between, ADR-824)
+        let measured = vec4<f32>(reached.xyz, reached.w - input.standoff);
         // (how much it acts here: on its `:within` side only, `mesh::within_weight`, ADR-816)
         let weight = contact_within(slot, point);
         if (weight <= 0.0) {
@@ -1148,6 +1152,8 @@ struct VertexIn {
     @location(8) uv2: vec2<f32>,
     // how much of its draw's lag it takes (ADR-823; the contact passes, which draw the lag)
     @location(9) loose_weight: f32,
+    // how far short of a contact's surface it stops when pressed (ADR-824: hair lying between)
+    @location(10) standoff: f32,
 };
 struct VertexOut {
     // invariant: the hair's depth pass and its front pass must put a sample at the same depth
