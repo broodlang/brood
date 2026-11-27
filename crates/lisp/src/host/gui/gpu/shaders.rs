@@ -2205,15 +2205,32 @@ fn ambient_occlusion(world: vec3<f32>, normal: vec3<f32>) -> f32 {
 const CONTACT_REACH: f32 = 0.03;
 const CONTACT_STEPS: u32 = 12u;
 const CONTACT_THICKNESS: f32 = 0.03;
+// how deep a `:contact-caster` is taken to be behind its front surface (ADR-837 amended): cloth
+// a few millimetres thick (her bikini's hems 3.2 mm round, its cups lined), so a ray toward a
+// light that passes behind a hem seen edge-on, not through it, is not blocked (with the 3 cm the
+// camera's view assumes, every edge seen side-on drew a near-black line on the skin beside it)
+const CASTER_THICKNESS: f32 = 0.008;
 // how far along its reflected direction a surface looks for what hides the room from it
 const REFLECTION_REACH: f32 = 0.04;
-fn contact_shadow(world: vec3<f32>, to_light: vec3<f32>, surface_normal: vec3<f32>, to_eye: vec3<f32>) -> f32 {
-    return screen_blocked(world, to_light, CONTACT_REACH, surface_normal, to_eye);
+fn contact_shadow(light: Light, world: vec3<f32>, to_light: vec3<f32>, surface_normal: vec3<f32>, to_eye: vec3<f32>) -> f32 {
+    return screen_blocked_in(u32(scene.occlusion.z), world, to_light, CONTACT_REACH, surface_normal, to_eye, light_spread(light, world), CONTACT_THICKNESS);
 }
 // on skin (ADR-837): the same march, through the depth of the `:contact-caster` draws alone
 // (cloth), so what lies on her shades her and her own creases, never in that view, do not
-fn contact_shadow_on_skin(world: vec3<f32>, to_light: vec3<f32>, surface_normal: vec3<f32>, to_eye: vec3<f32>) -> f32 {
-    return screen_blocked_in(u32(scene.occlusion.w), world, to_light, CONTACT_REACH, surface_normal, to_eye);
+fn contact_shadow_on_skin(light: Light, world: vec3<f32>, to_light: vec3<f32>, surface_normal: vec3<f32>, to_eye: vec3<f32>) -> f32 {
+    return screen_blocked_in(u32(scene.occlusion.w), world, to_light, CONTACT_REACH, surface_normal, to_eye, light_spread(light, world), CASTER_THICKNESS);
+}
+// how wide a light is seen from `world`: the tangent of half the angle it spans (ADR-837
+// amended): a point light 0 (its contact shadow hard), her 1.3 m key two metres off about 0.33
+fn light_spread(light: Light, world: vec3<f32>) -> f32 {
+    let size = light.direction.w;
+    if (size <= 0.0) {
+        return 0.0;
+    }
+    if (light.shadow.x == 0u) {
+        return tan(min(size * 0.5, 1.5));
+    }
+    return size * 0.5 / max(length(light.position.xyz - world), 0.05);
 }
 
 // how open the way from `world` along `direction` is, over `reach` metres, as the camera's depth
@@ -2221,10 +2238,14 @@ fn contact_shadow_on_skin(world: vec3<f32>, to_light: vec3<f32>, surface_normal:
 // stands in the way (the contact shadow toward a light; toward the reflected direction, the
 // room's reflection hidden by her own cheeks and lips in her mouth)
 fn screen_blocked(world: vec3<f32>, to_light: vec3<f32>, reach: f32, surface_normal: vec3<f32>, to_eye: vec3<f32>) -> f32 {
-    return screen_blocked_in(u32(scene.occlusion.z), world, to_light, reach, surface_normal, to_eye);
+    return screen_blocked_in(u32(scene.occlusion.z), world, to_light, reach, surface_normal, to_eye, 0.0, CONTACT_THICKNESS);
 }
 // (through the view one before `at`: the camera's depth, or its casters' alone, ADR-837)
-fn screen_blocked_in(at: u32, world: vec3<f32>, to_light: vec3<f32>, reach: f32, surface_normal: vec3<f32>, to_eye: vec3<f32>) -> f32 {
+// `spread`: the light's width seen from `world` (`light_spread`); 0 marches one hard ray. Wider,
+// what stands in the way blocks only part of the light: a blocker `h` metres in front of the ray
+// `d` metres along it covers h / (d · spread) of the light's disc (its penumbra), so skin under a
+// strap standing off her is shaded only where the strap hides most of her softbox
+fn screen_blocked_in(at: u32, world: vec3<f32>, to_light: vec3<f32>, reach: f32, surface_normal: vec3<f32>, to_eye: vec3<f32>, spread: f32, thickness: f32) -> f32 {
     if (at == 0u) {
         return 1.0;
     }
@@ -2256,10 +2277,16 @@ fn screen_blocked_in(at: u32, world: vec3<f32>, to_light: vec3<f32>, reach: f32,
         let stored = camera_distance(view.view_proj, map_load(view.map, vec2<i32>(i32(column), i32(row))));
         let reached = camera_distance(view.view_proj, clip.z / clip.w);
         let ahead = reached - stored;
-        // (the nearest step in shade counts most; the gap in front eased in from 1 to 3 mm and out
-        // toward the thickness, so the shadow's edge grades with the depth, not cut at a pixel)
-        shade = max(shade, (1.0 - share * share) * smoothstep(gap, gap + 0.002, ahead)
-            * (1.0 - smoothstep(0.5 * CONTACT_THICKNESS, CONTACT_THICKNESS, ahead)));
+        let past_thickness = 1.0 - smoothstep(0.5 * thickness, thickness, ahead);
+        if (spread > 0.0) {
+            // a light with a size: the share of its disc the blocker covers, the darkest step
+            shade = max(shade, clamp((ahead - gap) / (reach * share * spread), 0.0, 1.0) * past_thickness);
+        } else {
+            // a point: (the nearest step in shade counts most; the gap in front eased in from 1 to
+            // 3 mm and out toward the thickness, so the shadow's edge grades with the depth, not cut
+            // at a pixel)
+            shade = max(shade, (1.0 - share * share) * smoothstep(gap, gap + 0.002, ahead) * past_thickness);
+        }
     }
     return 1.0 - shade;
 }
@@ -2669,21 +2696,21 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
                 // (never on skin: light travels millimetres under it, so its own creases never show
                 // shadows this sharp: on her neck and collarbones they drew hard dark lines)
                 if (draw.flags.x != 0u) {
-                    contact = contact_shadow(world, arrival.to_light, surface_normal, view);
+                    contact = contact_shadow(light, world, arrival.to_light, surface_normal, view);
                 } else {
-                    contact = contact_shadow_on_skin(world, arrival.to_light, surface_normal, view);
+                    contact = contact_shadow_on_skin(light, world, arrival.to_light, surface_normal, view);
                 }
                 seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn) * contact * hair_through;
             }
         } else if (draw.flags.x == 0u) {
             // skin under an unshadowed light: only what the casters' view holds (ADR-837)
-            contact = contact_shadow_on_skin(world, arrival.to_light, surface_normal, view);
+            contact = contact_shadow_on_skin(light, world, arrival.to_light, surface_normal, view);
             seen = contact;
         } else if (draw.flags.x != 4u && draw.flags.x != 5u) {
             // a light with no shadow map still stops at what stands a few millimetres in its
             // way (ADR-818, amended 2026-11-27): her fill, unshadowed, lit the side teeth behind
             // her lips and cheeks with a third of all their light, the most of any source
-            contact = contact_shadow(world, arrival.to_light, surface_normal, view);
+            contact = contact_shadow(light, world, arrival.to_light, surface_normal, view);
             seen = contact;
         }
         let to_light = arrival.to_light;
