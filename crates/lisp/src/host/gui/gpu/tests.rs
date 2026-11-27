@@ -109,13 +109,13 @@ fn the_casters_pyramid_shader_validates() {
 #[test]
 fn the_casters_pyramid_texels_read_cover_the_whole_reach() {
     // ADR-837's early exit cannot miss a caster: for a point at `at` (level 0 texels) and a reach
-    // `reach` texels, the 2×2 texels the shader reads, at the level it picks, hold the whole disc
+    // `reach` texels, the 3×3 texels the shader reads, at the level it picks, hold the whole disc
     // of the reach round the point (as `caster_within_reach` picks them)
     let picked = |at: f32, reach: f32| -> (f32, f32) {
-        let level = (2.0 * reach).log2().ceil().max(0.0);
+        let level = reach.log2().ceil().max(0.0);
         let span = 2f32.powf(level);
-        let corner = (at / span - 0.5).floor();
-        (corner * span, (corner + 2.0) * span)
+        let corner = (at / span).floor() - 1.0;
+        (corner * span, (corner + 3.0) * span)
     };
     for reach_tenths in 10..400 {
         let reach = reach_tenths as f32 * 0.1;
@@ -1038,7 +1038,13 @@ fn skin_marches_its_contact_shadow_through_the_casters_view_alone() {
     // ADR-837: on skin the contact march reads the `:contact-caster` view (scene.occlusion.w),
     // under shadowed and unshadowed lights alike; every other surface keeps the camera's own
     assert!(MESH_SRC.contains("return screen_blocked_in(u32(scene.occlusion.w), world, to_light, CONTACT_REACH, surface_normal, to_eye, light_spread(light, world), CASTER_THICKNESS);"));
-    assert!(MESH_SRC.contains("} else {\n                    contact = contact_shadow_on_skin(light, world, arrival.to_light, surface_normal, view);"));
+    assert!(MESH_SRC.contains("} else if (marched_on_skin) {\n                    contact = contact_shadow_on_skin(light, world, arrival.to_light, surface_normal, view);"));
+    // only for a light giving at least a tenth of the brightest light's direct share here
+    assert!(
+        MESH_SRC
+            .contains("let marched_on_skin = share > 0.0 && share >= CONTACT_SHARE * brightest;")
+    );
+    assert!(MESH_SRC.contains("const CONTACT_SHARE: f32 = 0.02;"));
     assert!(MESH_SRC.contains("} else if (draw.flags.x == 0u) {"));
 }
 
