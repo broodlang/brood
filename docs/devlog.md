@@ -3437,3 +3437,16 @@ flushed to zero and this keeps the subnormal, as the standard has it. Guard:
 a point for every vertex (womanblend's nipple weights, over her whole body three times at each
 start). Each float exactly as `bytes/f32-le` reads it. Guard: `tests/bytes_test.blsp`
 "bytes/f32s-le".
+
+2026-11-28. **The inline fast frame's cold outcome names its callee by the code it called.** A
+preempt unwinding through native code records each activation it passes, and records only an
+arm known to be the one that ran: the call IC's, or the arm owning the code pointer. The
+inline fast-frame path (§7.5) passed no code pointer to its cold callback, so when the IC no
+longer named the callee (an inline swap changing its frame, an entry replaced) the resolve fell
+to the callee's NAME, which an unwind refuses, and `jit_unwind_through`'s `expect` aborted the
+process: "a native activation the preempt unwound through could not be named (ADR-401)", seen
+once, in CI's bedit smoke on c00db0322. `brood_rt_xcall_cold` now takes the code pointer the
+inline path called. Not reproduced here (it needs a preempt to land in that window); the
+abort is the evidence, and CI's runs after this are the check. Noted on the way:
+`crates/lisp/tests/preemption_shapes.rs` fails 2 to 4 of its 10 on this desktop at load 20 at
+every commit of the day, this morning's included, and passes in CI.
