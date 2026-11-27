@@ -1,0 +1,34 @@
+# Exactly the flags `release` uses for the binary that RUNS user code, and
+# nothing else: `scripts/ab-bench.sh` builds both sides of an A/B through this
+# target so the two binaries cannot differ in profile or features. Note the
+# package is `cli` (the binary), NOT `-p brood` (the lib) — `-p brood` does not
+# relink target/release-fast/brood and silently benchmarks a stale binary.
+RUSTFLAGS=" -C debug-assertions=off -C overflow-checks=off" cargo build --profile release-fast -p cli --no-default-features --features brood/gui --features brood/gui-gpu --features brood/audio --features brood/treesit-grammars --features brood/native-kernels --features brood/jit --features brood/stdimage 
+   Compiling brood v0.59.0 (/home/wilhelm/.cache/b3d-session-brood/crates/lisp)
+   Compiling cli v0.59.0 (/home/wilhelm/.cache/b3d-session-brood/crates/cli)
+    Finished `release-fast` profile [optimized] target(s) in 55.45s
+# Build the configured (./configure) binaries into the local, gitignored
+# target/release-fast with the `release-fast` profile (stripped, no LTO) — fast
+# to build. The separate `install` target copies them out to /home/wilhelm/.local/bin.
+#
+# The LEAN brood from `release-brood` (above) is what gets embedded into nest
+# (BROOD_EMBED_RUNTIME → ADR-038), so `nest release` ships a small self-contained
+# app with no Rust (an LTO'd shippable runtime rebuilds under `release-lean` — see
+# docs/release.md). nest embeds it here, at nest's build, so the bytes are baked in
+# before the dev `brood` below overwrites the file.
+BROOD_EMBED_RUNTIME=/home/wilhelm/.cache/b3d-session-brood/target/release-fast/brood RUSTFLAGS=" -C debug-assertions=off -C overflow-checks=off" cargo build --profile release-fast -p nest --no-default-features --features brood/gui --features brood/gui-gpu --features brood/audio --features brood/treesit-grammars --features brood/native-kernels --features brood/jit --features brood/stdimage --features brood/dev-tools 
+   Compiling brood v0.59.0 (/home/wilhelm/.cache/b3d-session-brood/crates/lisp)
+   Compiling nest v0.59.0 (/home/wilhelm/.cache/b3d-session-brood/crates/nest)
+    Finished `release-fast` profile [optimized] target(s) in 47.15s
+RUSTFLAGS=" -C debug-assertions=off -C overflow-checks=off" cargo build --profile release-fast -p brood-lsp 
+   Compiling brood v0.59.0 (/home/wilhelm/.cache/b3d-session-brood/crates/lisp)
+   Compiling brood-lsp v0.59.0 (/home/wilhelm/.cache/b3d-session-brood/crates/lsp)
+    Finished `release-fast` profile [optimized] target(s) in 36.15s
+# The `brood` you actually RUN needs the REPL, so rebuild the installed binary WITH
+# dev-tools (repl/test/observer/mcp), overwriting the lean embed source nest has
+# already baked in. Split on purpose: apps ship the lean runtime; your PATH gets the
+# full one. `make ab`/`make release-brood` rebuild the lean brood as needed.
+RUSTFLAGS=" -C debug-assertions=off -C overflow-checks=off" cargo build --profile release-fast -p cli --no-default-features --features brood/gui --features brood/gui-gpu --features brood/audio --features brood/treesit-grammars --features brood/native-kernels --features brood/jit --features brood/stdimage --features brood/dev-tools 
+   Compiling brood v0.59.0 (/home/wilhelm/.cache/b3d-session-brood/crates/lisp)
+   Compiling cli v0.59.0 (/home/wilhelm/.cache/b3d-session-brood/crates/cli)
+    Finished `release-fast` profile [optimized] target(s) in 39.69s

@@ -293,6 +293,8 @@ pub struct LocalCheckpoint {
     ropes: usize,
     closures: usize,
     envs: usize,
+    // Where the nursery's vector arena stood (`VecArena::mark`): cut back with `vectors`.
+    vec_arena: (usize, usize),
     // The `local_epoch` the checkpoint was taken in. A collection between the
     // checkpoint and its `reset_local_to` bumps the epoch and rewrites the
     // nursery (a flip compacts survivors into fresh slabs; a tenure empties it),
@@ -2208,6 +2210,7 @@ impl Heap {
             ropes: self.local.ropes.len(),
             closures: self.local.closures.len(),
             envs: self.local.envs.len(),
+            vec_arena: self.local.vec_arena.mark(),
             epoch: self.local_epoch,
         }
     }
@@ -2237,6 +2240,8 @@ impl Heap {
         }
         self.local.pairs.truncate(checkpoint.pairs);
         self.local.vectors.truncate(checkpoint.vectors);
+        // (after the vectors over it are gone)
+        self.local.vec_arena.reset_to(checkpoint.vec_arena);
         self.local.maps.truncate(checkpoint.maps);
         self.local.strings.truncate(checkpoint.strings);
         self.local.bigints.truncate(checkpoint.bigints);
@@ -2303,6 +2308,16 @@ impl Heap {
         Value::pair(PairId::local_gen(idx, self.local_epoch))
     }
 
+    /// Room in the nursery's arena for a vector of `len` items (`VecStore::Arena`), when it
+    /// is one the arena takes: longer than a slab slot holds inline, no longer than
+    /// `VecArena::MAX_ITEMS`. The caller writes all `len` and pushes the store into
+    /// `self.local.vectors`, the slabs the arena belongs to.
+    #[inline]
+    fn arena_room(&mut self, len: usize) -> Option<*mut Value> {
+        (len > INLINE_VEC_CAP && len <= slabs::VecArena::MAX_ITEMS)
+            .then(|| self.local.vec_arena.alloc(len))
+    }
+
     pub fn alloc_vector(&mut self, items: Vec<Value>) -> Value {
         let store = VecStore::from_vec(items);
         self.note_fresh_buffer(store.buffer_bytes());
@@ -2315,7 +2330,18 @@ impl Heap {
     /// `Vec` at all — where `alloc_vector(items.to_vec())` mallocs a buffer only to copy
     /// it inline and free it. A longer one is copied into its spill buffer once.
     pub fn alloc_vector_from_slice(&mut self, items: &[Value]) -> Value {
-        let store = VecStore::from_flushed(items.len(), |i| items[i]);
+        let store = match self.arena_room(items.len()) {
+            Some(room) => {
+                // SAFETY: `room` is `items.len()` items of the nursery's arena, nothing
+                // else's; `items` cannot overlap what was only now bumped.
+                unsafe { std::ptr::copy_nonoverlapping(items.as_ptr(), room, items.len()) };
+                VecStore::Arena {
+                    ptr: room,
+                    len: items.len() as u64,
+                }
+            }
+            None => VecStore::from_flushed(items.len(), |i| items[i]),
+        };
         self.note_fresh_buffer(store.buffer_bytes());
         let idx = alloc_slot!(self, vectors, store);
         Value::vector(VecId::local_gen(idx, self.local_epoch))
@@ -2377,7 +2403,20 @@ impl Heap {
     /// literal (`Inst::MakeVector`) — with no intermediate `Vec`: inline for a small one,
     /// one exact-size spill buffer otherwise. The caller drops the operands after.
     pub(crate) fn alloc_vector_from_roots(&mut self, start: usize, len: usize) -> Value {
-        let store = VecStore::from_flushed(len, |k| self.root_at(start + k));
+        let store = match self.arena_room(len) {
+            Some(room) => {
+                for k in 0..len {
+                    // SAFETY: `room` is `len` items of the nursery's arena, written here
+                    // one by one before the store over them exists.
+                    unsafe { room.add(k).write(self.root_at(start + k)) };
+                }
+                VecStore::Arena {
+                    ptr: room,
+                    len: len as u64,
+                }
+            }
+            None => VecStore::from_flushed(len, |k| self.root_at(start + k)),
+        };
         self.note_fresh_buffer(store.buffer_bytes());
         let idx = alloc_slot!(self, vectors, store);
         Value::vector(VecId::local_gen(idx, self.local_epoch))
@@ -2430,7 +2469,7 @@ impl Heap {
         );
         let ptr = match &mut self.local.vectors[idx] {
             VecStore::Inline { items, .. } => items.as_mut_ptr(),
-            VecStore::Spill { .. } | VecStore::Shared { .. } => {
+            VecStore::Spill { .. } | VecStore::Shared { .. } | VecStore::Arena { .. } => {
                 unreachable!("just pushed an Inline")
             }
         };
