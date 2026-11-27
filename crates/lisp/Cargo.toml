@@ -372,7 +372,7 @@ cosmic-text = { version = "0.19", optional = true }
 swash = { version = "0.2", optional = true }
 # The hinter behind `gui/text-hinting` (ADR-730): FreeType's LIGHT target, which swash's fixed LCD-mode
 # hinting cannot draw. The version swash itself is built on, so nothing new is compiled.
-skrifa = { version = "0.44", optional = true }
+skrifa = { version = "0.50", optional = true }
 # Display-cell width (the `display-width` builtin) + grapheme-cluster segmentation
 # (the renderer advances per cluster, not per codepoint). Always linked — tiny, no_std
 # tables — so the width primitive is available in the lean runtime too.
