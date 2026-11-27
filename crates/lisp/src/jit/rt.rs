@@ -1611,7 +1611,12 @@ pub unsafe extern "C" fn brood_rt_call_slow(
                 *out = v;
                 0
             }
-            None => 1,
+            None => {
+                // (for the arm's error block: `Heap::jit_error_site`; a computed head's
+                // `site` is the no-site mark, which records nothing)
+                (*heap).jit_error_site = site;
+                1
+            }
         }
     }
 }
@@ -1651,9 +1656,37 @@ pub unsafe extern "C" fn brood_rt_trace_push(
         // file or position is the caller's — and native code records it the same (ADR-811):
         // with the file, an error a contract shim's tail call raised named `contract.blsp`.
         let tail_native = std::mem::take(&mut h.jit_tail_native_error);
+        // The call of this arm's the error came back through, when it had a site
+        // (`Heap::jit_error_site`): taken by this arm alone, as the miss site is.
+        let error_site = std::mem::replace(&mut h.jit_error_site, u32::MAX);
         let Some(e) = h.jit_pending_error.as_mut() else {
             return;
         };
+        // That call's position is where the frame it entered was called from, and the error's
+        // own when nothing nearer the raise gave it one: what the VM reads off its `Call`
+        // instruction (`tag_pos`, `attach_vm_trace`'s `entry_site`). Without it an error
+        // raised under native code reached `catch` with no position at all, and the frames
+        // native code recorded said only a name. A site of a spliced-in callee has no entry
+        // in this arm's table and tags nothing.
+        if !e.is_control()
+            && let Some(Some((pos, file))) = (&*arm).site_pos.get(error_site as usize)
+        {
+            let file = file.clone().or_else(|| (&*arm).src_file.clone());
+            if let Some(entered) = e.trace.last_mut()
+                && entered.pos.is_none()
+            {
+                entered.pos = Some(*pos);
+                if entered.file.is_none() {
+                    entered.file = file.clone();
+                }
+            }
+            if e.pos.is_none() {
+                e.pos = Some(*pos);
+                if e.file.is_none() {
+                    e.file = file.as_deref().map(str::to_string);
+                }
+            }
+        }
         if miss_site != u32::MAX && e.pos.is_none() {
             let arm = &*arm;
             if let Some(&(_, pos)) = arm.staged_head_pos.iter().find(|(s, _)| *s == miss_site) {
@@ -1785,7 +1818,10 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
             crate::jit::JitCallCtx::children_may_unwind(ctx),
         ) {
             FastLinkOutcome::Done => 0,
-            FastLinkOutcome::Error => 1,
+            FastLinkOutcome::Error => {
+                (*heap).jit_error_site = site;
+                1
+            }
             FastLinkOutcome::Fallthrough => 2,
         }
     }
@@ -1870,6 +1906,9 @@ pub unsafe extern "C" fn brood_rt_xcall_cold(
             crate::jit::JitCallCtx::children_may_unwind(ctx),
         );
         (*heap).jit_force_vm = saved_force_vm;
+        if r == 1 {
+            (*heap).jit_error_site = site;
+        }
         r
     }
 }

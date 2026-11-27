@@ -1,0 +1,60 @@
+(defmodule jit-error-position-test (:use test))
+
+;;; An error raised under native code keeps the position of the call it came back through.
+;;; The VM tags an error with the position of its `Call` instruction and gives each trace
+;;; frame the place it was called from; native code keeps no instruction to read one from, so
+;;; an error a native function's callee raised reached `catch` with no file, line or column
+;;; once that function was hot, and its frames said only a name. The call's site is recorded
+;;; as the error comes back (`Heap::jit_error_site`) and the arm's error block reads the
+;;; position from the arm (`brood_rt_trace_push`).
+
+;; (native by its vector read; `error`, which it calls, is the prelude's)
+(defn- jep-raise (items x) (+ (nth items 0) (error "jep: bad " x)))
+
+(defn- jep-outer (items x) (+ (nth items 0) (jep-raise items x)))
+
+(defn- described (thunk)
+  (%try-described (fn () (thunk) :returned) (fn (_ description) description)))
+
+(defn- where (description) [(get description :file) (get description :line) (get description :col)])
+
+(defn- named-frames (description)
+  ;; the frames that say a function, each with the line it was called from when it says one.
+  ;; (A frame of a function called through a local, as the thunk here is, says no line once
+  ;; its caller is native: a computed call has no site to read a position from.)
+  (seq/mapv (seq/filterv (or (get description :trace) []) (fn (frame) (get frame :fn)))
+    (fn (frame) (get frame :fn))))
+
+(defn- first-frame (description)
+  (let (frame (first (or (get description :trace) [])))
+    [(get frame :fn) (get frame :line) (get frame :col)]))
+
+(defn- warm (function)
+  ;; called until its native code is in, or a few thousand times
+  (fold (range 60)
+    false
+    (fn (done _)
+      (or done
+        (do
+          (fold (range 200) nil (fn (_ index) (described (fn () (function [1 2] index)))))
+          (let (native? (fn () (= :native (get (%jit-arm-state function 2) :state))))
+            (or (native?) (do (proc/sleep 20) (native?)))))))))
+
+(describe "an error raised under native code"
+  (test "is located where it is before the function is hot"
+    (let (cold (described (fn () (jep-raise [1 2] 0)))
+          cold-outer (described (fn () (jep-outer [1 2] 0))))
+      (is (string/ends-with? (or (first (where cold)) "") "jit_error_position_test.blsp"))
+      (is (int? (second (where cold))))
+      (when (%native-tier?)
+        (is (warm jep-raise))
+        (is (warm jep-outer)))
+      (let (hot (described (fn () (jep-raise [1 2] 0)))
+            hot-outer (described (fn () (jep-outer [1 2] 0))))
+        (assert= (where hot) (where cold))
+        (assert= (where hot-outer) (where cold-outer))
+        ;; and the frame of the function that raised says where it was called from, as it did
+        (assert= (first-frame hot) (first-frame cold))
+        (assert= (first-frame hot-outer) (first-frame cold-outer))
+        (assert= (named-frames hot) (named-frames cold))
+        (assert= (named-frames hot-outer) (named-frames cold-outer))))))

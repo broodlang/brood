@@ -1920,6 +1920,18 @@ pub(crate) fn attach_vm_trace_callers(e: &mut LispError, frames: &[BcFrame]) {
         return;
     }
     let contract_module = value::intern(CONTRACT_MODULE);
+    // The native arm's own frame is the last one recorded, and says only a name: native code
+    // does not know where it was called from. The pending caller does — the place
+    // `attach_vm_trace` gives the running arm — and says it here.
+    if let (file, Some(pos)) = entry_site(frames, frames.len(), contract_module)
+        && let Some(entered) = e.trace.last_mut()
+        && entered.pos.is_none()
+    {
+        entered.pos = Some(pos);
+        if file.is_some() {
+            entered.file = file;
+        }
+    }
     for k in (0..frames.len()).rev() {
         if e.trace_full() {
             break;

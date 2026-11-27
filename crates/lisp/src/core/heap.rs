@@ -1360,6 +1360,14 @@ pub struct Heap {
     /// read with; the arm's own error block does (`brood_rt_trace_push`), and takes it there.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))] // only native code's callbacks set it
     pub(crate) jit_miss_gsite: u32,
+    /// The call site of the call a native arm just made that came back with an error
+    /// (`brood_rt_call_slow`, the fast frame, the inline call's cold path), `u32::MAX` when
+    /// none or when the call had no site (a computed head, a builtin called directly). The
+    /// callback has no arm to find the site's position with; the arm's error block does
+    /// (`brood_rt_trace_push`), and takes it there: the VM tags an error with the position of
+    /// the `Call` it came back through, and native code keeps no instruction to read one from.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))] // only native code's callbacks set it
+    pub(crate) jit_error_site: u32,
     /// Set by `brood_rt_tail_native` when the builtin it called in a native TAIL call raised:
     /// the arm's error exit then records its frame by name alone, as the VM records a frame a
     /// tail call replaced (`brood_rt_trace_push`). With the file, an error a contract shim's
@@ -2058,6 +2066,7 @@ impl Heap {
             native_gateway_seq: 0,
             jit_tail_local_head: u32::MAX,
             jit_miss_gsite: u32::MAX,
+            jit_error_site: u32::MAX,
             jit_tail_native_error: false,
             cur_native_gateway: 0,
             blocked_under_gateway: 0,

@@ -3339,3 +3339,22 @@ ways. `seq/mapv` over a range appends item by item, each append a vector value o
 since it walks the range natively no collection fell inside the probe's window: the reading
 was the spawner's garbage. The probe runs `%gc-collect` before each reading; the same tree
 reads 2 586, and the floor is 2 620.
+
+2026-11-27. **An error raised under native code keeps its position.** The VM tags an error
+with the position of the `Call` it came back through (`tag_pos`) and gives each trace frame
+the place it was called from (`entry_site`). Native code keeps no instruction to read one
+from, so once a function was hot an error its callee raised reached `catch` with no file,
+line or column, and the frames native code recorded said a name and nothing else:
+`(defn f (v x) (+ (nth v 0) (error "bad " x)))` described `{:file nil :line nil}` after a few
+hundred calls. The call's site is recorded as the error comes back to native code
+(`Heap::jit_error_site`: `brood_rt_call_slow`, the fast frame, the inline call's cold path),
+and the arm's error block reads its position from the arm's own `site_pos`
+(`brood_rt_trace_push`): the error's, when nothing nearer the raise gave one, and the entered
+frame's. A native arm run at the driver's loop top gets its frame's place from the pending
+VM caller (`attach_vm_trace_callers`). Still without one: a frame entered by a computed-head
+call from native code, which has no site. Found by lifting the `call-mediated-boxed` gate on
+a branch (`perf/lift-call-gate`: womanblend's tick 7% lighter, the eleven default rows within
+noise in CI's `ab`), where `tests/rethrow_position_test.blsp` and the crash report's trace
+failed once `error`'s callers were native: the gate had been hiding it for named functions,
+and closures and loops had it already. Guard: `tests/jit_error_position_test.blsp` (fails on
+0d3f559c6).
