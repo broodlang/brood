@@ -161,3 +161,45 @@
     ;; 4950 + 19900 + 44850 + 79800 + 124750 = 274250.
     (cc-spawn-loopers (self) [100 200 300 400 500])
     (assert= (cc-sum 0 5 0) 274250)))
+
+;; A local closure whose body STARTS with a collection literal. The compiling VM keys a
+;; closure's compiled body on its first body form, a pair; `(fn (x) [a b])` had none and
+;; tree-walked on every call until the `fn` lowering put such a body inside a `do`
+;; (eval/macros/patterns.rs). What it answers must be what it always answered.
+(defn literal-bodied (scale)
+  {:vector (fn (index) [index scale (* scale index)])
+   :map (fn (index) {:at index :scaled (* scale index)})
+   :set (fn (index) #{index scale})
+   :documented (fn (index) "a pair of it" [index scale])
+   :several (fn (index) [index] (* scale index))
+   :optional (fn (index &optional other) [index other scale])
+   :lone-string (fn (_index) "only a string")})
+
+(describe "a closure whose body starts with a collection literal"
+  (test "a vector, a map and a set body answer the collection, its captures in it"
+    (let (made (literal-bodied 3))
+      (assert= ((get made :vector) 2) [2 3 6])
+      (assert= ((get made :map) 2) {:at 2 :scaled 6})
+      (assert= ((get made :set) 2) #{2 3})))
+
+  (test "called many times over, as a fold's function is"
+    (let (made (literal-bodied 2))
+      (assert= (seq/mapv [1 2 3] (get made :vector)) [[1 2 2] [2 2 4] [3 2 6]])
+      (assert= (fold (range 1000) 0 (fn (sum index) (+ sum (nth ((get made :vector) index) 2))))
+        999000)))
+
+  (test "a docstring before it stays the docstring"
+    (let (made (literal-bodied 5))
+      (assert= ((get made :documented) 1) [1 5])
+      (assert= (reflect/doc (get made :documented)) "a pair of it")))
+
+  (test "more body after it: the last form is the answer"
+    (assert= ((get (literal-bodied 4) :several) 3) 12))
+
+  (test "with an optional parameter"
+    (let (made (literal-bodied 7))
+      (assert= ((get made :optional) 1) [1 nil 7])
+      (assert= ((get made :optional) 1 2) [1 2 7])))
+
+  (test "a lone string is still the answer, not a docstring"
+    (assert= ((get (literal-bodied 1) :lone-string) 0) "only a string")))

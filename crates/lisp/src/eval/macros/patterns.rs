@@ -531,7 +531,28 @@ fn lower_fn_named(
         .unwrap_or(params.len());
     let guard = single_clause_guard(body);
     if guard.is_none() && !params[..required_end].iter().any(|&p| !is_sym(p)) {
-        return Ok(None); // no pattern in the required params and no guard — ordinary fn
+        // No pattern in the required params and no guard — an ordinary fn, left as it is
+        // unless its body STARTS with a collection literal. The compiling VM keys a local
+        // closure's compiled body on its first body form, which must be a pair
+        // (`compile::cache_key`); a vector, map or set there left the closure with no key,
+        // so `(fn (x) [a b])` tree-walked on every call (2.4 µs against 0.44 µs compiled; a
+        // game's frame made 270 such calls). Inside a `do` the first body form is a pair
+        // of this one code position, and the closure compiles like any other.
+        if body.first().is_some_and(|&form| {
+            matches!(
+                form.unpack(),
+                ValueRef::Vector(_) | ValueRef::Map(_) | ValueRef::Set(_)
+            )
+        }) {
+            let wrapped = make_do(heap, body);
+            let mut lowered = vec![value::sym(kw::FN), param_form];
+            if let Some(doc) = doc {
+                lowered.push(doc); // keep the docstring as the leading body form
+            }
+            lowered.push(wrapped);
+            return Ok(Some(heap.list(lowered)));
+        }
+        return Ok(None);
     }
 
     // Replace each required pattern slot with a fresh symbol; bind it refutably.

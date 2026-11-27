@@ -3171,3 +3171,15 @@ took 13 s a read, which is why b3d kept every model's filled values in a 170 MB 
 (ten of them by now, 1.6 GB). `(bytes/scatter dense indices index-width values)` writes each
 element at its index natively. Guard: `tests/bytes_test.blsp` "bytes/scatter" (held to the same
 fill written a slice at a time).
+
+2026-11-27. **A local `fn` whose body starts with a collection literal compiles.** The VM keys a
+closure's compiled body on its first body form, which must be a pair (`compile::cache_key`), so
+a capturing `(fn (x) [a b])` (or a map or set body) had no key and tree-walked on every call:
+2.4 µs where the same body inside a `do` took 0.44. womanblend's viewer made 270 such calls a
+frame and 50,000 at a start (91,866 fallbacks in a 100-frame run, 533 after). The `fn` lowering
+(`eval/macros/patterns.rs`) now puts such a body inside a `do`, so its first form is a pair of
+that one code position and it compiles like any other; nothing else of a `fn` changes (a
+docstring stays leading). Found with `BROOD_DEFER_DBG`, which names an anonymous closure by its
+parameters and body since 16b8cb088. Guard: `tests/vm_closures_test.blsp` "a closure whose body
+starts with a collection literal" (what such closures answer; that they compile is read off
+`BROOD_DEFER_DBG`, the perf counters being a build feature).
