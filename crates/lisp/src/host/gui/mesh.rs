@@ -133,8 +133,22 @@ const CURVATURE_SMOOTHING_PASSES: usize = 2;
 /// surface touching the bulb is not infinitely bright).
 pub const NEAR_LIGHT: f32 = 0.01;
 /// The texels each cube face of a point light's shadow reaches past its 90°, so the filter of
-/// a receiver on a face's edge stays on that face.
+/// a receiver on a face's edge stays on that face: the tight 3×3 filter's reach, for a light
+/// whose shadow is hard.
 const CUBE_MARGIN: f32 = 3.0;
+
+/// How far past its 90° a point light's cube faces reach, in texels: as far as its shadow's
+/// filter can (ADR-838). A soft shadow (a `softness` or a light with a `size`) reads up to
+/// [`DEFAULT_SOFTNESS`] texels round a receiver and a bilinear texel beyond; with only
+/// [`CUBE_MARGIN`] its taps near a face's edge left the face and read its clamped border, a
+/// straight-edged shadow that flashed across her inner thigh as she walked by the lamp.
+fn cube_margin(light: &Light, shadow: &Shadow) -> f32 {
+    if shadow.softness > 0.0 || light.size > 0.0 {
+        DEFAULT_SOFTNESS + 2.0
+    } else {
+        CUBE_MARGIN
+    }
+}
 /// The largest side of a scene's picture, in pixels.
 pub const MAX_SCENE_SIDE: u32 = 4096;
 /// The taps the ambient occlusion reads a fragment: fixed points over the hemisphere its surface
@@ -3401,7 +3415,7 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
             };
             // a little wider than a quarter turn, so a receiver's filter on a face's edge
             // reads that face's own texels
-            let tan_half = side as f32 / (side as f32 - 2.0 * CUBE_MARGIN);
+            let tan_half = side as f32 / (side as f32 - 2.0 * cube_margin(light, shadow));
             CUBE_FACES
                 .iter()
                 .map(|forward| ShadowView {
@@ -6771,6 +6785,32 @@ mod tests {
 
     fn key_spot() -> Light {
         Light::spot([0.0, 3.0, 0.0], [0.0, -1.0, 0.0], [1.0; 3], 8.0, [0.3, 0.6])
+    }
+
+    #[test]
+    fn a_soft_point_lights_cube_faces_reach_as_far_as_its_filter() {
+        // ADR-838: a soft shadow's taps reach DEFAULT_SOFTNESS texels and a bilinear one beyond,
+        // so its faces widen by that; a hard one keeps the 3×3 filter's margin
+        let hard = Shadow::default();
+        let soft = Shadow {
+            softness: 0.03,
+            ..Shadow::default()
+        };
+        let mut light = Light {
+            kind: LightKind::Point,
+            direction: [0.0, -1.0, 0.0],
+            position: [0.0, 2.0, 0.0],
+            color: [1.0; 3],
+            range: 9.0,
+            cone: [0.0, 0.0],
+            size: 0.0,
+            shadow: Some(hard.clone()),
+            shape: None,
+        };
+        assert_eq!(cube_margin(&light, &hard), CUBE_MARGIN);
+        assert_eq!(cube_margin(&light, &soft), DEFAULT_SOFTNESS + 2.0);
+        light.size = 0.05;
+        assert_eq!(cube_margin(&light, &hard), DEFAULT_SOFTNESS + 2.0);
     }
 
     #[test]
