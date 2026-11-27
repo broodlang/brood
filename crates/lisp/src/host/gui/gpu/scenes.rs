@@ -2638,13 +2638,20 @@ pub(super) fn draw_uniform(
     bytes.extend(words_bytes(&flags));
     bytes.extend(words_bytes(&morph_info));
     // a `:strands` surface's width at the root and the tip, and a hair surface's two
-    // highlights' shifts (`DrawU::strand`, ADR-799)
-    bytes.extend(floats_bytes(&[
-        material.strand_width[0],
-        material.strand_width[1],
-        material.hair_shift[0],
-        material.hair_shift[1],
-    ]));
+    // highlights' shifts (`DrawU::strand`, ADR-799); a standard, cutout or blended surface's
+    // cloth sheen there instead, its colour and roughness (ADR-836: no surface reads both; zeros,
+    // none)
+    bytes.extend(floats_bytes(&match material.surface {
+        Surface::Standard | Surface::Cutout | Surface::Blend => {
+            material.sheen_cloth.unwrap_or([0.0; 4])
+        }
+        _ => [
+            material.strand_width[0],
+            material.strand_width[1],
+            material.hair_shift[0],
+            material.hair_shift[1],
+        ],
+    }));
     // `DrawU::detail`: the detail tile's repeats, its normal's strength, its cavity's amount
     bytes.extend(floats_bytes(&[
         material.detail_scale[0],

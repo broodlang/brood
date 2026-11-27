@@ -1823,6 +1823,16 @@ fn scene_spec(
         // the albedo of what surrounds the surface, linear [r g b] (ADR-831): the ambient its
         // occlusion takes away comes back in part, bounced off that colour (GTAO's multi-bounce);
         // as before when not given
+        // a cloth's sheen, [r g b roughness] (ADR-836; glTF's KHR_materials_sheen colour and
+        // roughness): the colour kept to 0 … 1, the roughness to 0.07 … 1
+        if let Some(sheen) = numbers(get(material_map, "sheen-cloth"), 4) {
+            material.sheen_cloth = Some([
+                sheen[0].clamp(0.0, 1.0),
+                sheen[1].clamp(0.0, 1.0),
+                sheen[2].clamp(0.0, 1.0),
+                sheen[3].clamp(0.07, 1.0),
+            ]);
+        }
         if let Some(surroundings) = numbers(get(material_map, "surroundings"), 3) {
             material.surroundings = Some([
                 surroundings[0].clamp(0.0, 1.0),
@@ -4563,6 +4573,15 @@ mod gui_scene_light_tests {
         let error = scene_with("[]", "{:surface :fibres :clamp-planes [[0 0 0 0 0 0]]}")
             .expect_err("no normal");
         assert!(error.contains(":clamp-planes are each"), "{error}");
+    }
+
+    #[test]
+    fn sheen_cloth_read_clamped_and_absent_by_default() {
+        // ADR-836: [r g b roughness], the colour to 0 … 1, the roughness to 0.07 … 1
+        let given = scene_with("[]", "{:sheen-cloth [0.9 1.4 0.5 0.01]}").expect("a scene");
+        assert_eq!(given.draws[0].material.sheen_cloth, Some([0.9, 1.0, 0.5, 0.07]));
+        let plain = scene_with("[]", "{}").expect("a scene");
+        assert_eq!(plain.draws[0].material.sheen_cloth, None);
     }
 
     #[test]

@@ -693,7 +693,7 @@ struct DrawU {
     lobes: vec4<f32>,           // roughness times a, times b, mix of a, F0
     flags: vec4<u32>,           // surface, texture bits (`scenes::texture_bits`), palette offset, skinned
     morph_info: vec4<u32>,      // morphed (0 or 1), vertex count, palette joint count, first offset
-    strand: vec4<f32>,          // a `:strands` surface's width at the root and the tip (metres); a hair surface's two highlights' shifts (`:shift`)
+    strand: vec4<f32>,          // a `:strands` surface's width at the root and the tip (metres); a hair surface's two highlights' shifts (`:shift`); a standard, cutout or blended surface's `:sheen-cloth` (colour, roughness; ADR-836)
     detail: vec4<f32>,          // the detail tile's repeats along u and v, its strength, its cavity
     // an `:eye` surface's optics (`mesh::Eye`, ADR-796; zeros on any other surface)
     eye_centres: array<vec4<f32>, 2>,   // each eye's centre in the mesh at rest; [0].w: how many eyes
@@ -2507,6 +2507,36 @@ fn bounced_occlusion(visibility: f32, albedo: vec3<f32>) -> vec3<f32> {
     let v = vec3<f32>(visibility);
     return max(v, ((a * v + b) * v + c) * v);
 }
+// ADR-836: a cloth's sheen, the soft light a knit's fibres throw back at grazing angles: Charlie's
+// distribution (Estevez & Kulla, "Production Friendly Microfacet Sheen BRDF", 2017) over the
+// sheen roughness `r` (alpha r * r, as glTF's KHR_materials_sheen) …
+fn sheen_distribution(r: f32, normal_dot_half: f32) -> f32 {
+    let alpha = max(r * r, 0.0049);
+    let sine_squared = max(1.0 - normal_dot_half * normal_dot_half, 0.0);
+    return (2.0 + 1.0 / alpha) * pow(sine_squared, 0.5 / alpha) / (2.0 * 3.14159265);
+}
+// … with Neubelt & Pettineo's visibility ("Crafting a Next-Gen Material Pipeline for The Order:
+// 1886", 2013) …
+fn sheen_visibility(normal_dot_light: f32, normal_dot_view: f32) -> f32 {
+    return 1.0 / max(4.0 * (normal_dot_light + normal_dot_view - normal_dot_light * normal_dot_view), 1e-4);
+}
+// … and how much of the light that sheen takes over the hemisphere, its directional albedo:
+// integrated numerically over r 0.3–1 and n·v 0.05–1 and fitted (womanblend-f9's
+// tools/sheen-albedo-fit.py there, the fit within 0.05 of the integral); what the base layer is
+// scaled down by, so cloth with sheen is never lit brighter than the light
+fn sheen_albedo(r: f32, normal_dot_view: f32) -> f32 {
+    let rough = clamp(r, 0.3, 1.0);
+    let cosine = clamp(normal_dot_view, 0.05, 1.0);
+    let inverse = 1.0 / (cosine + 0.15);
+    return clamp(-0.30065 + 1.4614 * rough - 0.60645 * rough * rough - 0.44483 * cosine
+        - 0.19257 * rough * cosine + (0.34488 - 0.61552 * rough + 0.27141 * rough * rough) * inverse
+        + 0.21332 * cosine * cosine, 0.0, 1.0);
+}
+// (a surface has a sheen when it is a standard, cutout or blended one with `:sheen-cloth`, carried in
+// `DrawU::strand`, which only hair reads: its colour, then its roughness above 0)
+fn has_sheen() -> bool {
+    return draw.flags.x >= 1u && draw.flags.x <= 3u && draw.strand.w > 0.0;
+}
 // (`diffuse_normal` is what the light falls on and `mirror_surface` the surface a reflection must
 // not go under: `normal` and `surface_normal` but for an `:eye` under its cornea, ADR-796)
 fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, surface_normal: vec3<f32>, occlusion: f32, turn: f32, strand: vec3<f32>, curvature: f32, specular_kept: f32, diffuse_normal: vec3<f32>, mirror_surface: vec3<f32>, under_cornea: vec4<f32>) -> vec3<f32> {
@@ -2515,6 +2545,15 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
     // inside her mouth the gums' red, so a shadowed tooth goes dim and warm, not grey
     if (draw.flags.x != 4u && draw.flags.x != 5u && draw.sheen.w > 0.5) {
         out = base * ambient(diffuse_normal) * bounced_occlusion(occlusion, draw.sheen.rgb);
+    }
+    // a cloth's sheen (ADR-836): the base layer under it scaled down by what the sheen takes, and
+    // the ambient's share of the sheen itself
+    var sheen_kept = 1.0;
+    if (has_sheen()) {
+        let looking = clamp(dot(normal, view), 0.0, 1.0);
+        let taken = sheen_albedo(draw.strand.w, looking);
+        sheen_kept = 1.0 - max(draw.strand.x, max(draw.strand.y, draw.strand.z)) * taken;
+        out = out * sheen_kept + draw.strand.rgb * taken * ambient(normal) * occlusion;
     }
     // a `:fibres` strand's ambient through the hair round it, as a light's comes (ADR-828): the
     // bake's mean crossings over every direction (its constant term), each fibre passing its own
@@ -2669,7 +2708,17 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             let scattered = skin_diffuse(facing, curvature * draw.skin.x * region.y);
             diffuse = diffuse + (scattered - vec3<f32>(lambert)) * scattered_seen;
         }
-        out = out + light.color.rgb * arriving * (base * diffuse + vec3<f32>(specular * seen));
+        var lit = base * diffuse + vec3<f32>(specular * seen);
+        if (has_sheen()) {
+            // a cloth's sheen under each light (ADR-836): Charlie's distribution, Neubelt's
+            // visibility, under the light's shadow; the base layer kept as above. Times π: this
+            // renderer folds the BRDF's 1/π into the light (a matte surface is base · light · cos,
+            // `specular_lobe` normalised (n + 8) / 8), so a radiometric BRDF is π times its own
+            let looking = clamp(dot(normal, view), 1e-4, 1.0);
+            let sheen = sheen_distribution(draw.strand.w, dot(normal, half_vector)) * sheen_visibility(mirror_lambert, looking) * mirror_lambert;
+            lit = lit * sheen_kept + draw.strand.rgb * (3.14159265 * sheen * seen);
+        }
+        out = out + light.color.rgb * arriving * lit;
     }
     if (!reflects) {
         return out;
