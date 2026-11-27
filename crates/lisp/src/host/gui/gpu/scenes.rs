@@ -64,8 +64,11 @@ pub(super) struct GpuMesh {
     turning: bool,
     /// Where its vertices can be, to fit shadow maps as the CPU painter fits them.
     bounds: MeshBounds,
-    /// Its softness a vertex (ADR-805), when it has one.
+    /// Its softness and garment cover a vertex, two floats (ADR-805, ADR-839), when it has either.
     softness: Option<wgpu::Buffer>,
+    /// Whether it has a softness of its own (the ring and the press read it), and a garment cover.
+    has_softness: bool,
+    has_cover: bool,
     /// For a mesh that can be pressed: what its squeezed skin is relaxed by (ADR-822).
     ring: Option<MeshRing>,
 }
@@ -1313,9 +1316,20 @@ impl MeshGpu {
             wgpu::BufferUsages::INDEX,
         );
         queue.write_buffer(&index_buffer, 0, &indices);
-        // its softness a vertex, for the ring round a contact (ADR-805)
-        let softness = (!mesh.softness.is_empty()).then(|| {
-            let bytes = floats_bytes(&mesh.softness);
+        // its softness a vertex, for the ring round a contact (ADR-805), beside its garment cover
+        // (ADR-839): two floats a vertex, softness 1 (wholly soft) where it has a cover and no softness
+        let has_softness = !mesh.softness.is_empty();
+        let has_cover = !mesh.cover.is_empty();
+        let softness = (has_softness || has_cover).then(|| {
+            let pairs: Vec<f32> = (0..count)
+                .flat_map(|index| {
+                    [
+                        mesh.softness.get(index).copied().unwrap_or(1.0),
+                        mesh.cover.get(index).copied().unwrap_or(0.0),
+                    ]
+                })
+                .collect();
+            let bytes = floats_bytes(&pairs);
             let softness = buffer(
                 device,
                 "mesh softness",
@@ -1326,7 +1340,7 @@ impl MeshGpu {
             softness
         });
         // (and, for a mesh that can be pressed, what its squeezed skin is relaxed by, ADR-822)
-        let ring = if softness.is_some() {
+        let ring = if has_softness {
             mesh_ring(device, queue, mesh)
         } else {
             None
@@ -1344,6 +1358,8 @@ impl MeshGpu {
                 turning: !mesh.centres.is_empty(),
                 bounds: mesh.bounds.clone(),
                 softness,
+                has_softness,
+                has_cover,
                 ring,
             },
         );
@@ -1719,7 +1735,12 @@ impl MeshGpu {
                     [
                         1,
                         start,
-                        u32::from(mesh.softness.is_some()),
+                        u32::from(mesh.has_softness)
+                            | if draw.material.covered && mesh.has_cover {
+                                2
+                            } else {
+                                0
+                            },
                         mesh.vertex_count,
                     ]
                 } else {

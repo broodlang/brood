@@ -1862,6 +1862,8 @@ fn scene_spec(
         material.deform = matches!(get(material_map, "deform"), Some(Value::Bool(true)));
         // a garment (ADR-839): with `:deform`, pushed out of the scene's garment contacts
         material.garment = matches!(get(material_map, "garment"), Some(Value::Bool(true)));
+        // and the mesh's garment cover in force over her skin (ADR-839)
+        material.covered = matches!(get(material_map, "covered"), Some(Value::Bool(true)));
         // a `:fibres` surface's `:density`: how much of its baked hair count dims its light (a
         // number from 0; 0.4 without it); refused when not, as a wrong one would light hair
         // wrongly without a word
@@ -3257,6 +3259,7 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         uvs2: mesh_bytes(heap, map, "uvs2")?,
         loose_weight: mesh_bytes(heap, map, "loose-weight")?,
         standoff: mesh_bytes(heap, map, "standoff")?,
+        cover: mesh_bytes(heap, map, "cover")?,
         tangents: mesh_bytes(heap, map, "tangents")?,
         joints: mesh_bytes(heap, map, "joints")?,
         joints_wide,

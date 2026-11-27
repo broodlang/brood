@@ -281,6 +281,10 @@ pub struct Mesh {
     /// How far short of a contact's surface each vertex stops when pressed, metres (`:standoff`,
     /// ADR-824: the hair lying between her skin and a pane); empty: none.
     pub standoff: Vec<f32>,
+    /// A second standoff, a garment's cover over each vertex, metres (`:cover`, ADR-839): pressed by
+    /// a contact, a vertex of a draw whose material says `:covered` stops the larger of its two
+    /// standoffs short (her skin under a cup, under the hand that presses the cup); empty: none.
+    pub cover: Vec<f32>,
     /// Tangents with the bitangent's sign in `w` (glTF's convention), for a normal map.
     pub tangents: Option<Vec<[f32; 4]>>,
     /// The four joints each vertex is skinned to (indices into a draw's palette) and their
@@ -514,6 +518,8 @@ pub struct MeshParts {
     /// How far short of a contact's surface each vertex stops when pressed, 1 f32 a vertex in metres
     /// (`:standoff`, ADR-824); empty: none.
     pub standoff: Vec<u8>,
+    /// A garment's cover over each vertex, 1 f32 a vertex in metres (`:cover`, ADR-839); empty: none.
+    pub cover: Vec<u8>,
     pub tangents: Vec<u8>,
     /// `u8` or `u16` joint indices, four a vertex, per `joints_wide`.
     pub joints: Vec<u8>,
@@ -680,6 +686,14 @@ impl Mesh {
             Vec::new()
         } else {
             floats::<1>("standoff", &parts.standoff, count)?
+                .into_iter()
+                .map(|[value]| value.clamp(0.0, 0.05))
+                .collect()
+        };
+        let cover = if parts.cover.is_empty() {
+            Vec::new()
+        } else {
+            floats::<1>("cover", &parts.cover, count)?
                 .into_iter()
                 .map(|[value]| value.clamp(0.0, 0.05))
                 .collect()
@@ -905,6 +919,7 @@ impl Mesh {
             uvs2,
             loose_weight,
             standoff,
+            cover,
             tangents,
             joints,
             weights,
@@ -1154,6 +1169,9 @@ pub struct Material {
     /// A garment (`:garment`, ADR-839): with `deform`, its vertices pushed out of the scene's garment
     /// contacts (her skin) on the GPU, each use counted as a fault (`gui/scene-push-outs`).
     pub garment: bool,
+    /// Its mesh's `:cover` in force (`:covered`, ADR-839): pressed, each vertex stops the larger of its
+    /// standoff and its cover short of the contact (her skin under the garment she wears now).
+    pub covered: bool,
     /// A `:fibres` surface (ADR-813): a `:strands` mesh at its real width, its coverage of a
     /// pixel worked out exactly and blended, the three nearest layers a pixel lit (TressFX
     /// ShortCut). The GPU painter alone draws it so; the CPU painter draws it as `:strands`.
@@ -1214,6 +1232,7 @@ impl Default for Material {
             sheen_cloth: None,
             deform: false,
             garment: false,
+            covered: false,
             fibres: false,
             clamp_planes: Vec::new(),
             fibre_density: 0.4,
@@ -9917,7 +9936,20 @@ mod tests {
         })
         .expect("held");
         assert_eq!(held.standoff, vec![0.004, 0.05, 0.0]);
-        assert!(Mesh::from_parts(base).expect("plain").standoff.is_empty());
+        assert!(
+            Mesh::from_parts(base.clone())
+                .expect("plain")
+                .standoff
+                .is_empty()
+        );
+        // (ADR-839) its garment cover the same: kept within 0 … 5 cm, none when not given
+        let covered = Mesh::from_parts(MeshParts {
+            cover: bytes(&[0.0035, 0.09, -0.002]),
+            ..base.clone()
+        })
+        .expect("covered");
+        assert_eq!(covered.cover, vec![0.0035, 0.05, 0.0]);
+        assert!(Mesh::from_parts(base).expect("plain").cover.is_empty());
     }
 
     #[test]

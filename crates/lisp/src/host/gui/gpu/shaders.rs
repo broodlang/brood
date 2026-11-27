@@ -752,7 +752,8 @@ struct ContactList {
 // (its 65th: how many garment vertices the push-out net moved this frame, ADR-839)
 const PUSH_OUT_COUNTER: u32 = 64u;
 @group(3) @binding(11) var<storage, read_write> posed_out: array<vec4<f32>>;
-@group(3) @binding(12) var<storage, read> mesh_softness: array<f32>;
+// each vertex's softness (ADR-805) and its garment cover (ADR-839), two floats a vertex
+@group(3) @binding(12) var<storage, read> mesh_softness: array<vec2<f32>>;
 
 // (`mesh::RING_WIDTH`, `RING_SPREAD`, `RING_LIFT`, `EDGE_BAND`, `EDGE_SPREAD`, `FIRM_INSET`, `FIRM_SOFTNESS`)
 const RING_WIDTH: f32 = 0.012;
@@ -864,10 +865,19 @@ fn vertex_at(index: u32) -> VertexIn {
 
 // `mesh::softness_at`: a pressed vertex's softness, wholly soft for a mesh without one
 fn contact_softness(index: u32) -> f32 {
-    if (draw.deform.z == 1u) {
-        return clamp(mesh_softness[index], 0.0, 1.0);
+    if ((draw.deform.z & 1u) != 0u) {
+        return clamp(mesh_softness[index].x, 0.0, 1.0);
     }
     return 1.0;
+}
+
+// how far short of a contact this vertex stops (ADR-824): its standoff, or its garment cover where
+// that is larger and the draw says the garment is worn (`:covered`, ADR-839)
+fn vertex_standoff(index: u32, input: VertexIn) -> f32 {
+    if ((draw.deform.z & 2u) != 0u) {
+        return max(input.standoff, mesh_softness[index].y);
+    }
+    return input.standoff;
 }
 
 // `mesh::skin_matrix` over the draw's lagging palette (ADR-812): where `position` would be were
@@ -910,7 +920,7 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     let count = min(contact_list.count.x, 64u);
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         // (stopping its standoff short of the surface, ADR-824)
-        let distance = contact_distance(slot, world).w - input.standoff;
+        let distance = contact_distance(slot, world).w - vertex_standoff(id.x, input);
         if (distance < 0.0 && !contact_skipped(slot, input) && !contact_garment(slot)) {
             // (as far as it acts there: its `:within` side, ADR-816)
             atomicMax(&contact_depths[slot], bitcast<u32>(-distance * contact_within(slot, world)));
@@ -1099,7 +1109,7 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         let depth = min(bitcast<f32>(atomicLoad(&contact_depths[slot])), MAX_SQUASH);
         let reached = contact_distance(slot, point);
         // (stopping its standoff short of the surface: hair lying between, ADR-824)
-        let measured = vec4<f32>(reached.xyz, reached.w - input.standoff);
+        let measured = vec4<f32>(reached.xyz, reached.w - vertex_standoff(id.x, input));
         // (how much it acts here: on its `:within` side only, `mesh::within_weight`, ADR-816)
         let weight = contact_within(slot, point);
         if (weight <= 0.0) {
