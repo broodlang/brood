@@ -2260,8 +2260,11 @@ fn cons_ty(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Ty> {
 }
 
 /// `(append xs ys …)` — variadic list concatenation. The element type is the union of
-/// every argument's; any argument with an unknown element type falls through to the flat
-/// result.
+/// every argument's; with an argument whose type or element type is unknown the result is
+/// the flat `list`, which `append` answers whatever it is given (a list or `nil`, a vector
+/// or a range last made a list of). Flat, not unknown: `append`'s declared result is `any`,
+/// so an unknown here left every function ending in `(append (map …) (mapcat …))` with a
+/// body the checker could not hold to its declared `list`.
 fn append_ty(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Ty> {
     if items.len() == 1 {
         return Some(Ty::of(Tag::Nil)); // (append) = nil
@@ -2269,13 +2272,18 @@ fn append_ty(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Ty> {
     let mut acc: Option<Ty> = None;
     let mut any_non_empty = false;
     for &arg in &items[1..] {
-        let arg_ty = expr_ty(heap, arg, ctx)?;
+        let Some(arg_ty) = expr_ty(heap, arg, ctx) else {
+            return Some(Ty::LIST);
+        };
         any_non_empty |= provably_non_empty(&arg_ty);
         // `nil` — the empty list — contributes no elements at all.
         let elem = if arg_ty.is_subtype(&Ty::of(Tag::Nil)) {
             Ty::NEVER
         } else {
-            arg_ty.elem_ty()?
+            match arg_ty.elem_ty() {
+                Some(elem) => elem,
+                None => return Some(Ty::LIST),
+            }
         };
         acc = Some(match acc {
             Some(a) => a.union(elem),

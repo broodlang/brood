@@ -3295,3 +3295,11 @@ deopt re-runs from ip 0, where every binding is made again before it is read. `l
 note that a let slot is "dominated by this store, so a deopt's VM re-run recomputes the binding
 before any read sees a stale slot" held only from ip 0. Guard:
 `tests/jit_slot_reuse_deopt_test.blsp` (both cases fail on c807c63c7).
+
+2026-11-27. **The checker: `append` answers a list whatever it is given.** `append_ty` gave
+up (unknown) when an argument's element type was unknown, and `append` declares `any`, so a
+function ending in `(append (map …) (mapcat …))` had a body the checker could not hold to
+its declared `list`: three `[trusted]` warnings under `nest check --strict` after c807c63c7
+(`editor/treesit/injection-problems` and `indent-problems`, `settings/file-diagnostics`),
+which is what the pre-push hook and CI's `scripts/green.sh` run. The flat `list` now. Strict
+over `std/` and `tests/`: zero warnings.
