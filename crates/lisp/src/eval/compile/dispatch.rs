@@ -389,15 +389,38 @@ fn dispatch_once(
         // definition; one cached bool when off.
         {
             if crate::diagnostics::debug_flags::defer_debug() {
-                let name = match cur_callee.unpack() {
-                    crate::core::value::ValueRef::Fn(id) => heap
-                        .closure(id)
-                        .name
-                        .map(crate::core::value::symbol_name_ref)
-                        .unwrap_or("<anon>"),
-                    _ => "<non-fn>",
+                // An anonymous closure is named by what it is: its parameters and the
+                // start of its body, as printed. "<anon> argc=1" 270 times a frame said
+                // that a hot `(fn …)` tree-walks and nothing about which.
+                let described = match cur_callee.unpack() {
+                    crate::core::value::ValueRef::Fn(id) => {
+                        let closure = heap.closure(id);
+                        match closure.name {
+                            Some(name) => crate::core::value::symbol_name_ref(name).to_string(),
+                            None => {
+                                let shape = closure.arms.first().map_or_else(String::new, |arm| {
+                                    let params: Vec<&str> = arm
+                                        .params
+                                        .iter()
+                                        .map(|param| crate::core::value::symbol_name_ref(*param))
+                                        .collect();
+                                    let body: String = arm
+                                        .body
+                                        .first()
+                                        .map(|form| crate::syntax::printer::print(heap, *form))
+                                        .unwrap_or_default()
+                                        .chars()
+                                        .take(160)
+                                        .collect();
+                                    format!(" ({}) {}", params.join(" "), body.replace('\n', " "))
+                                });
+                                format!("<anon>{shape}")
+                            }
+                        }
+                    }
+                    _ => "<non-fn>".to_string(),
                 };
-                eprintln!("[tw-defer] {name} argc={}", cur_argv.len());
+                eprintln!("[tw-defer] {described} argc={}", cur_argv.len());
             }
         }
         let _guard = CaptureTopGuard(crate::process::set_capture_top_level(false));
