@@ -592,19 +592,25 @@ impl GpuWindow {
                 }
                 // Pixel-space text: the `Text` walk from a pixel top-left (after the
                 // alignment's shift by the run's shaped width), untouched by grid or scroll.
+                // (with a `:px` size: by its font's own advances at that size, ADR-833)
                 Op::TextPx {
                     x,
                     y,
                     s,
                     face,
                     align,
+                    px,
                 } => {
                     let align = match align {
                         Align::Left => 0,
                         Align::Center => 1,
                         Align::Right => 2,
                     };
-                    self.draw_run(fb, renderer, s, face, RunPlace::Pixel { align }, g, *x, *y);
+                    if *px > 0.0 {
+                        self.draw_px_run(fb, renderer, s, face, align, *x, *y, *px);
+                    } else {
+                        self.draw_run(fb, renderer, s, face, RunPlace::Pixel { align }, g, *x, *y);
+                    }
                 }
             }
         }

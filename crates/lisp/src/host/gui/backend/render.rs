@@ -23,6 +23,28 @@ pub(crate) struct CachedGlyph {
     pub(crate) rgba: Vec<u8>, // width*height*4, straight (non-premultiplied) alpha
 }
 
+/// One glyph of a run shaped at a pixel size (`Renderer::px_run`, ADR-833): its rasteriser
+/// key (the font, the glyph, the size), where its bitmap's top left sits from the run's top
+/// left, its size, and its pixels as `CachedGlyph`'s (white with the coverage in alpha, or a
+/// colour glyph's own), empty when the caller already has them.
+#[cfg_attr(not(feature = "gui-gpu"), allow(dead_code))]
+pub(crate) struct PxGlyph {
+    pub(crate) key: cosmic_text::CacheKey,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) w: u32,
+    pub(crate) h: u32,
+    pub(crate) rgba: Vec<u8>,
+    pub(crate) color: bool,
+}
+
+/// A run shaped at a pixel size: its width (pixels, by the font's advances) and its glyphs.
+#[cfg_attr(not(feature = "gui-gpu"), allow(dead_code))]
+pub(crate) struct PxRun {
+    pub(crate) width: f32,
+    pub(crate) glyphs: Vec<PxGlyph>,
+}
+
 /// How monochrome text is anti-aliased (behind `gui-text-aa!`). `Gray` is one coverage
 /// value per pixel; `Subpixel` renders three — one per colour channel, each shifted a
 /// third of a pixel — tripling the horizontal resolution of every stem on an LCD panel
@@ -511,6 +533,86 @@ impl Renderer {
             self.cache.insert(key.clone(), baked);
         }
         &self.cache[&key]
+    }
+
+    /// Shape run `s` in a face at a PIXEL size (`:text-px` with `:px`, ADR-833): laid out by
+    /// the font's own advances (a proportional face reads as one, not a cell a cluster), each
+    /// glyph rasterised at `px` physical pixels and hinted as the window says. Answers the
+    /// run's width and its glyphs, each placed from the run's top left; a glyph `known` says
+    /// is already uploaded comes back without its pixels (`rgba` empty).
+    #[cfg_attr(not(feature = "gui-gpu"), allow(dead_code))]
+    pub(crate) fn px_run(
+        &mut self,
+        s: &str,
+        family: Option<u32>,
+        bold: bool,
+        italic: bool,
+        px: f32,
+        known: &dyn Fn(&cosmic_text::CacheKey) -> bool,
+    ) -> PxRun {
+        let fid = family.unwrap_or(self.default_family);
+        let hint = self.hint();
+        let mut shared = self.families.borrow_mut();
+        let shared = &mut *shared;
+        let fam = shared.name_of(fid);
+        let mut attrs = Attrs::new().family(Family::Name(fam.as_str()));
+        if bold {
+            attrs = attrs.weight(Weight::BOLD);
+        }
+        if italic {
+            attrs = attrs.style(Style::Italic);
+        }
+        let px = px.max(1.0);
+        let mut tb = CtBuffer::new(&mut shared.fs, Metrics::new(px, (px * 1.25).ceil()));
+        tb.set_size(None, None);
+        tb.set_text(s, &attrs, Shaping::Advanced, None);
+        tb.shape_until_scroll(&mut shared.fs, false);
+        let mut run = PxRun {
+            width: 0.0,
+            glyphs: Vec::new(),
+        };
+        let lines: Vec<(f32, f32, Vec<cosmic_text::LayoutGlyph>)> = tb
+            .layout_runs()
+            .map(|line| (line.line_y, line.line_w, line.glyphs.to_vec()))
+            .collect();
+        for (line_y, line_w, glyphs) in lines {
+            run.width = run.width.max(line_w);
+            for gl in &glyphs {
+                let phys = gl.physical((0.0, line_y), 1.0);
+                let hinted = shared.hinted.mask(&mut shared.fs, phys.cache_key, hint, 1.0);
+                let img = match &hinted {
+                    Some(img) => img.clone(),
+                    None => match shared.swash.get_image(&mut shared.fs, phys.cache_key) {
+                        Some(img) => img.clone(),
+                        None => continue,
+                    },
+                };
+                let (w, h) = (img.placement.width, img.placement.height);
+                if w == 0 || h == 0 {
+                    continue;
+                }
+                let color = matches!(img.content, SwashContent::Color);
+                let rgba = if known(&phys.cache_key) {
+                    Vec::new()
+                } else {
+                    match img.content {
+                        SwashContent::Mask => img.data.iter().flat_map(|a| [255, 255, 255, *a]).collect(),
+                        SwashContent::Color => img.data.clone(),
+                        SwashContent::SubpixelMask => continue,
+                    }
+                };
+                run.glyphs.push(PxGlyph {
+                    key: phys.cache_key,
+                    x: phys.x + img.placement.left,
+                    y: phys.y - img.placement.top,
+                    w,
+                    h,
+                    rgba,
+                    color,
+                });
+            }
+        }
+        run
     }
 
     /// The family a face without `:family` is drawn in — part of the GPU atlas's glyph
@@ -2554,5 +2656,35 @@ mod missing_glyph_tests {
             hex_box('\u{10FFFD}', baked.width, baked.height),
             "the bake is not the hex box"
         );
+    }
+}
+
+#[cfg(test)]
+mod px_run_tests {
+    use super::*;
+
+    /// Text at a pixel size (ADR-833) is laid out by the font's advances at that size: twice
+    /// the size, twice the width; its glyphs rasterised at that size (a capital about as tall
+    /// as its cap height there), placed from the run's top left, and a glyph already uploaded
+    /// comes back without its pixels.
+    #[test]
+    fn pixel_sized_text_scales_with_its_size_and_skips_known_glyphs() {
+        let mut r = Renderer::new(1.0, default_families(), 15.0);
+        let small = r.px_run("Wave hello", None, false, false, 14.0, &|_| false);
+        let large = r.px_run("Wave hello", None, false, false, 28.0, &|_| false);
+        assert!(small.width > 0.0);
+        let ratio = large.width / small.width;
+        assert!((ratio - 2.0).abs() < 0.08, "width ratio {ratio}");
+        // nine glyphs with ink (the space has none), each with its pixels
+        assert_eq!(small.glyphs.len(), 9);
+        assert!(small.glyphs.iter().all(|g| g.rgba.len() == (g.w * g.h * 4) as usize));
+        // the capital W about 0.7 of the size tall at 28 px, and inside the run's line
+        let w = &large.glyphs[0];
+        assert!((15..=24).contains(&w.h), "W is {} px tall", w.h);
+        assert!(w.y >= 0 && w.x >= 0);
+        // the same run again with every glyph known: placed, but no pixels made
+        let again = r.px_run("Wave hello", None, false, false, 14.0, &|_| true);
+        assert_eq!(again.glyphs.len(), 9);
+        assert!(again.glyphs.iter().all(|g| g.rgba.is_empty()));
     }
 }

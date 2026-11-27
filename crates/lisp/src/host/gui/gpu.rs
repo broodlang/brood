@@ -242,6 +242,9 @@ pub struct GpuWindow {
     /// Cluster+face+px key → its atlas slot; `None` for a cluster that rasterised to
     /// nothing (or was too big for a page), remembered so it is not retried each frame.
     glyphs: HashMap<u64, Option<AtlasGlyph>>,
+    /// A glyph of pixel-sized text (`:text-px` with `:px`, ADR-833) by its rasteriser key
+    /// (font, glyph, size) → its atlas slot, as `glyphs`.
+    px_glyphs: HashMap<cosmic_text::CacheKey, Option<AtlasGlyph>>,
     textures: HashMap<u32, GpuTexture>,
     /// The pictures `[:image …]` ops drew, each uploaded once per size it is drawn at.
     pictures: PictureTextures,

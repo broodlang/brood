@@ -880,12 +880,19 @@ pub enum Op {
     /// corner. What a game's HUD and title screens need, since a cell row is the wrong
     /// place for a caption over a sprite. Drawn by both window painters; the terminal
     /// skips it (like `Quad`).
+    ///
+    /// `px` > 0 (the face's `:px`, ADR-833) draws it at that many PHYSICAL pixels in its face's
+    /// family, laid out by the font's own advances: a proportional face (a UI's) reads as
+    /// one, at any size, where without it the run is the cell font's, a cell a cluster, at
+    /// whole multiples of the cell size. The GPU painter only; the frozen CPU painter draws
+    /// the cell run (ADR-818).
     TextPx {
         x: f32,
         y: f32,
         s: String,
         face: Face,
         align: Align,
+        px: f32,
     },
     /// Play sound `id` (a handle `gui-sound` uploaded under) once, at peak amplitude
     /// `vol` (0..1), placed by `pan` between the left (-1) and right (1) speakers (0, the

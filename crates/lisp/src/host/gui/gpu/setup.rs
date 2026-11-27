@@ -501,6 +501,7 @@ impl GpuWindow {
             smooth_sampler,
             atlas: Vec::new(),
             glyphs: HashMap::new(),
+            px_glyphs: HashMap::new(),
             textures: HashMap::new(),
             pictures: PictureTextures::default(),
             viewport_layout,

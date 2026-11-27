@@ -1207,12 +1207,19 @@ fn parse_gui_ops(
                 },
                 _ => crate::host::gui::Align::Left,
             };
+            // (`:px` in the face: drawn at that many pixels by its font's own advances,
+            // ADR-833; without it the cell font's run)
+            let px = match face_v {
+                Value::Map(id) => heap.map_get(id, value::kw("px")).map(num).unwrap_or(0.0),
+                _ => 0.0,
+            };
             ops.push(crate::host::gui::Op::TextPx {
                 x,
                 y,
                 s,
                 face,
                 align,
+                px,
             });
         } else if tag == tags.sound_t {
             // `[:sound id]` / `[:sound id vol]` / `[:sound id vol pan]` /

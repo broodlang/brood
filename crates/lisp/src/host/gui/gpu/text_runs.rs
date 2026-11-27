@@ -62,6 +62,78 @@ impl GpuWindow {
         }
     }
 
+    /// Draw pixel text at a pixel size (`:text-px` with `:px`, ADR-833): run `s` shaped in its
+    /// face's family by the font's own advances (`Renderer::px_run`), its left, centre or
+    /// right edge at `x` per `align` and its top at `y`; each glyph uploaded to the atlas once
+    /// (`px_glyphs`), drawn as the cell run's glyphs are (its ground's contrast lift), a
+    /// `:bg` filled behind the run first.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_px_run(
+        &mut self,
+        fb: &mut FrameBuilder,
+        renderer: &mut Renderer,
+        s: &str,
+        face: &Face,
+        align: u8,
+        x: f32,
+        y: f32,
+        px: f32,
+    ) {
+        let (mut fg, mut bg) = (face.fg.unwrap_or(renderer.fg()), face.bg);
+        if face.reverse {
+            let ground = bg.unwrap_or(renderer.bg());
+            bg = Some(fg);
+            fg = ground;
+        }
+        let ground_luminance = luminance(bg.unwrap_or(renderer.bg()));
+        let lift = luminance(fg) > ground_luminance;
+        let known = &self.px_glyphs;
+        let run = renderer.px_run(s, face.family, face.bold, face.italic, px, &|key| known.contains_key(key));
+        let left = match align {
+            1 => x - run.width / 2.0,
+            2 => x - run.width,
+            _ => x,
+        };
+        if let Some(bg) = bg {
+            fb.fill(left, y, run.width, (px * 1.25).ceil(), bg);
+        }
+        let atlas_size = ATLAS_SIZE as f32;
+        for glyph in run.glyphs {
+            let slot = match self.px_glyphs.get(&glyph.key) {
+                Some(slot) => *slot,
+                None => {
+                    let packed = if glyph.rgba.is_empty() {
+                        None
+                    } else {
+                        self.pack_glyph(&glyph.rgba, glyph.w, glyph.h, !glyph.color, false)
+                    };
+                    self.px_glyphs.insert(glyph.key, packed);
+                    packed
+                }
+            };
+            let Some(slot) = slot else {
+                continue;
+            };
+            fb.textured(
+                TexKey::Atlas(slot.page),
+                left + glyph.x as f32,
+                y + glyph.y as f32,
+                slot.w as f32,
+                slot.h as f32,
+                [
+                    slot.x as f32 / atlas_size,
+                    slot.y as f32 / atlas_size,
+                    slot.w as f32 / atlas_size,
+                    slot.h as f32 / atlas_size,
+                ],
+                [fg[0], fg[1], fg[2], 255],
+                glyph_mode(slot.mono, slot.lcd, lift),
+                0.0,
+                ground_luminance,
+            );
+        }
+    }
+
     /// Shape a text run into quads relative to its anchor: every cell background first
     /// (one solid batch), then a glyph per non-space cluster out of the atlas (one
     /// textured batch), then any underline — the CPU painter's text walk. A cell run

@@ -573,6 +573,7 @@ fn a_frame_drawn_on_threads_is_the_frame_drawn_on_one() {
             ..Face::default()
         },
         align: crate::host::gui::Align::Left,
+        px: 0.0,
     });
     decorated.push(Op::Rect {
         row: 4,

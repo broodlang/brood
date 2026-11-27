@@ -3276,6 +3276,7 @@ mod strip_diff_tests {
                         ..Face::default()
                     },
                     align: crate::host::gui::Align::Center,
+                    px: 0.0,
                 },
                 Op::Quad {
                     x: 36.0 * cw as f32,

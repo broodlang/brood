@@ -859,12 +859,15 @@ pub(super) fn render_ops<P: Painter>(
             // Pixel-space text: the `Text` walk with the run's top-left given in
             // pixels (after the alignment's shift by the run's shaped width) rather
             // than derived from a cell; unaffected by grid origin and scroll.
+            // (a `:px` size is the GPU painter's alone, ADR-833: frozen, this one draws the cell
+            // run, ADR-818)
             Op::TextPx {
                 x,
                 y,
                 s,
                 face,
                 align,
+                ..
             } => {
                 let (mut fg, mut bg) = (face.fg.unwrap_or(r.fg()), face.bg.unwrap_or(r.bg()));
                 let mut paint_bg = face.bg.is_some();
@@ -2771,6 +2774,7 @@ mod cell_region_tests {
             s: "ab".into(),
             face,
             align,
+            px: 0.0,
         };
         // Left-aligned at (10, 5): the background fills [10, 10 + 2cw) × [5, 5 + ch).
         render_ops(
