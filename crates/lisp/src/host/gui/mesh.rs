@@ -1064,6 +1064,10 @@ pub struct Material {
     /// the specular (the lights' and the surroundings') and nothing else ([`detail_specular`]). Not read by a `:hair`
     /// or `:strands` surface ([`Material::detail_texture`]).
     pub detail: Option<u32>,
+    /// A skin's regions map (`:regions`, ADR-826), in its UVs: roughness (absolute), thickness for
+    /// the scatter (0.7 the material's own), the detail tile's strength over two (0.5 the material's),
+    /// oil for the coat (0.3 the material's); none: the material's values everywhere.
+    pub regions: Option<u32>,
     /// How many times the detail tile repeats across the UV square, along u and along v.
     pub detail_scale: [f32; 2],
     /// What the detail normal's slope is multiplied by: 0 none, 1 as baked.
@@ -1147,6 +1151,7 @@ impl Default for Material {
             normal: None,
             occlusion: None,
             detail: None,
+            regions: None,
             detail_scale: [1.0, 1.0],
             detail_strength: DEFAULT_DETAIL_STRENGTH,
             detail_cavity: DEFAULT_DETAIL_CAVITY,

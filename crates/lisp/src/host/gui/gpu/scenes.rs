@@ -683,6 +683,8 @@ impl MeshGpu {
                 texture(3),
                 // the detail tile (ADR-797), through the same repeating sampler
                 texture(4),
+                // a skin's regions map (ADR-826)
+                texture(5),
                 // the expression wrinkles (ADR-817): the compress and stretch maps, the two zone masks
                 // (13 on: the contact passes hold 8 … 12 of this group in the same module)
                 texture(13),
@@ -1419,6 +1421,17 @@ impl MeshGpu {
                     } else {
                         0
                     };
+                // and 2048 for a skin's regions map (ADR-826), when it is uploaded
+                let bits = bits
+                    | if material.surface == Surface::Skin
+                        && material
+                            .regions
+                            .is_some_and(|handle| textures.contains_key(&handle))
+                    {
+                        2048
+                    } else {
+                        0
+                    };
                 // its morphs blended here, sparse, into one offset a vertex (none when no target
                 // it names moves anything, or the frame's offsets would pass the binding limit)
                 let vertex_count = mesh.vertex_count as usize;
@@ -1689,6 +1702,8 @@ impl MeshGpu {
                     let occlusion = view(draw.material.occlusion).unwrap_or(&self.white);
                     // no tile: a flat, open texel (the normal map's stand-in is one)
                     let detail = view(draw.material.detail_texture()).unwrap_or(&self.flat);
+                    // a skin's regions map (ADR-826): an open texel where none (read only with bit 2048)
+                    let regions = view(draw.material.regions).unwrap_or(&self.white);
                     // its wrinkle maps and masks (ADR-817): flat maps and open masks where none
                     let wrinkles = draw.material.wrinkles.as_ref();
                     let compress = view(wrinkles.map(|w| w.compress)).unwrap_or(&self.flat);
@@ -1718,6 +1733,10 @@ impl MeshGpu {
                             wgpu::BindGroupEntry {
                                 binding: 4,
                                 resource: wgpu::BindingResource::TextureView(detail),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: wgpu::BindingResource::TextureView(regions),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 13,

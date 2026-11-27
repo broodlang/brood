@@ -1640,6 +1640,17 @@ fn scene_spec(
                 ));
             }
         };
+        // a skin's regions map (ADR-826): a texture handle, refused when not one
+        material.regions = match get(material_map, "regions") {
+            None | Some(Value::Nil) => None,
+            Some(Value::Int(given)) if u32::try_from(given).is_ok() => u32::try_from(given).ok(),
+            Some(given) => {
+                return Err(format!(
+                    "a material's :regions is a texture handle (a whole number, 0 or more), not {}",
+                    crate::syntax::printer::print(heap, given)
+                ));
+            }
+        };
         // a skin's expression wrinkles (ADR-817): `{:compress h :stretch h :masks [h h] :weights
         // [8 numbers from -1 to 1]}`, refused whole when any part is wrong
         material.wrinkles = match get(material_map, "wrinkles") {
@@ -4421,6 +4432,17 @@ mod gui_scene_light_tests {
         );
         let error = keep("{:surface :fibres :shadow-keep 1.5}").expect_err("past whole");
         assert!(error.contains(":shadow-keep is a share"), "{error}");
+        // (ADR-826) a skin's regions map: a texture handle, refused when not one
+        assert_eq!(
+            scene_with("[]", "{:surface :skin :regions 7}")
+                .expect("reads")
+                .draws[0]
+                .material
+                .regions,
+            Some(7)
+        );
+        let error = scene_with("[]", "{:surface :skin :regions :map}").expect_err("not a handle");
+        assert!(error.contains(":regions is a texture handle"), "{error}");
         // (ADR-825) its look keys: read, their defaults without, refused out of range
         let look = |text: &str| {
             scene_with("[]", text).map(|scene| {

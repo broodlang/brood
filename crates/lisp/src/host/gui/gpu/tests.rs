@@ -256,7 +256,8 @@ fn the_mesh_shader_validates() {
     );
     // (where the rim was: a `:fibres` surface's `:density` now, its default on any other, ADR-813)
     assert_eq!(floats[6], Material::default().fibre_density);
-    assert!(MESH_SRC.contains("coat = draw.skin.yz;"));
+    // (the coat's strength scaled by a skin region's oil, ADR-826; its roughness as given)
+    assert!(MESH_SRC.contains("coat = vec2<f32>(draw.skin.y * region.w, draw.skin.z);"));
     // ADR-796: an eye's optics are `DrawU`'s last eight vec4s, zeros for any other surface; the
     // shader's numbers are the CPU painter's; the vertices carry the eye's frame
     use crate::host::gui::mesh::{CORNEA_EDGE, Eye, EyeAt, PUPIL_EDGE, Surface};

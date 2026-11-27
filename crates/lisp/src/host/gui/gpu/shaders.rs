@@ -1123,6 +1123,20 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
 // a material's `:detail` tile (ADR-797): a tangent-space normal's x and y in red and green
 // about DETAIL_FLAT, the cavity in blue; a flat, open texel where the material has none
 @group(3) @binding(4) var detail_texture: texture_2d<f32>;
+// a skin's regions (ADR-826): roughness, thickness for the scatter, the detail tile's strength over two,
+// oil for the coat, in its UVs (texture bit 2048)
+@group(3) @binding(5) var regions_texture: texture_2d<f32>;
+// this fragment's regions (ADR-826): its roughness (below 0: the material's), how much its scatter,
+// detail tile and coat are scaled
+var<private> region: vec4<f32> = vec4<f32>(-1.0, 1.0, 1.0, 1.0);
+
+// the roughness a surface is lit with: a skin region's where its map gives one, else the material's
+fn surface_roughness() -> f32 {
+    if (region.x >= 0.0) {
+        return region.x;
+    }
+    return draw.material.x;
+}
 // a skin's expression wrinkles (ADR-817): the compress and stretch maps and the zones' two masks
 @group(3) @binding(13) var wrinkle_compress: texture_2d<f32>;
 @group(3) @binding(14) var wrinkle_stretch: texture_2d<f32>;
@@ -1855,11 +1869,11 @@ fn specular_lobe(roughness: f32, normal_dot_half: f32, turn: f32) -> f32 {
 
 // the CPU's `specular_lobes`
 fn specular_lobes(normal_dot_half: f32, turn: f32) -> f32 {
-    let first = specular_lobe(draw.material.x * draw.lobes.x, normal_dot_half, turn);
+    let first = specular_lobe(surface_roughness() * draw.lobes.x, normal_dot_half, turn);
     if (draw.lobes.z >= 1.0) {
         return first;
     }
-    return draw.lobes.z * first + (1.0 - draw.lobes.z) * specular_lobe(draw.material.x * draw.lobes.y, normal_dot_half, turn);
+    return draw.lobes.z * first + (1.0 - draw.lobes.z) * specular_lobe(surface_roughness() * draw.lobes.y, normal_dot_half, turn);
 }
 
 // `mesh::sh_radiance`: the scene's nine coefficients along `direction`, band l scaled by
@@ -2321,7 +2335,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
     var out = base * ambient(diffuse_normal) * occlusion;
     let f0 = draw.lobes.w;
     // a `:hair` surface's highlights: as sharp as its roughness asks
-    let exponent = shininess(draw.material.x);
+    let exponent = shininess(surface_roughness());
     let reflects = draw.flags.x != 4u && draw.flags.x != 5u;
     // how far the reflection turns across half a pixel: twice the curvature, times the pixel
     var reflection_turn = 0.0;
@@ -2331,7 +2345,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
     // the `:coat`: its strength, its roughness
     var coat = vec2<f32>(0.0);
     if (reflects && draw.skin.y > 0.0) {
-        coat = draw.skin.yz;
+        coat = vec2<f32>(draw.skin.y * region.w, draw.skin.z);
     }
     // per light: how much of its shape's image is left by its shadow, cone and range window
     var shaping: array<f32, 8>;
@@ -2432,10 +2446,10 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
             // an arm's (ADR-815: unshadowed, the red wrap shone in a cast shadow)
             var lifted = seen;
             if (light.shadow.z > 0u && facing < 0.3) {
-                lifted = contact * shadow_visibility(light, world + surface_normal * (SCATTER_LIFT * 1000.0 * draw.skin.x), surface_normal, arrival.to_light, turn);
+                lifted = contact * shadow_visibility(light, world + surface_normal * (SCATTER_LIFT * 1000.0 * draw.skin.x * region.y), surface_normal, arrival.to_light, turn);
             }
             let scattered_seen = mix(lifted, seen, smoothstep(0.0, 0.3, facing));
-            let scattered = skin_diffuse(facing, curvature * draw.skin.x);
+            let scattered = skin_diffuse(facing, curvature * draw.skin.x * region.y);
             diffuse = diffuse + (scattered - vec3<f32>(lambert)) * scattered_seen;
         }
         out = out + light.color.rgb * arriving * (base * diffuse + vec3<f32>(specular * seen));
@@ -2450,7 +2464,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
     let reflected = 2.0 * facing_view * normal - view;
     let kept = horizon(reflected, mirror_surface);
     let weights = vec3<f32>(draw.lobes.z * specular_kept, (1.0 - draw.lobes.z) * specular_kept, coat.x);
-    let roughnesses = vec3<f32>(draw.material.x * draw.lobes.x, draw.material.x * draw.lobes.y, coat.y);
+    let roughnesses = vec3<f32>(surface_roughness() * draw.lobes.x, surface_roughness() * draw.lobes.y, coat.y);
     let reflectances = vec3<f32>(f0, f0, 0.02);
     let emitter_count = u32(scene.picture.z);
     // (the room's reflection hidden where something of the scene stands within `REFLECTION_REACH`
@@ -2536,6 +2550,14 @@ fn fs_mesh(fragment: VertexOut, @builtin(front_facing) front: bool) -> MeshFragm
     // the detail tile at its own repeats, so its mip level follows them (the CPU's `detail_lod`)
     let detail_texel = straight(textureSample(detail_texture, texture_sampler, fragment.uv * draw.detail.xy), (draw.flags.y & 128u) != 0u);
     let texel = select(vec4<f32>(1.0), base_texel, (draw.flags.y & 1u) != 0u);
+    // a skin's regions (ADR-826, texture bit 2048): its roughness; its thickness, which scales the
+    // scatter (thin skin, ears and nostrils, glows; the body's 0.7 is the material's own); the detail
+    // tile's strength (stored over two: 0.5 is the material's); its oil, which scales the coat (the
+    // body's 0.3 is the material's)
+    if ((draw.flags.y & 2048u) != 0u) {
+        let regions = textureSample(regions_texture, texture_sampler, fragment.uv);
+        region = vec4<f32>(regions.x, max(1.0 + (0.7 - regions.y) * 1.5, 0.0), regions.z * 2.0, regions.w / 0.3);
+    }
     // the texture's footprint at this pixel, for an eye's second read (taken before any branch)
     let uv_dx = dpdx(fragment.uv);
     let uv_dy = dpdy(fragment.uv);
@@ -2609,7 +2631,7 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
     if ((draw.flags.y & 256u) != 0u) {
         let tilt = detail_tilt(detail_texel);
         if (tilt.x != 0.0 || tilt.y != 0.0) {
-            local = detail_normal(local, tilt, draw.detail.z);
+            local = detail_normal(local, tilt, draw.detail.z * region.z);
             framed = true;
         }
     }
@@ -2631,7 +2653,7 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
     // its cavity damps the specular and the rim, never the diffuse
     var specular_kept = 1.0;
     if ((draw.flags.y & 64u) != 0u) {
-        specular_kept = detail_specular(detail_texel.b, draw.detail.w);
+        specular_kept = detail_specular(detail_texel.b, draw.detail.w * region.z);
     }
     if (framed) {
         let tangent = safe_normalize(fragment.tangent.xyz);
