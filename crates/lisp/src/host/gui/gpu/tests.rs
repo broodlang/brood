@@ -916,3 +916,14 @@ fn the_bounce_is_never_darker_than_the_occlusion_and_tinted_by_the_surroundings(
     let (red, green) = (bounced(0.2, 0.39), bounced(0.2, 0.14));
     assert!(red / green > 1.15, "{red} / {green}");
 }
+
+#[test]
+fn a_light_without_a_shadow_map_still_has_its_contact_shadow() {
+    // ADR-818, amended 2026-11-27: every light but on skin and hair
+    assert!(
+        MESH_SRC.contains(
+            "} else if (draw.flags.x != 0u && draw.flags.x != 4u && draw.flags.x != 5u) {"
+        )
+    );
+    assert!(MESH_SRC.contains("            contact = contact_shadow(world, arrival.to_light, surface_normal, view);\n            seen = contact;"));
+}
