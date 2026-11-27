@@ -3422,3 +3422,12 @@ the four bytes and builds the double from the single's bits as such a reader doe
 put on the magnitude's bits, so minus zero and a NaN's payload — a signalling one included —
 come through as they are; the processor's conversion would quiet it): the same to the bit as
 b3d's `f32-from-bits` on 300 000 patterns. Guard: `tests/bytes_test.blsp` "bytes/f32-le".
+
+2026-11-28. **`bytes/f32s-le->`: numbers written as little-endian singles in one call.** The
+other half of `bytes/f32-le`: a writer of a binary format built each single's bits in Brood,
+then four bytes, then appended them all (b3d's `f32-le->`, a fifth of womanblend's start after
+the read was native). Each number is rounded to the nearest single the IEEE way (ties to even,
+subnormals kept, past the largest single an infinity), a NaN written as the quiet NaN with its
+sign. The same bytes as b3d's encoder on 399 232 numbers of the normal range; below it b3d's
+flushed to zero and this keeps the subnormal, as the standard has it. Guard:
+`tests/bytes_test.blsp` "bytes/f32s-le->".

@@ -16,6 +16,15 @@ NaN and the sign of zero kept. Errors if the four bytes are not all in `b`.
     (bytes/f32-le (bytes 0 0 192 191) 0)   ;=> -1.5"
   (%bytes-f32-le b off))
 
+(defn f32s-le-> (numbers -> bytes)
+  "The numbers of a vector or list as little-endian IEEE-754 singles, four bytes each, in
+order: each the single nearest it (ties to even; past the largest single an infinity, below
+the smallest normal a subnormal or zero), a NaN as the quiet NaN with its sign. What a
+binary format's float array is written as (a glTF's vertex positions).
+
+    (bytes/f32s-le-> [1.5 -1.5])   ;=> #b\"\\0\\0\\xc0?\\0\\0\\xc0\\xbf\""
+  (%bytes-f32s-le numbers))
+
 (defn slice (b:bytes start:int & more:int -> bytes)
   "The byte slice [start, end) of b as a fresh bytes value (end defaults to the length). Errors if the range is out of bounds.
 

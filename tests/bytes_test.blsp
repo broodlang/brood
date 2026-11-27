@@ -272,3 +272,19 @@
     (is (try (do (bytes/f32-le (bytes 1 2 3) 0) false) (catch _ true)))
     (is (try (do (bytes/f32-le (bytes 1 2 3 4) 1) false) (catch _ true)))
     (is (try (do (bytes/f32-le (bytes 1 2 3 4) -1) false) (catch _ true)))))
+
+(describe "bytes/f32s-le->"
+  (test "writes each number as the nearest single, four little-endian bytes, in order"
+    (assert= (bytes/f32s-le-> [1.5 -1.5]) (bytes 0 0 192 63 0 0 192 191))
+    (assert= (bytes/f32s-le-> (list 2 0.1)) (bytes 0 0 0 64 205 204 204 61))
+    (assert= (bytes/f32s-le-> []) (bytes))
+    (assert= (bytes/f32-le (bytes/f32s-le-> [0.1]) 0) 0.10000000149011612))
+
+  (test "ties go to even; past the largest single is an infinity; a NaN is the quiet one"
+    (assert= (bytes/uint-le (bytes/f32s-le-> [(+ 1.0 (math/pow 2.0 -24))]) 0 4) 1065353216)
+    (assert= (bytes/uint-le (bytes/f32s-le-> [(+ 1.0 (* 3.0 (math/pow 2.0 -24)))]) 0 4) 1065353218)
+    (assert= (bytes/uint-le (bytes/f32s-le-> [1.0e40]) 0 4) 2139095040)
+    (assert= (bytes/uint-le (bytes/f32s-le-> [(bit/->float 9221120237041090561)]) 0 4) 2143289344))
+
+  (test "an item that is not a number is an error naming it"
+    (is (try (do (bytes/f32s-le-> [1.0 :x]) false) (catch _ true)))))

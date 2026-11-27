@@ -48,6 +48,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         bytes_f32_le,
     );
     primitives.def(
+        "%bytes-f32s-le",
+        Arity::exact(1),
+        Sig::new(vec![seqable], bytes_ty),
+        &["numbers"],
+        "The numbers of a vector or list as little-endian IEEE-754 singles, four bytes each: each rounded to the nearest single, ties to even (a magnitude past the largest single is an infinity, one below the smallest normal a subnormal or zero), a NaN as the quiet NaN with its sign. Errors on an item that is not an int or a float.",
+        bytes_f32s_le,
+    );
+    primitives.def(
         "%subbytes",
         Arity::range(2, 3),
         Sig::variadic(any, bytes_ty),
@@ -271,6 +279,44 @@ pub(super) fn bytes_f32_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     };
     let bits = u32::from_le_bytes([b[start], b[start + 1], b[start + 2], b[start + 3]]);
     Ok(Value::float(f32_bits_to_f64(bits)))
+}
+
+/// `(%bytes-f32s-le numbers)` — `numbers` as little-endian singles, four bytes each. Encoding
+/// one at a time in Brood (its bits worked out, then four bytes, then the whole appended) was
+/// a fifth of a 3D game's start.
+pub(super) fn bytes_f32s_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let items = heap.seq_items(arg(args, 0))?;
+    let mut out = Vec::with_capacity(items.len() * 4);
+    for (index, item) in items.iter().enumerate() {
+        let number = match *item {
+            Value::Int(n) => n as f64,
+            Value::Float(x) => x,
+            other => {
+                return Err(LispError::runtime(format!(
+                    "bytes/f32s-le->: item {index} is not an int or a float: {}",
+                    crate::syntax::printer::print(heap, other)
+                ))
+                .with_code(error_codes::TYPE_MISMATCH));
+            }
+        };
+        out.extend_from_slice(&f64_to_f32_bits(number).to_le_bytes());
+    }
+    Ok(heap.alloc_bytes(SharedBlob::new(&out)))
+}
+
+/// The bits of the single nearest `number`, ties to even (the processor's conversion), a NaN as
+/// the quiet NaN `0x7fc00000` with `number`'s sign, so equal inputs give equal bytes whatever
+/// payload a NaN carried.
+pub(crate) fn f64_to_f32_bits(number: f64) -> u32 {
+    if number.is_nan() {
+        let sign = if number.is_sign_negative() {
+            1u32 << 31
+        } else {
+            0
+        };
+        return sign | 0x7fc0_0000;
+    }
+    (number as f32).to_bits()
 }
 
 /// The double an IEEE-754 single's `bits` stand for, exactly, its bits built from the single's
