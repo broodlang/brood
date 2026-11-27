@@ -2277,8 +2277,8 @@ fn contact_shadow_on_skin(light: Light, world: vec3<f32>, to_light: vec3<f32>, s
 }
 // whether any caster lies within `CONTACT_REACH` of `world` as the casters' view (one before `at`)
 // sees it, in any direction, so for every light at once: the casters' pyramid at the level whose
-// texel spans twice the reach in that view's pixels there, its 2×2 texels nearest the point (a
-// disc of the reach then lies inside them), any nearer than the far plane (ADR-837). It cannot
+// texel spans the reach in that view's pixels there, the 3×3 texels round the point's (a disc of
+// the reach then lies inside them), any nearer than the far plane (ADR-837). It cannot
 // miss: what blocks a light from `world` within the reach lies inside that disc. (Probes along
 // each light's way missed up to 94 % of the shade: a hem is crossed in the march's first
 // millimetres.) Where the view cannot say, it answers yes, and the march decides.
@@ -2298,11 +2298,11 @@ fn caster_within_reach(at: u32, world: vec3<f32>) -> bool {
     let row_scale = length(vec3<f32>(view.view_proj[0].x, view.view_proj[1].x, view.view_proj[2].x));
     let reach = 1.25 * CONTACT_REACH * side * max(row_scale, 1e-6) / (2.0 * clip.w) + 1.0;
     let levels = i32(textureNumLevels(caster_pyramid));
-    let level = clamp(i32(ceil(log2(2.0 * reach))), 0, levels - 1);
+    let level = clamp(i32(ceil(log2(reach))), 0, levels - 1);
     let size = vec2<i32>(textureDimensions(caster_pyramid, level));
-    let corner = vec2<i32>(floor(at_texel / f32(1 << u32(level)) - vec2<f32>(0.5)));
-    for (var row = 0; row < 2; row = row + 1) {
-        for (var column = 0; column < 2; column = column + 1) {
+    let corner = vec2<i32>(floor(at_texel / f32(1 << u32(level)))) - vec2<i32>(1);
+    for (var row = 0; row < 3; row = row + 1) {
+        for (var column = 0; column < 3; column = column + 1) {
             let texel = clamp(corner + vec2<i32>(column, row), vec2<i32>(0), size - vec2<i32>(1));
             if (textureLoad(caster_pyramid, texel, level).r < 1.0) {
                 return true;
@@ -2310,6 +2310,16 @@ fn caster_within_reach(at: u32, world: vec3<f32>) -> bool {
         }
     }
     return false;
+}
+// a light's unshadowed share of a skin point's light (ADR-837): what reaches it, by its colour
+// and the skin's own response to it (`skin_diffuse`, which still lights past the terminator, so
+// not a bare cosine: cut at n·l ≤ 0 the shading moved 60 levels). The contact march runs only for
+// a light whose share is at least `CONTACT_SHARE` of the brightest light's there: a dimmer light's
+// contact shade changes the pixel by at most that share of it (2 %: within two levels of her skin)
+const CONTACT_SHARE: f32 = 0.02;
+fn skin_share(light: Light, arrival: Arrival, diffuse_normal: vec3<f32>, curvature: f32) -> f32 {
+    let response = light.color.rgb * skin_diffuse(dot(diffuse_normal, arrival.to_light), curvature);
+    return arrival.amount * dot(response, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 // how wide a light is seen from `world`: the tangent of half the angle it spans (ADR-837
 // amended): a point light 0 (its contact shadow hard), her 1.3 m key two metres off about 0.33
@@ -2762,12 +2772,27 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
     // per light: how much of its shape's image is left by its shadow, cone and range window
     var shaping: array<f32, 8>;
     let count = u32(scene.params.y);
+    // on skin, the brightest light's unshadowed direct share here (ADR-837): the contact march
+    // runs only for a light giving at least `CONTACT_SHARE` of it
+    var brightest = 0.0;
+    let skin_curvature = curvature * draw.skin.x * region.y;
+    if (draw.flags.x == 0u) {
+        for (var slot = 0u; slot < count; slot = slot + 1u) {
+            let light = scene.lights[slot];
+            brightest = max(brightest, skin_share(light, light_arrival(light, world), diffuse_normal, skin_curvature));
+        }
+    }
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let light = scene.lights[slot];
         let arrival = light_arrival(light, world);
         let arriving = arrival.amount;
         var seen = 1.0;
         var contact = 1.0;
+        var share = 0.0;
+        if (draw.flags.x == 0u) {
+            share = skin_share(light, arrival, diffuse_normal, skin_curvature);
+        }
+        let marched_on_skin = share > 0.0 && share >= CONTACT_SHARE * brightest;
         // what is opaque in a strand's way (ADR-827): her head shadows her hair
         var opaque = 1.0;
         if (light.shadow.z > 0u) {
@@ -2788,14 +2813,16 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
                 // shadows this sharp: on her neck and collarbones they drew hard dark lines)
                 if (draw.flags.x != 0u) {
                     contact = contact_shadow(light, world, arrival.to_light, surface_normal, view);
-                } else {
+                } else if (marched_on_skin) {
                     contact = contact_shadow_on_skin(light, world, arrival.to_light, surface_normal, view);
                 }
                 seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn) * contact * hair_through;
             }
         } else if (draw.flags.x == 0u) {
             // skin under an unshadowed light: only what the casters' view holds (ADR-837)
-            contact = contact_shadow_on_skin(light, world, arrival.to_light, surface_normal, view);
+            if (marched_on_skin) {
+                contact = contact_shadow_on_skin(light, world, arrival.to_light, surface_normal, view);
+            }
             seen = contact;
         } else if (draw.flags.x != 4u && draw.flags.x != 5u) {
             // a light with no shadow map still stops at what stands a few millimetres in its
