@@ -510,6 +510,7 @@ fn hair_covers_and_shines_on_the_gpu_as_on_the_cpu() {
     for adapter in &adapters {
         let info = adapter.get_info();
         let name = format!("{} ({:?})", info.name, info.backend);
+        let mut gpu_reds = Vec::new();
         for (opacity, scene, cpu_red) in &cases {
             let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
                 continue;
@@ -522,9 +523,16 @@ fn hair_covers_and_shines_on_the_gpu_as_on_the_cpu() {
             let pixels = gpu.read_pixels();
             let gpu_red = i32::from(pixels[((64 * side + 64) * 3) as usize]);
             eprintln!("{name}: hair at opacity {opacity}: cpu {cpu_red} gpu {gpu_red}");
-            if (cpu_red - gpu_red).abs() > 12 {
+            gpu_reds.push(gpu_red);
+        }
+        // the GPU covers as the CPU does: half covered is half as bright over black, and fully
+        // covered it is lit. (Not the CPU's value itself: the GPU's tone curve is on luminance
+        // since ADR-830, the frozen CPU painter's on each channel, so a bright saturated colour
+        // differs by design: 255 against 242 here)
+        if let [half, whole] = gpu_reds[..] {
+            if half * 2 >= whole + 8 || half * 2 <= whole - 8 || whole < 128 {
                 failures.push(format!(
-                    "{name}: opacity {opacity}: GPU {gpu_red} against CPU {cpu_red}"
+                    "{name}: half covered {half} against whole {whole} (half as bright, lit)"
                 ));
             }
         }

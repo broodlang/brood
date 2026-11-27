@@ -2660,10 +2660,24 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
     return out;
 }
 
+fn aces_fit(x: vec3<f32>) -> vec3<f32> {
+    return (x * (2.51 * x + vec3<f32>(0.03))) / (x * (2.43 * x + vec3<f32>(0.59)) + vec3<f32>(0.14));
+}
+
+// ADR-830: Narkowicz's ACES fit on the luminance alone, the colour scaled with it so its hue and
+// its chroma are the scene's, and moved toward white only past the display's top. On each
+// channel apart the curve's slope raised every mid-tone's saturation by about a third and turned
+// lit skin yellow while skin in shade stayed red (the hue moved with brightness)
 fn tone(color: vec3<f32>, exposure: f32) -> vec3<f32> {
     let exposed = max(color * exposure, vec3<f32>(0.0));
-    let mapped = (exposed * (2.51 * exposed + vec3<f32>(0.03))) / (exposed * (2.43 * exposed + vec3<f32>(0.59)) + vec3<f32>(0.14));
-    return linear_to_srgb(mapped);
+    let luminance = dot(exposed, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let mapped_luminance = aces_fit(vec3<f32>(luminance)).x;
+    var mapped = exposed * (mapped_luminance / max(luminance, 1e-6));
+    let peak = max(mapped.r, max(mapped.g, mapped.b));
+    if (peak > 1.0) {
+        mapped = mix(mapped, vec3<f32>(mapped_luminance), clamp((peak - 1.0) / max(peak - mapped_luminance, 1e-6), 0.0, 1.0));
+    }
+    return linear_to_srgb(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)));
 }
 
 // the samples a `:hair` or `:strands` fragment covers (each a step of
