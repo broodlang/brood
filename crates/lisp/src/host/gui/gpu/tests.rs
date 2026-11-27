@@ -923,7 +923,7 @@ fn a_light_without_a_shadow_map_still_has_its_contact_shadow() {
     // marching only the `:contact-caster` view (ADR-837)
     assert!(MESH_SRC.contains("} else if (draw.flags.x == 0u) {"));
     assert!(MESH_SRC.contains("} else if (draw.flags.x != 4u && draw.flags.x != 5u) {"));
-    assert!(MESH_SRC.contains("            contact = contact_shadow(world, arrival.to_light, surface_normal, view);\n            seen = contact;"));
+    assert!(MESH_SRC.contains("            contact = contact_shadow(light, world, arrival.to_light, surface_normal, view);\n            seen = contact;"));
 }
 
 // --- a cloth's sheen (ADR-836) ---------------------------------------------------------------
@@ -1003,7 +1003,25 @@ fn the_sheens_albedo_fit_stays_within_the_integral() {
 fn skin_marches_its_contact_shadow_through_the_casters_view_alone() {
     // ADR-837: on skin the contact march reads the `:contact-caster` view (scene.occlusion.w),
     // under shadowed and unshadowed lights alike; every other surface keeps the camera's own
-    assert!(MESH_SRC.contains("return screen_blocked_in(u32(scene.occlusion.w), world, to_light, CONTACT_REACH, surface_normal, to_eye);"));
-    assert!(MESH_SRC.contains("} else {\n                    contact = contact_shadow_on_skin(world, arrival.to_light, surface_normal, view);"));
+    assert!(MESH_SRC.contains("return screen_blocked_in(u32(scene.occlusion.w), world, to_light, CONTACT_REACH, surface_normal, to_eye, light_spread(light, world), CASTER_THICKNESS);"));
+    assert!(MESH_SRC.contains("} else {\n                    contact = contact_shadow_on_skin(light, world, arrival.to_light, surface_normal, view);"));
     assert!(MESH_SRC.contains("} else if (draw.flags.x == 0u) {"));
+}
+
+#[test]
+fn a_lights_size_softens_its_contact_shadow() {
+    // ADR-837 amended: a blocker h in front of the ray d along it covers h / (d · spread) of a
+    // light's disc, spread the tangent of half the angle the light spans from here; a point light
+    // (spread 0) keeps its one hard ray, and the reflection's march is never softened
+    assert!(MESH_SRC.contains("shade = max(shade, clamp((ahead - gap) / (reach * share * spread), 0.0, 1.0) * past_thickness);"));
+    assert!(
+        MESH_SRC.contains("return size * 0.5 / max(length(light.position.xyz - world), 0.05);")
+    );
+    assert!(MESH_SRC.contains("return screen_blocked_in(u32(scene.occlusion.z), world, to_light, reach, surface_normal, to_eye, 0.0, CONTACT_THICKNESS);"));
+    // the geometry: her 1.3 m key 2 m off spreads 0.325; a strap edge 2 mm above the ray 1 cm
+    // along it hides 62 % of the softbox, 1 cm along and 5 mm above all of it
+    let spread = 1.3_f32 * 0.5 / 2.0;
+    let covered = |height: f32, along: f32| (height / (along * spread)).clamp(0.0, 1.0);
+    assert!((covered(0.002, 0.01) - 0.615).abs() < 0.01);
+    assert_eq!(covered(0.005, 0.01), 1.0);
 }
