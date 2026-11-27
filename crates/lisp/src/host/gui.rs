@@ -1592,6 +1592,11 @@ pub mod mesh;
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub mod centres;
 
+// a `:fibres` hair's dual scattering tables (ADR-834): its fibres' forward and backward
+// scattering, integrated once from the shader's own lobes
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub mod fibre_table;
+
 // the GPU's own time on a frame's scenes, empty where nothing measures it (ADR-801)
 pub mod scene_gpu_times;
 

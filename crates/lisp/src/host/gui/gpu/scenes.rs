@@ -422,11 +422,11 @@ fn buffer(
 fn skin_table_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
     let size = wgpu::Extent3d {
         width: SKIN_TABLE_WIDTH as u32,
-        height: SKIN_TABLE_HEIGHT as u32,
+        height: TABLE_ROWS as u32,
         depth_or_array_layers: 1,
     };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("mesh skin table"),
+        label: Some("mesh skin and fibre tables"),
         size,
         mip_level_count: 1,
         sample_count: 1,
@@ -442,15 +442,35 @@ fn skin_table_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Textu
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        &skin_table_bytes(),
+        &table_bytes(),
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(SKIN_TABLE_WIDTH as u32 * 16),
-            rows_per_image: Some(SKIN_TABLE_HEIGHT as u32),
+            rows_per_image: Some(TABLE_ROWS as u32),
         },
         size,
     );
     texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// The tables texture's rows: the skin table's, then a `:fibres` hair's dual scattering tables
+/// (ADR-834, `fibre_table`), each row the skin table's width.
+pub(super) const TABLE_ROWS: usize =
+    SKIN_TABLE_HEIGHT + crate::host::gui::fibre_table::FIBRE_TABLE_ROWS;
+
+/// The whole tables texture's bytes: the skin table's rows, then the fibre table's, its
+/// [`crate::host::gui::fibre_table::FIBRE_TABLE_ANGLES`] columns from the left and the rest of
+/// each row zeros.
+pub(super) fn table_bytes() -> Vec<u8> {
+    use crate::host::gui::fibre_table::{FIBRE_TABLE_ANGLES, fibre_table};
+    let mut bytes = skin_table_bytes();
+    for row in fibre_table().chunks(FIBRE_TABLE_ANGLES) {
+        for column in 0..SKIN_TABLE_WIDTH {
+            let texel = row.get(column).copied().unwrap_or([0.0; 4]);
+            bytes.extend(texel.iter().flat_map(|value| value.to_le_bytes()));
+        }
+    }
+    bytes
 }
 
 /// The skin table as the bytes of its texture: red, green, blue and 1, four floats a texel.

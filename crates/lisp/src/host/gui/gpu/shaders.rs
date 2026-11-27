@@ -2447,7 +2447,7 @@ fn hair_fresnel(cosine: f32) -> f32 {
 // when not: then it lights the strand only by what faces it (R, TRT, the scatter toward the
 // viewer), never THROUGH it, since nothing says her head is not in the way (39, 2026-11-26: a
 // shadowless fill behind her head lit the back of her hair near white through it)
-fn karis_hair(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: vec3<f32>, seen: f32, known: f32) -> vec3<f32> {
+fn karis_lobes(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: vec3<f32>, known: f32) -> vec3<f32> {
     let roughness = clamp(draw.material.x, 1.0 / 255.0, 1.0);
     // each strand a little rougher or smoother than the next (`_STRAND`, ADR-813; `:roughness-spread`)
     let spread = draw.fibre_cut.y;
@@ -2484,17 +2484,138 @@ fn karis_hair(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: ve
     let twice = pow(colour, vec3<f32>(0.8 / cos_difference));
     let second = hair_gaussian(width * 2.0, along - 4.0 * tilt)
         * exp(17.0 * cos_phi - 16.78) * (1.0 - inside) * (1.0 - inside) * inside * twice;
-    // light scattered through many fibres
-    let facing = safe_normalize(view - tangent * sin_view);
-    let wrapped = clamp((dot(facing, to_light) + 1.0) * 0.25, 0.0, 1.0);
-    let scatter = 0.31830989 * mix(wrapped, 1.0 - abs(sin_light), 0.33 * known) * draw.fibre_look.x;
-    // (in shade the light has come through more hair: darker and a little deeper in colour, its
-    // colour raised to `:scatter-depth` times the shaded share, ADR-825. Divided by its own
-    // luminance, as it was, the shade kept its brightness and red went past red: red hair
-    // crimson where real hair goes dark auburn, 39's photo patches)
-    let tint = pow(colour, vec3<f32>(draw.fibre_look.y * (1.0 - clamp(seen, 0.0, 1.0))));
-    let shine = vec3<f32>(reflected * draw.material.y * 2.0) + transmitted + second;
-    return 3.14159265 * (shine + sqrt(colour) * scatter * tint);
+    // (the light scattered on through many fibres is dual scattering's, `fibre_dual`, ADR-834:
+    // a wrapped diffuse stood in for it, beside the scattered light it then counted twice)
+    return 3.14159265 * (vec3<f32>(reflected * draw.material.y * 2.0) + transmitted + second);
+}
+
+// ADR-834: the fibre table's place, below the skin table's rows (`fibre_table`,
+// `scenes::table_bytes`): lobes, spread, then shine rows
+const FIBRE_FIRST_ROW: i32 = 32;
+const FIBRE_ANGLES: i32 = 32;
+const FIBRE_ROUGHNESSES: i32 = 8;
+const FIBRE_ALBEDOS: i32 = 16;
+// the density factors d_f and d_b: the share of the directions round a strand that are hair
+// (Zinke 2008: 0.6 … 0.8 matched path-traced human hair; 0.7 throughout its paper)
+const FIBRE_DENSITY: f32 = 0.7;
+
+fn gaussian3(width: vec3<f32>, angle: vec3<f32>) -> vec3<f32> {
+    let safe = max(width, vec3<f32>(1e-4));
+    return exp(-0.5 * angle * angle / (safe * safe)) / (2.50662827 * safe);
+}
+
+// the table's column for an inclination's sine (`fibre_table::table_sine`, read at the nearest)
+fn fibre_column(sine: f32) -> i32 {
+    return clamp(i32(abs(sine) * f32(FIBRE_ANGLES)), 0, FIBRE_ANGLES - 1);
+}
+
+// a lobes or spread texel for one channel's `albedo`, between the two albedo rows round it
+// (`fibre_table::table_albedo`: rows in steps of its square root)
+fn fibre_texel(first: i32, roughness_row: i32, albedo: f32, column: i32) -> vec4<f32> {
+    let along = sqrt(clamp(albedo, 0.0, 1.0)) * f32(FIBRE_ALBEDOS - 1);
+    let lower = min(i32(floor(along)), FIBRE_ALBEDOS - 2);
+    let row = FIBRE_FIRST_ROW + first + roughness_row * FIBRE_ALBEDOS + lower;
+    let below = textureLoad(skin_table, vec2<i32>(column, row), 0);
+    let above = textureLoad(skin_table, vec2<i32>(column, row + 1), 0);
+    return mix(below, above, along - f32(lower));
+}
+
+// ADR-834: a strand's light from one light by dual scattering (Zinke, Yuksel, Weber, Keyser 2008,
+// its shader's pseudocode, Fig. 5; the averaged terms as Disney's notes write them, Eq. 9–16).
+// `direct`: the share of the light that reaches it past every other strand; `crossed`: how many
+// strands the rest crossed on its way (the bake's count, its mean: crossings taken as Poisson),
+// or below 0 when nothing says. The direct share lights it with its own three lobes and the light
+// its neighbours scatter back to it (`f_back`, d_b); the share that came through other strands
+// arrives forward-scattered (T_f, d_f once, as Eq. 5 has it), its lobes widened by every fibre
+// crossed (σf² = n·β̄f²) and its azimuth spread round (`N^G`), with their back-scatter too. Every
+// fibre number is the table's, integrated from `karis_lobes` itself. In the renderer's units: π
+// times the BCSDF times the cosine, as every surface here is.
+fn fibre_dual(base: vec3<f32>, tangent: vec3<f32>, view: vec3<f32>, to_light: vec3<f32>, known: f32, direct: f32, crossed: f32) -> vec3<f32> {
+    // the fibre's own colour, light passed once through its middle, from the colour the hair is seen
+    // to be: the absorption Chiang and Bitterli 2016 invert so that light scattered through many
+    // fibres comes out that colour (`fibre_transmittance`), which is what dual scattering does.
+    // (Taken as the fibre's own, her brown, 0.08 0.026 0.016, passed so little on that the shade
+    // inside her hair went black, L* 0.2)
+    let colour = clamp(fibre_transmittance(base), vec3<f32>(1e-4), vec3<f32>(1.0));
+    let roughness = clamp(draw.material.x, 1.0 / 255.0, 1.0);
+    let spread = draw.fibre_cut.y;
+    let width = roughness * roughness * (1.0 - 0.5 * spread + spread * fract(fibre_strand * 7.13));
+    let tilt = draw.fibre_cut.x * (1.0 + (fract(fibre_strand) - 0.5));
+    let shine_scale = draw.material.y * 2.0;
+    let sin_light = clamp(dot(tangent, to_light), -1.0, 1.0);
+    let sin_view = clamp(dot(tangent, view), -1.0, 1.0);
+    let theta_light = asin(sin_light);
+    let theta_view = asin(sin_view);
+    let half_angle = 0.5 * (theta_light + theta_view);
+    let difference = 0.5 * (theta_view - theta_light);
+    let cos_difference = max(cos(difference), 0.05);
+    let cos_light = sqrt(max(1.0 - sin_light * sin_light, 0.0));
+    let roughness_row = clamp(i32(round((roughness - 0.2) / 0.1)), 0, FIBRE_ROUGHNESSES - 1);
+    let light_column = fibre_column(sin_light);
+    let difference_column = fibre_column(sin(difference));
+    let spread_rows = FIBRE_ROUGHNESSES * FIBRE_ALBEDOS;
+    // each lobe's energy forward and back, a channel at a time: TT, TRT; R colourless
+    let red = fibre_texel(0, roughness_row, colour.r, light_column);
+    let green = fibre_texel(0, roughness_row, colour.g, light_column);
+    let blue = fibre_texel(0, roughness_row, colour.b, light_column);
+    let shine_row = FIBRE_FIRST_ROW + 2 * spread_rows + roughness_row;
+    let shine = textureLoad(skin_table, vec2<i32>(light_column, shine_row), 0);
+    let r_forward = shine_scale * shine.x;
+    let r_back = shine_scale * shine.y;
+    let r_shift = shine.z * tilt;
+    let tt_forward = vec3<f32>(red.x, green.x, blue.x);
+    let tt_back = vec3<f32>(red.y, green.y, blue.y);
+    let trt_forward = vec3<f32>(red.z, green.z, blue.z);
+    let trt_back = vec3<f32>(red.w, green.w, blue.w);
+    // āf, āb (Eq. 6), kept under 1: Karis's lobes are fits, a little over at grazing light
+    let forward = min(vec3<f32>(r_forward) + tt_forward + trt_forward, vec3<f32>(0.95));
+    let back = min(vec3<f32>(r_back) + tt_back + trt_back, vec3<f32>(0.95));
+    let least = vec3<f32>(1e-4);
+    // their mean shifts and variances, each lobe weighted by its energy (Disney's Eq. 13–16); R's
+    // width is its own at the mean of cos(φ/2) over each half (0.373 forward, 0.9 back)
+    let r_width_forward = 1.41421356 * width * 0.373;
+    let r_width_back = 1.41421356 * width * 0.9;
+    let alpha_forward = (r_forward * r_shift + tt_forward * tilt + trt_forward * 4.0 * tilt) / max(forward, least);
+    let alpha_back = (r_back * r_shift + tt_back * tilt + trt_back * 4.0 * tilt) / max(back, least);
+    let beta_forward2 = (r_forward * r_width_forward * r_width_forward + tt_forward * 0.25 * width * width + trt_forward * 4.0 * width * width) / max(forward, least);
+    let beta_back2 = (r_back * r_width_back * r_width_back + tt_back * 0.25 * width * width + trt_back * 4.0 * width * width) / max(back, least);
+    // the light its neighbours scatter back (Disney's Eq. 10–12: paths of one and three back
+    // scatterings, any number forward)
+    let forward2 = forward * forward;
+    let open = vec3<f32>(1.0) - forward2;
+    let back2 = back * back;
+    let back3 = back2 * back;
+    let attenuation_back = back * forward2 / open + back3 * forward2 / (open * open);
+    let shift_back = alpha_back * (vec3<f32>(1.0) - 2.0 * back2 / (open * open))
+        + alpha_forward * (2.0 * open * open + 4.0 * forward2 * back2) / (open * open * open);
+    let spread_root = sqrt(2.0 * beta_forward2 + beta_back2);
+    let deviation_back = (vec3<f32>(1.0) + FIBRE_DENSITY * forward2) * (back * spread_root + back3 * spread_root)
+        / max(back + back3 * (2.0 * sqrt(beta_forward2) + 3.0 * sqrt(beta_back2)), least);
+    let flattened = 2.0 * attenuation_back / (3.14159265 * cos_difference * cos_difference);
+    let back_direct = flattened * gaussian3(deviation_back, vec3<f32>(half_angle) - shift_back);
+    // the direct share: its own lobes, and what its neighbours send back
+    var out = direct * (karis_lobes(colour, tangent, view, to_light, known) + 3.14159265 * FIBRE_DENSITY * back_direct * cos_light);
+    if (crossed > 0.0 && known > 0.5) {
+        // the share come through other strands: T_f with its crossings Poisson (E[āf^k], k ~ n),
+        // the direct share's taken off
+        let spread_out = crossed * beta_forward2;
+        let reaching = vec3<f32>(direct) + FIBRE_DENSITY * (exp(-crossed * (vec3<f32>(1.0) - forward)) - vec3<f32>(direct));
+        let red_round = fibre_texel(spread_rows, roughness_row, colour.r, difference_column);
+        let green_round = fibre_texel(spread_rows, roughness_row, colour.g, difference_column);
+        let blue_round = fibre_texel(spread_rows, roughness_row, colour.b, difference_column);
+        let r_round = textureLoad(skin_table, vec2<i32>(difference_column, shine_row), 0).w;
+        let along = vec3<f32>(sin_light + sin_view);
+        let m_r = gaussian3(sqrt(vec3<f32>(r_width_forward * r_width_forward) + spread_out), along - vec3<f32>(r_shift));
+        let m_tt = gaussian3(sqrt(vec3<f32>(0.25 * width * width) + spread_out), along - vec3<f32>(tilt));
+        let m_trt = gaussian3(sqrt(vec3<f32>(4.0 * width * width) + spread_out), along - vec3<f32>(4.0 * tilt));
+        let lobes_round = shine_scale * m_r * r_round
+            + m_tt * vec3<f32>(red_round.x, green_round.x, blue_round.x)
+            + m_trt * vec3<f32>(red_round.y, green_round.y, blue_round.y);
+        let back_round = flattened * gaussian3(sqrt(deviation_back * deviation_back + spread_out), vec3<f32>(half_angle) - shift_back);
+        out = out + max(reaching - vec3<f32>(direct), vec3<f32>(0.0))
+            * (lobes_round + 3.14159265 * 3.14159265 * FIBRE_DENSITY * back_round * cos_light);
+    }
+    return out;
 }
 // ADR-831: an ambient `visibility` (its occlusion) with the light bounced back off surroundings
 // of `albedo`, per channel: GTAO's multi-bounce fit to path-traced references (Jimenez, Wu,
@@ -2550,6 +2671,8 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         var contact = 1.0;
         // what is opaque in a strand's way (ADR-827): her head shadows her hair
         var opaque = 1.0;
+        // and the hair in its way, live (its opacity maps, ADR-827): below 0 where the light has none
+        var hair_live = -1.0;
         if (light.shadow.z > 0u) {
             // the `:fibres` hair in the way (ADR-827: its opacity maps; none, 1)
             let view_index = light_view(light, world);
@@ -2559,6 +2682,7 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
                 // it, does not shadow it), and the hair before it
                 opaque = shadow_sample(view_index, world + arrival.to_light * 0.01);
                 seen = opaque * hair_through;
+                hair_live = hair_through;
             } else if (draw.flags.x == 4u) {
                 // hair shades hair by how much of it the light crossed, not in or out
                 seen = hair_shadow(light, world, turn) * hair_through;
@@ -2602,29 +2726,27 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
         }
         let mirror_lambert = max(dot(normal, to_light), 0.0);
         let half_vector = safe_normalize(to_light + view);
-        // a `:fibres` strand (ADR-813): Karis's three paths and his scattered light, all of it
-        // under the hair's own shadow
+        // a `:fibres` strand (ADR-813): lit by dual scattering (ADR-834), all of it under what is
+        // opaque in its way: the bake counts hair alone, so without it the key in front of her lit
+        // the back of her hair through her head (ADR-827)
         if ((draw.flags.y & 512u) != 0u) {
-            // its baked self-shadow where it has one (ADR-813): the hairs crossed toward this light, each
-            // passing some of it as ITS OWN colour lets it through (`fibre_transmittance`) and scattering
-            // a little away; the opacity maps' estimate otherwise. (A fixed ginger fibre once tinted
-            // every hair colour the same orange by the lamp and from behind: 39, 2026-11-26)
-            // Either way under what is opaque in its way: the bake counts hair alone, so without
-            // it the key in front of her lit the back of her hair through her head, a brighter,
-            // purer red the more hair it crossed (ADR-827)
-            var through = vec3<f32>(seen);
-            // the shaded share the scattered light's tint is raised by (ADR-825): none where the
-            // bake already coloured the light by the fibres it crossed, or it was coloured twice,
-            // each channel apart the second time (the under-layer behind her jaw a near-black
-            // crimson, G/R 0.10)
-            var baked = false;
-            if (dot(fibre_visibility, fibre_visibility) > 0.0) {
-                baked = true;
+            let known = select(0.0, 1.0, light.shadow.z > 0u);
+            // the hair in the light's way as it is THIS frame (its deep opacity maps, ADR-827): the
+            // direct share Π(1 − coverage) of the strands before it, its optical depth −ln of that
+            // the mean number crossed (Poisson). A self-shadow baked once with her standing left
+            // strands from deep inside black when lying or bent over brought them to the surface
+            // (39, 2026-11-27); the bake now serves only lights without maps
+            if (hair_live >= 0.0) {
+                let live = max(hair_live, 1e-4);
+                out = out + light.color.rgb * arriving * opaque * fibre_dual(base, strand, view, to_light, known, live, -log(live));
+            } else if (dot(fibre_visibility, fibre_visibility) > 0.0) {
+                // its baked self-shadow (ADR-813): how many hairs the light crossed on its way,
+                // their mean, as Poisson crossings: none crossed e^−n of the time, the direct share
                 let crossed = draw.material.z * max(0.0, fibre_visibility.x + dot(fibre_visibility.yzw, to_light));
-                through = pow(fibre_transmittance(base), vec3<f32>(crossed)) * exp(-0.03 * crossed) * opaque;
+                out = out + light.color.rgb * arriving * opaque * fibre_dual(base, strand, view, to_light, known, exp(-crossed), crossed);
+            } else {
+                out = out + light.color.rgb * arriving * fibre_dual(base, strand, view, to_light, known, seen, -1.0);
             }
-            let shadowed = select(dot(through, vec3<f32>(0.2126, 0.7152, 0.0722)), 1.0, baked);
-            out = out + light.color.rgb * arriving * through * karis_hair(base, strand, view, to_light, shadowed, select(0.0, 1.0, light.shadow.z > 0u));
             continue;
         }
         if (draw.flags.x == 4u || draw.flags.x == 5u) {

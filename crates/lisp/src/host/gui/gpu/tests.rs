@@ -158,6 +158,30 @@ fn the_mesh_shader_validates() {
         SKIN_MAX_CURVATURE, 1.0,
         "the shader clamps the curvature to 1"
     );
+    // ADR-834: the fibre table below the skin table's rows, its shape as the shader reads it
+    {
+        use crate::host::gui::fibre_table::{
+            FIBRE_TABLE_ALBEDOS, FIBRE_TABLE_ANGLES, FIBRE_TABLE_ROUGHNESSES, FIBRE_TABLE_ROWS,
+            table_roughness,
+        };
+        for line in [
+            format!("const FIBRE_FIRST_ROW: i32 = {SKIN_TABLE_HEIGHT};"),
+            format!("const FIBRE_ANGLES: i32 = {FIBRE_TABLE_ANGLES};"),
+            format!("const FIBRE_ROUGHNESSES: i32 = {FIBRE_TABLE_ROUGHNESSES};"),
+            format!("const FIBRE_ALBEDOS: i32 = {FIBRE_TABLE_ALBEDOS};"),
+        ] {
+            assert!(MESH_SRC.contains(&line), "the shader lacks {line}");
+        }
+        assert!(
+            (table_roughness(0) - 0.2).abs() < 1e-12 && (table_roughness(1) - 0.3).abs() < 1e-12
+        );
+        assert!(MESH_SRC.contains("i32(round((roughness - 0.2) / 0.1))"));
+        assert_eq!(scenes::TABLE_ROWS, SKIN_TABLE_HEIGHT + FIBRE_TABLE_ROWS);
+        assert_eq!(
+            scenes::table_bytes().len(),
+            SKIN_TABLE_WIDTH * scenes::TABLE_ROWS * 16
+        );
+    }
     assert_eq!(
         scenes::skin_table_bytes().len(),
         SKIN_TABLE_WIDTH * SKIN_TABLE_HEIGHT * 16
