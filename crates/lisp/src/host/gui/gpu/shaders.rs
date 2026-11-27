@@ -802,8 +802,10 @@ struct ContactList {
 // (its 65th: how many garment vertices the push-out net moved this frame, ADR-839)
 const PUSH_OUT_COUNTER: u32 = 64u;
 @group(3) @binding(11) var<storage, read_write> posed_out: array<vec4<f32>>;
-// each vertex's softness (ADR-805) and its garment cover (ADR-839), two floats a vertex
-@group(3) @binding(12) var<storage, read> mesh_softness: array<vec2<f32>>;
+// each vertex's softness (ADR-805) and its garment cover (ADR-839), a vec4 a vertex (two spare); after
+// the vertices (`draw.deform.w` of them) its push-out colliders: a vec4 of how many, then three vec4 a
+// sphere (ADR-839; a compute stage binds at most eight storage buffers, so they share this one)
+@group(3) @binding(12) var<storage, read> mesh_softness: array<vec4<f32>>;
 
 // (`mesh::RING_WIDTH`, `RING_SPREAD`, `RING_LIFT`, `EDGE_BAND`, `EDGE_SPREAD`, `FIRM_INSET`, `FIRM_SOFTNESS`)
 const RING_WIDTH: f32 = 0.012;
@@ -971,7 +973,8 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         // (stopping its standoff short of the surface, ADR-824)
         let distance = contact_distance(slot, world).w - vertex_standoff(id.x, input);
-        if (distance < 0.0 && !contact_skipped(slot, input) && !contact_garment(slot)) {
+        // (a garment never sizes a contact's depth: the flesh under it does, ADR-839)
+        if (distance < 0.0 && !contact_skipped(slot, input) && !contact_garment(slot) && (draw.flags.y & 8192u) == 0u) {
             // (as far as it acts there: its `:within` side, ADR-816)
             atomicMax(&contact_depths[slot], bitcast<u32>(-distance * contact_within(slot, world)));
         }
@@ -1167,6 +1170,17 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         let out = measured.xyz;
         let distance = measured.w;
+        // a garment (ADR-839) is cloth, not flesh: inside a contact it is laid on the surface, no
+        // eased band, inset or ring, so it stays parallel to her skin pressed a cover deeper by the
+        // same contact along the same direction (a ringed cup and her plain skin crossed near a
+        // finger's end, 61 [10cd1d], 2026-11-27)
+        if ((draw.flags.y & 8192u) != 0u) {
+            if (distance < 0.0) {
+                point = point - out * distance * weight;
+                normal = safe_normalize(normal + (-out - normal) * weight);
+            }
+            continue;
+        }
         // (`mesh::deform_by_contacts`: the patch's edge eased over a band, a firm part sunk a
         // little behind the surface, the ring rising from nothing at the edge)
         let band = EDGE_BAND + EDGE_SPREAD * depth;
@@ -1204,6 +1218,32 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
     posed_out[at + 1u] = vec4<f32>(normal, 0.0);
     posed_out[at + 2u] = vec4<f32>(safe_normalize(tangent.xyz - normal * dot(normal, tangent.xyz)), tangent.w);
 }
+// collider `index`'s centre this frame: its joints' palette blended by its weights, as a vertex
+// of the skin it was fitted to is skinned (linear: a sphere moves rigidly with its patch), then the
+// draw's model matrix; at rest where no joint of the palette moves it
+fn collider_centre(index: u32) -> vec3<f32> {
+    let at = draw.deform.w + 1u + index * 3u;
+    let rest = mesh_softness[at];
+    let joints = mesh_softness[at + 1u];
+    let weights = mesh_softness[at + 2u];
+    var skin = mat4x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
+    var moved = false;
+    if (draw.flags.w != 0u) {
+        for (var slot = 0u; slot < 4u; slot = slot + 1u) {
+            let joint = u32(joints[slot] + 0.5);
+            if (weights[slot] > 0.0 && joint < draw.morph_info.z) {
+                skin = skin + palette[draw.flags.z + joint] * weights[slot];
+                moved = true;
+            }
+        }
+    }
+    var matrix = draw.model;
+    if (moved) {
+        matrix = draw.model * skin;
+    }
+    return (matrix * vec4<f32>(rest.xyz, 1.0)).xyz;
+}
+
 // ADR-839: the push-out net. A `:garment` draw's vertex found closer to one of the garment contacts
 // (her skin's spheres and capsules) than `GARMENT_MARGIN` is moved out to it along the contact's
 // own normal there, and counted: a safety net, never the fit, every use a fault the probes report
@@ -1228,6 +1268,18 @@ fn cs_garment_push_out(@builtin(global_invocation_id) id: vec3<u32>) {
         let reached = contact_distance(slot, point);
         if (reached.w < GARMENT_MARGIN) {
             point = point + reached.xyz * (GARMENT_MARGIN - reached.w) * weight;
+            pushed = true;
+        }
+    }
+    // and its own colliders, her skin's spheres near it posed this frame (`:push-colliders`)
+    let colliders = min(u32(mesh_softness[draw.deform.w].x + 0.5), 1024u);
+    for (var index = 0u; index < colliders; index = index + 1u) {
+        let centre = collider_centre(index);
+        let radius = mesh_softness[draw.deform.w + 1u + index * 3u].w;
+        let offset = point - centre;
+        let length = sqrt(dot(offset, offset));
+        if (length < radius + GARMENT_MARGIN && length > 1e-9) {
+            point = centre + offset / length * (radius + GARMENT_MARGIN);
             pushed = true;
         }
     }

@@ -1474,20 +1474,29 @@ impl MeshGpu {
             wgpu::BufferUsages::INDEX,
         );
         queue.write_buffer(&index_buffer, 0, &indices);
-        // its softness a vertex, for the ring round a contact (ADR-805), beside its garment cover
-        // (ADR-839): two floats a vertex, softness 1 (wholly soft) where it has a cover and no softness
+        // what its press reads beyond its vertices, one storage buffer (a compute stage binds at most
+        // eight): its softness a vertex for the ring round a contact (ADR-805) and its garment cover
+        // (ADR-839), a vec4 a vertex (softness 1, wholly soft, where it has a cover and no softness);
+        // then its push-out colliders (ADR-839): a vec4 of how many, then three vec4 a sphere
         let has_softness = !mesh.softness.is_empty();
         let has_cover = !mesh.cover.is_empty();
-        let softness = (has_softness || has_cover).then(|| {
-            let pairs: Vec<f32> = (0..count)
+        let has_colliders = !mesh.push_colliders.is_empty();
+        let softness = (has_softness || has_cover || has_colliders).then(|| {
+            let mut pressing: Vec<f32> = (0..count)
                 .flat_map(|index| {
                     [
                         mesh.softness.get(index).copied().unwrap_or(1.0),
                         mesh.cover.get(index).copied().unwrap_or(0.0),
+                        0.0,
+                        0.0,
                     ]
                 })
                 .collect();
-            let bytes = floats_bytes(&pairs);
+            pressing.extend_from_slice(&[mesh.push_colliders.len() as f32, 0.0, 0.0, 0.0]);
+            for sphere in &mesh.push_colliders {
+                pressing.extend_from_slice(sphere);
+            }
+            let bytes = floats_bytes(&pressing);
             let softness = buffer(
                 device,
                 "mesh softness",

@@ -285,6 +285,10 @@ pub struct Mesh {
     /// a contact, a vertex of a draw whose material says `:covered` stops the larger of its two
     /// standoffs short (her skin under a cup, under the hand that presses the cup); empty: none.
     pub cover: Vec<f32>,
+    /// A garment's colliders (`:push-colliders`, ADR-839): her skin's spheres near it, each
+    /// `[cx cy cz radius j0 j1 j2 j3 w0 w1 w2 w3]` in the mesh's rest space with the skin joints and
+    /// weights that pose it; the push-out net keeps the garment's vertices outside them. Empty: none.
+    pub push_colliders: Vec<[f32; 12]>,
     /// Tangents with the bitangent's sign in `w` (glTF's convention), for a normal map.
     pub tangents: Option<Vec<[f32; 4]>>,
     /// The four joints each vertex is skinned to (indices into a draw's palette) and their
@@ -520,6 +524,8 @@ pub struct MeshParts {
     pub standoff: Vec<u8>,
     /// A garment's cover over each vertex, 1 f32 a vertex in metres (`:cover`, ADR-839); empty: none.
     pub cover: Vec<u8>,
+    /// Its colliders, 12 f32 each (`:push-colliders`, ADR-839), at most [`MAX_PUSH_COLLIDERS`]; empty: none.
+    pub push_colliders: Vec<u8>,
     pub tangents: Vec<u8>,
     /// `u8` or `u16` joint indices, four a vertex, per `joints_wide`.
     pub joints: Vec<u8>,
@@ -698,6 +704,41 @@ impl Mesh {
                 .map(|[value]| value.clamp(0.0, 0.05))
                 .collect()
         };
+        // its colliders (ADR-839): whole spheres of 12 floats, at most MAX_PUSH_COLLIDERS, each radius
+        // above 0 and its weights summing to about 1
+        if parts.push_colliders.len() % 48 != 0 {
+            return Err(format!(
+                ":push-colliders is 12 f32 a sphere [cx cy cz radius j0 j1 j2 j3 w0 w1 w2 w3], not {} bytes",
+                parts.push_colliders.len()
+            ));
+        }
+        let push_colliders: Vec<[f32; 12]> = parts
+            .push_colliders
+            .as_chunks::<48>()
+            .0
+            .iter()
+            .map(|sphere| {
+                let mut floats = [0.0f32; 12];
+                for (slot, word) in sphere.as_chunks::<4>().0.iter().enumerate() {
+                    floats[slot] = f32::from_le_bytes(*word);
+                }
+                floats
+            })
+            .collect();
+        if push_colliders.len() > MAX_PUSH_COLLIDERS {
+            return Err(format!(
+                "{} :push-colliders are more than the {MAX_PUSH_COLLIDERS} a mesh keeps its garment outside",
+                push_colliders.len()
+            ));
+        }
+        if let Some(index) = push_colliders.iter().position(|sphere| {
+            !(sphere[3] > 0.0)
+                || (sphere[8] + sphere[9] + sphere[10] + sphere[11] - 1.0).abs() > 0.01
+        }) {
+            return Err(format!(
+                ":push-colliders sphere {index} needs a radius above 0 and weights summing to 1"
+            ));
+        }
         let tangents = if parts.tangents.is_empty() {
             // (a strand mesh's baked self-shadow in their place, ADR-813: strands never read tangents)
             if parts.visibility.is_empty() {
@@ -920,6 +961,7 @@ impl Mesh {
             loose_weight,
             standoff,
             cover,
+            push_colliders,
             tangents,
             joints,
             weights,
@@ -1558,6 +1600,8 @@ pub struct Scene {
 
 /// How far outside a garment contact the push-out net leaves a garment's vertex, metres (ADR-839)
 pub const GARMENT_MARGIN: f32 = 0.0005;
+/// The most colliders a mesh carries for the push-out net (ADR-839).
+pub const MAX_PUSH_COLLIDERS: usize = 1024;
 
 /// The most contacts a scene presses its skin with (ADR-805). 64 since ADR-810: womanblend's
 /// room takes 4 and her two arms 42 (a forearm and twenty hand bones each), and at 16 the
@@ -10013,7 +10057,39 @@ mod tests {
         })
         .expect("covered");
         assert_eq!(covered.cover, vec![0.0035, 0.05, 0.0]);
-        assert!(Mesh::from_parts(base).expect("plain").cover.is_empty());
+        assert!(
+            Mesh::from_parts(base.clone())
+                .expect("plain")
+                .cover
+                .is_empty()
+        );
+        // (ADR-839) its push-out colliders: whole 12-float spheres, a radius above 0, weights
+        // summing to 1; anything else refused with why
+        let sphere = [0.0, 0.0, 0.0, 0.1, 3.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        let held = Mesh::from_parts(MeshParts {
+            push_colliders: bytes(&sphere),
+            ..base.clone()
+        })
+        .expect("a collider");
+        assert_eq!(held.push_colliders, vec![sphere]);
+        for (given, why) in [
+            (bytes(&sphere[..11]), "12 f32 a sphere"),
+            (
+                bytes(&[0.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+                "a radius above 0",
+            ),
+            (
+                bytes(&[0.0, 0.0, 0.0, 0.1, 3.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0]),
+                "weights summing to 1",
+            ),
+        ] {
+            let error = Mesh::from_parts(MeshParts {
+                push_colliders: given,
+                ..base.clone()
+            })
+            .expect_err(why);
+            assert!(error.contains(why), "{error:?} does not say {why:?}");
+        }
     }
 
     #[test]
