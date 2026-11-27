@@ -288,3 +288,17 @@
 
   (test "an item that is not a number is an error naming it"
     (is (try (do (bytes/f32s-le-> [1.0 :x]) false) (catch _ true)))))
+
+(describe "bytes/f32s-le"
+  (test "reads count singles from an offset, each as f32-le reads it"
+    (let (data (bytes/f32s-le-> [1.5 -1.5 0.1 0.0]))
+      (assert= (bytes/f32s-le data 0 4) [1.5 -1.5 0.10000000149011612 0.0])
+      (assert= (bytes/f32s-le data 4 2) [-1.5 0.10000000149011612])
+      (assert= (bytes/f32s-le data 16 0) [])
+      (assert= (seq/mapv (range 4) (fn (index) (bytes/f32-le data (* 4 index))))
+        (bytes/f32s-le data 0 4))))
+
+  (test "singles past the end, or a negative count, are an error"
+    (let (data (bytes/f32s-le-> [1.0 2.0]))
+      (is (try (do (bytes/f32s-le data 4 2) false) (catch _ true)))
+      (is (try (do (bytes/f32s-le data 0 -1) false) (catch _ true))))))

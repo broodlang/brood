@@ -16,6 +16,13 @@ NaN and the sign of zero kept. Errors if the four bytes are not all in `b`.
     (bytes/f32-le (bytes 0 0 192 191) 0)   ;=> -1.5"
   (%bytes-f32-le b off))
 
+(defn f32s-le (b:bytes off:int count:int -> vector)
+  "A vector of the `count` little-endian IEEE-754 singles from byte `off` of `b`, each as
+`f32-le` reads it. Errors if they are not all in `b`.
+
+    (bytes/f32s-le (bytes 0 0 192 63 0 0 192 191) 0 2)   ;=> [1.5 -1.5]"
+  (%bytes-f32s-le-read b off count))
+
 (defn f32s-le-> (numbers -> bytes)
   "The numbers of a vector or list as little-endian IEEE-754 singles, four bytes each, in
 order: each the single nearest it (ties to even; past the largest single an infinity, below

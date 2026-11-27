@@ -48,6 +48,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         bytes_f32_le,
     );
     primitives.def(
+        "%bytes-f32s-le-read",
+        Arity::exact(3),
+        Sig::new(vec![bytes_ty, int, int], vec_ty),
+        &["b", "off", "count"],
+        "A vector of the count little-endian IEEE-754 singles from byte off of b, as floats, each exactly as %bytes-f32-le reads it. Errors if the count × 4 bytes are not all in b, or count is negative.",
+        bytes_f32s_le_read,
+    );
+    primitives.def(
         "%bytes-f32s-le",
         Arity::exact(1),
         Sig::new(vec![seqable], bytes_ty),
@@ -279,6 +287,43 @@ pub(super) fn bytes_f32_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     };
     let bits = u32::from_le_bytes([b[start], b[start + 1], b[start + 2], b[start + 3]]);
     Ok(Value::float(f32_bits_to_f64(bits)))
+}
+
+/// `(%bytes-f32s-le-read b off count)` — `count` singles from byte `off` of `b`, as a vector
+/// of floats (`f32_bits_to_f64`): a binary format's float array read in one call, where a
+/// call a float made a reader of a body's vertices walk them one by one.
+pub(super) fn bytes_f32s_le_read(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let off = expect_int(heap, "bytes/f32s-le", arg(args, 1))?;
+    let count = expect_int(heap, "bytes/f32s-le", arg(args, 2))?;
+    let b = as_bytes(heap, "bytes/f32s-le", arg(args, 0))?;
+    let span = usize::try_from(off)
+        .ok()
+        .zip(usize::try_from(count).ok())
+        .and_then(|(start, count)| {
+            let end = start.checked_add(count.checked_mul(4)?)?;
+            (end <= b.len()).then_some((start, count))
+        });
+    let Some((start, count)) = span else {
+        return Err(LispError::runtime(format!(
+            "bytes/f32s-le: {} singles from byte {} are not all in {} bytes",
+            count,
+            off,
+            b.len()
+        ))
+        .with_code(error_codes::INDEX_OUT_OF_RANGE));
+    };
+    let floats: Vec<Value> = (0..count)
+        .map(|index| {
+            let at = start + index * 4;
+            Value::float(f32_bits_to_f64(u32::from_le_bytes([
+                b[at],
+                b[at + 1],
+                b[at + 2],
+                b[at + 3],
+            ])))
+        })
+        .collect();
+    Ok(heap.alloc_vector(floats))
 }
 
 /// `(%bytes-f32s-le numbers)` — `numbers` as little-endian singles, four bytes each. Encoding

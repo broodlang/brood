@@ -3431,3 +3431,9 @@ subnormals kept, past the largest single an infinity), a NaN written as the quie
 sign. The same bytes as b3d's encoder on 399 232 numbers of the normal range; below it b3d's
 flushed to zero and this keeps the subnormal, as the standard has it. Guard:
 `tests/bytes_test.blsp` "bytes/f32s-le->".
+
+2026-11-28. **`bytes/f32s-le`: a buffer's singles as a vector, in one call.** The read side of
+`bytes/f32s-le->`: a reader of a body's vertex positions read them a float at a time and built
+a point for every vertex (womanblend's nipple weights, over her whole body three times at each
+start). Each float exactly as `bytes/f32-le` reads it. Guard: `tests/bytes_test.blsp`
+"bytes/f32s-le".
