@@ -2571,12 +2571,6 @@ fn shade(base: vec3<f32>, normal: vec3<f32>, view: vec3<f32>, world: vec3<f32>, 
                 }
                 seen = shadow_visibility(light, world, surface_normal, arrival.to_light, turn) * contact * hair_through;
             }
-        } else if (draw.flags.x != 0u && draw.flags.x != 4u && draw.flags.x != 5u) {
-            // a light with no shadow map still stops at what stands a few millimetres in its
-            // way (ADR-818, amended 2026-11-27): her fill, unshadowed, lit the side teeth behind
-            // her lips and cheeks with a third of all their light, the most of any source
-            contact = contact_shadow(world, arrival.to_light, surface_normal, view);
-            seen = contact;
         }
         let to_light = arrival.to_light;
         // `mesh::light_under_cornea`: under a cornea the light is bent toward the eye's axis on
