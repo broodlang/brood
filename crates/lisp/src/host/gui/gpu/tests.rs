@@ -329,7 +329,7 @@ fn the_mesh_shader_validates() {
         ]
     );
     assert_eq!(eye_floats(Surface::Cutout), [0.0; 32], "no other surface");
-    // ADR-835: an eye's pupils in the clamp planes' place (bytes 320 … 384), each its own
+    // ADR-835: an eye's pupils in the clamp planes' place (bytes 384 … 448, after the model matrix), each its own
     let mut own = optics.clone();
     own.eyes[1].pupil_scale = 0.975;
     own.eyes[1].pupil_offset = [0.04, 0.02];
@@ -354,7 +354,7 @@ fn the_mesh_shader_validates() {
         [0.0; 4],
     );
     let read = |at: usize| f32::from_le_bytes(pupils[at..at + 4].try_into().expect("a float"));
-    let clamp_floats: Vec<f32> = (0..16).map(|index| read(320 + index * 4)).collect();
+    let clamp_floats: Vec<f32> = (0..16).map(|index| read(384 + index * 4)).collect();
     let ruff = crate::host::gui::mesh::DEFAULT_PUPIL_RUFF;
     assert_eq!(
         clamp_floats,
@@ -364,7 +364,7 @@ fn the_mesh_shader_validates() {
             -0.02, // each eye's waves: turns + phase's share, depth
         ]
     );
-    assert_eq!(read(304), 0.0, "an eye keeps to no clamp planes");
+    assert_eq!(read(368), 0.0, "an eye keeps to no clamp planes");
     assert!(MESH_SRC.contains("let own = draw.clamps[which];"));
     assert_eq!(
         draw_declared, 512,
@@ -404,10 +404,8 @@ fn the_mesh_shader_validates() {
     );
     assert_eq!(scenes::DRAW_BYTES % 256, 0, "a dynamic offset's alignment");
     assert_eq!((PUPIL_EDGE, CORNEA_EDGE), (0.08, 0.85));
-    assert!(
-        MESH_SRC
-            .contains("smoothstep(pupil_share * (1.0 - 0.08), pupil_share * (1.0 + 0.08), rim)")
-    );
+    // (the GPU's pupil edge is half a pixel, its ruff beyond it: ADR-835; `PUPIL_EDGE` the CPU's)
+    assert!(MESH_SRC.contains("seen.pupil = 1.0 - smoothstep(edge - soft, edge + soft, reach);"));
     assert!(MESH_SRC.contains("let cornea = 1.0 - smoothstep(0.85, 1.0, entry_rim);"));
     assert!(MESH_SRC.contains("if (draw.flags.x == 6u && draw.eye_centres[0].w > 0.0) {"));
     assert!(MESH_SRC.contains("@location(5) eye_centre: vec4<f32>,"));
