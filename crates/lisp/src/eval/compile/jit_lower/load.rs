@@ -35,6 +35,21 @@ pub(super) fn emit_const(
             let bits = b.ins().iconst(types::I64, if value { 1 } else { 0 });
             stack.push(Op::Bool(bits));
         }
+        // A keyword or a symbol is an interned id, never moved: its words are known now, as
+        // `type-of`'s answer is built (`prim.rs`). Through `brood_rt_const_load` every
+        // `(get m :key)` in native code paid a call for its key — 3% of a 3D game's tick,
+        // most of it the keys of pose maps.
+        ValueRef::Keyword(id) | ValueRef::Sym(id) => {
+            let tag = if matches!(constant.load().unpack(), ValueRef::Keyword(_)) {
+                crate::core::value::jit_layout::TAG_KEYWORD
+            } else {
+                crate::core::value::jit_layout::TAG_SYM
+            };
+            let w0 = b.ins().iconst(types::I64, tag as i64);
+            let w1 = b.ins().iconst(types::I64, id as i64);
+            let w2 = b.ins().iconst(types::I64, 0);
+            stack.push(Op::Handle(w0, w1, w2));
+        }
         _ => {
             let constant_pointer = b
                 .ins()
