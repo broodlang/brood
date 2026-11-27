@@ -2395,7 +2395,12 @@ impl Heap {
             vectors,
             VecStore::Inline {
                 len: 2,
-                items: [a, b],
+                items: {
+                    let mut items = [Value::nil(); INLINE_VEC_CAP];
+                    items[0] = a;
+                    items[1] = b;
+                    items
+                },
             }
         );
         Value::vector(VecId::local_gen(idx, self.local_epoch))
@@ -2425,7 +2430,7 @@ impl Heap {
             vectors,
             VecStore::Inline {
                 len: 2,
-                items: [Value::nil(), Value::nil()],
+                items: [Value::nil(); INLINE_VEC_CAP],
             }
         );
         let ptr = match &mut self.local.vectors[idx] {
@@ -2465,7 +2470,12 @@ impl Heap {
             vectors,
             VecStore::Inline {
                 len: 2,
-                items: [source, xform],
+                items: {
+                    let mut items = [Value::nil(); INLINE_VEC_CAP];
+                    items[0] = source;
+                    items[1] = xform;
+                    items
+                },
             }
         );
         Value::seqview(VecId::local_gen(idx, self.local_epoch))

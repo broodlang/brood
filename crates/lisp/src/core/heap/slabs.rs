@@ -13,14 +13,12 @@
 use super::*;
 
 /// How many elements a vector stores **inline in its slab slot** before it
-/// spills to a heap `Vec` (see [`VecStore`]). Set to 2 — the hot small-vector
-/// case (2-element tuples like `bintree` nodes, 2-element `SeqView` backings) —
-/// kept small so an inline slot (~64 B) stays *below* the old `Vec<Value>`
-/// handle-plus-`malloc` footprint (a 24 B slot + a ≥48 B heap block). A larger
-/// cap would inline 3-element `Range` backings too, but at a bigger slot for
-/// *every* vector, which added GC-copy traffic on the copy-bound `bintree`
-/// (whose whole tree is live at once) — net CPU-negative in measurement.
-pub(crate) const INLINE_VEC_CAP: usize = 2;
+/// spills to a heap `Vec` (see [`VecStore`]). TRIAL (branch perf/inline-vec-4): 4, so a
+/// point `[x y z]` and a quaternion `[x y z w]` take no `malloc` and no `free`; it was 2
+/// (the 2-element tuples of `bintree`, a `SeqView`'s backing), kept small because a
+/// larger slot for EVERY vector added GC-copy traffic on `bintree`. womanblend's tick is
+/// 4.6% lighter at 4 (2026-11-27); the rows decide.
+pub(crate) const INLINE_VEC_CAP: usize = 4;
 
 /// Element storage for one heap vector: **inline** in the slab slot for the
 /// common small case, or **spilled** to a heap `Vec` for larger vectors. This
