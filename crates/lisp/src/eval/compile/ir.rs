@@ -1314,14 +1314,97 @@ impl CompiledClosure {
 /// (the handle keeps it alive for at least as long), so this needs no immortality
 /// argument and changes no GC invariant: `runtime_collect` still reaches the same arms
 /// through [`Self::arc`].
+///
+/// Counted without atomics ([`ArmRef`]): the per-call clone and drop of the handle were two
+/// atomic read-modify-writes on every call native code makes to a closure (a third of
+/// `jit_dispatch_call`'s own time in a 3D game), for a count only one thread ever touches.
 pub struct ArmHandle {
     inner: Arc<CompiledArm>,
 }
 
-impl ArmHandle {
+/// A counted reference to a process's [`ArmHandle`], the count a plain `Cell`.
+///
+/// Sound because a handle is PROCESS-LOCAL: made by one process, held only in its heap's
+/// caches and frames, and touched only by the one thread running that process at a time.
+/// A process moves between workers whole, through the scheduler's queue, whose handoff
+/// orders every access before it against every access after. Hence `Send` and NOT `Sync`:
+/// a type that would share one between threads (a runtime-wide table, a `static`) does
+/// not compile, so the rule is the compiler's, not a comment's.
+pub struct ArmRef {
+    node: std::ptr::NonNull<ArmRefNode>,
+}
+
+struct ArmRefNode {
+    count: std::cell::Cell<usize>,
+    handle: ArmHandle,
+}
+
+// SAFETY: see the type's doc — one thread touches a given count at a time, and moving the
+// process that holds it moves every reference with it under the scheduler's handoff.
+unsafe impl Send for ArmRef {}
+
+impl ArmRef {
+    /// Whether `a` and `b` are the same handle.
     #[inline]
-    pub fn new(inner: Arc<CompiledArm>) -> Arc<Self> {
-        Arc::new(Self { inner })
+    pub fn ptr_eq(a: &ArmRef, b: &ArmRef) -> bool {
+        a.node == b.node
+    }
+
+    /// How many references the handle has (tests).
+    #[inline]
+    pub fn strong_count(this: &ArmRef) -> usize {
+        // SAFETY: a live reference keeps its node alive.
+        unsafe { this.node.as_ref() }.count.get()
+    }
+}
+
+impl Clone for ArmRef {
+    #[inline]
+    fn clone(&self) -> ArmRef {
+        // SAFETY: a live reference keeps its node alive.
+        let node = unsafe { self.node.as_ref() };
+        node.count.set(node.count.get() + 1);
+        ArmRef { node: self.node }
+    }
+}
+
+impl Drop for ArmRef {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: a live reference keeps its node alive; the last one frees it, leaked from
+        // its `Box` in `ArmHandle::new`.
+        unsafe {
+            let node = self.node.as_ref();
+            let left = node.count.get() - 1;
+            node.count.set(left);
+            if left == 0 {
+                drop(Box::from_raw(self.node.as_ptr()));
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for ArmRef {
+    type Target = ArmHandle;
+    #[inline]
+    fn deref(&self) -> &ArmHandle {
+        // SAFETY: a live reference keeps its node alive.
+        &unsafe { self.node.as_ref() }.handle
+    }
+}
+
+impl ArmHandle {
+    // (a reference to a new handle, as it was an `Arc` of one)
+    #[allow(clippy::new_ret_no_self)]
+    #[inline]
+    pub fn new(inner: Arc<CompiledArm>) -> ArmRef {
+        let node = Box::new(ArmRefNode {
+            count: std::cell::Cell::new(1),
+            handle: Self { inner },
+        });
+        ArmRef {
+            node: std::ptr::NonNull::from(Box::leak(node)),
+        }
     }
 
     /// The shared `Arc`, for the paths that genuinely need to own or publish it (the
@@ -1347,7 +1430,7 @@ impl std::ops::Deref for ArmHandle {
 pub(crate) enum Step {
     Done(Value),
     Tail {
-        compiled: Arc<ArmHandle>,
+        compiled: ArmRef,
         args: SmallVec<[Value; 4]>,
         /// The tail callee's own captured env — switched to so the next arm resolves
         /// its free vars in *its* scope (Stage 2c: a tail call can cross into a
@@ -1377,7 +1460,7 @@ pub(crate) enum Step {
 pub(crate) enum ChunkExit {
     Done(Value),
     Tail {
-        arm: Arc<ArmHandle>,
+        arm: ArmRef,
         args: SmallVec<[Value; 4]>,
         genv: EnvId,
         /// Callee IC block (see [`Step::Tail::bases`]).
@@ -1386,7 +1469,7 @@ pub(crate) enum ChunkExit {
         result_contract: Option<Value>,
     },
     Call {
-        arm: Arc<ArmHandle>,
+        arm: ArmRef,
         args: SmallVec<[Value; 4]>,
         genv: EnvId,
         /// Callee IC block (see [`Step::Tail::bases`]).
@@ -1401,7 +1484,7 @@ pub(crate) enum ChunkExit {
     /// were). The frame base is `roots_len() - argc`; the result lands there on `Done`,
     /// exactly where `Call`'s would (`drop_base`).
     CallInPlace {
-        arm: Arc<ArmHandle>,
+        arm: ArmRef,
         argc: usize,
         genv: EnvId,
         /// Callee IC block (see [`Step::Tail::bases`]).
@@ -1421,7 +1504,7 @@ pub(crate) enum ChunkExit {
     /// error and a staged tail call never reach here: `exec_chunk` finishes those itself.
     #[cfg(feature = "jit")]
     CallResume {
-        arm: Arc<ArmHandle>,
+        arm: ArmRef,
         base: usize,
         /// The size the frame was BUILT to (`frame_size_for_new_entry()` at entry) — the
         /// deopt-resume helpers must be told it, never re-derive it (KI-48 family).
@@ -1465,7 +1548,7 @@ pub(crate) enum ChunkExit {
     /// lands); `tail`: the call was in tail position, so the answer returns from this frame.
     Interruptible {
         ceiling: Option<u64>,
-        arm: Arc<ArmHandle>,
+        arm: ArmRef,
         genv: EnvId,
         bases: (u32, u32),
         tail: bool,

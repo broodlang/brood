@@ -1165,7 +1165,7 @@ pub struct Heap {
     /// be swapped for a relocated copy. (The non-live arms in `vm_cache` are just
     /// cleared and rebuilt lazily; only the live ones need fixup.) Empty unless the VM
     /// is running a body. See ADR-076 / `docs/known-issues.md`.
-    live_vm_arms: Vec<Arc<crate::eval::compile::ArmHandle>>,
+    live_vm_arms: Vec<crate::eval::compile::ArmRef>,
     /// Call-site inline caches (ADR-096). Indexed by the `site` id a compiled
     /// `Node::Call` with a global-symbol callee carries; each entry caches that
     /// site's most recent resolution — the callee value, and (for a VM-eligible

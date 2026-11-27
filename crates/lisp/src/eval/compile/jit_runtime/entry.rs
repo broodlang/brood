@@ -218,7 +218,7 @@ pub(crate) struct NestedFrame {
 /// The callee of a nested call, as [`finish_nested`] needs it for a re-run, a checkpoint
 /// resume or an unwind record: its arm, its env, and whether the arm is certainly the one
 /// whose native code ran (only such an arm may be rebuilt as an interpreter frame).
-pub(crate) type NestedCallee = (Arc<ArmHandle>, EnvId, bool);
+pub(crate) type NestedCallee = (ArmRef, EnvId, bool);
 
 /// How a nested native call finished.
 pub(crate) enum Nested {

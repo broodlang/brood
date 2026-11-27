@@ -241,7 +241,7 @@ fn interruptible_region(
     heap: &mut Heap,
     callee: Value,
     argv: &[Value],
-) -> Result<Option<(Option<u64>, Arc<ArmHandle>, EnvId, (u32, u32))>, LispError> {
+) -> Result<Option<(Option<u64>, ArmRef, EnvId, (u32, u32))>, LispError> {
     let ValueRef::Native(id) = callee.unpack() else {
         return Ok(None);
     };
@@ -303,7 +303,7 @@ pub(crate) const CONTRACT_MODULE: &str = "contract";
 /// frame (TCO). A single pass to the next call/return is bounded by the chunk length.
 pub(crate) fn exec_chunk(
     heap: &mut Heap,
-    arm_arc: &Arc<ArmHandle>,
+    arm_arc: &ArmRef,
     ip: &mut usize,
     base: usize,
     genv: EnvRoot,
@@ -935,7 +935,7 @@ pub(crate) fn exec_chunk(
                 // The args, copied off the operand stack — built BELOW, after the in-place
                 // call path (which never needs them) has declined.
                 let mut argv: SmallVec<[Value; 4]>;
-                let mut fast: Option<(Arc<ArmHandle>, EnvId, (u32, u32))> = None;
+                let mut fast: Option<(ArmRef, EnvId, (u32, u32))> = None;
                 // Set by either IC path when `vm_call_ic_self` proved this tail call targets
                 // THIS arm in THIS env — `fast` then stays `None` (no clone). Asked only when
                 // the inline self-tail reset below can take the call (no optional or rest

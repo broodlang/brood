@@ -760,7 +760,7 @@ pub(crate) fn cached_arm_stale(heap: &Heap, id: ClosureId, argc: usize) -> Optio
     })
 }
 
-pub(crate) fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<ArmHandle>> {
+pub(crate) fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<ArmRef> {
     let key = cache_key(heap, id)?;
     // (ADR-366: a body marked stale by a module load was dropped by the lookup's own sync,
     // so a hit here is never stale, and a miss recompiles with the bindings present.)
@@ -857,7 +857,7 @@ pub fn precompile(heap: &mut Heap, f: Value) -> bool {
 /// so a late-rebind falls back) + its compiled arm (GC-stable `Arc`, off the heap graph).
 pub(crate) struct HofArm {
     pub(crate) id: ClosureId,
-    pub(crate) arm: Arc<ArmHandle>,
+    pub(crate) arm: ArmRef,
     /// The step arm's IC block ([`Heap::vm_arm_block`]), resolved once here so the
     /// per-element native fast-frame installs it without a registry lookup. Only the native
     /// (jit) fast path reads it, so a `--no-default-features` build carries neither the
