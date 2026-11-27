@@ -95,7 +95,7 @@ pub(crate) fn jit_resolve_global(heap: &mut Heap, sym: Symbol) -> Result<Value, 
 #[inline]
 pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> Result<Value, i64> {
     let env = heap.read_root_env(heap.jit_call_env);
-    if heap.is_global(env) {
+    if heap.reads_global(env, sym) {
         let epoch = heap.global_epoch();
         if let Some(v) = heap.vm_global_ic_probe(site, sym, epoch) {
             crate::perf_bump!(global_ic_hit);

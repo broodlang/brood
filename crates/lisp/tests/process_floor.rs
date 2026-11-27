@@ -68,9 +68,16 @@
 //! margin, and still reds a step the size of the byte trigger's (+44 B, 2 714) or the
 //! lanes' (+85 B). Sabotage: this tree run with `BROOD_JIT_VERIFY=1` reads 2 799 and reds it.
 
+//!
+//! Lowered 2 700 → 2 620 (2026-11-27): the probe collects the spawner's heap before each
+//! reading now (see the note in the probe). Until then the reading held whatever garbage the
+//! spawner's `seq/mapv` had not yet had collected, about 84 B a process of the 2 670, and it
+//! moved with the spawner's spelling: a prelude change to `seq/mapv` read as +48 B a process
+//! (2 718) with nothing new allocated per spawn. Collected, the same tree reads 2 586.
+
 use brood::Interp;
 
-const FLOOR_BYTES: i64 = 2700;
+const FLOOR_BYTES: i64 = 2620;
 
 #[test]
 fn a_parked_process_costs_no_more_than_the_floor() {
@@ -100,10 +107,19 @@ fn a_parked_process_costs_no_more_than_the_floor() {
         (defn spawn-all (n) (seq/mapv (range n) (fn (_) (spawn (parked)))))
         (def warm (spawn-all 5000))
         (proc/sleep 200)
+        ;; The spawner's own garbage is collected before each reading: what `spawn-all`
+        ;; leaves behind until its heap's next collection is the spawner's, not a parked
+        ;; process's. `seq/mapv` over a range appends item by item, and each append is a
+        ;; vector value of its own (48 B, dead at the next one): once it walked the range
+        ;; with a native loop (2026-11-27) no collection fell inside the window and 20 000
+        ;; of them read as 48 B a process, with every table of a parked process unchanged
+        ;; (`%ic-stats`) and two other spellings of the spawner under the floor.
+        (%gc-collect)
         (def b0 (%mem-bytes))
         (def n 20000)
         (def kids (spawn-all n))
         (proc/sleep 200)
+        (%gc-collect)
         (def per (math/quot (- (%mem-bytes) b0) n))
         ;; Release them so the runtime tears down cleanly.
         (fold (into warm kids) nil (fn (_ p) (send p [:go])))

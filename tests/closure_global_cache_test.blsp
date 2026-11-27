@@ -1,0 +1,49 @@
+(defmodule closure-global-cache-test (:use test))
+
+;;; Inside a closure that captures a local, a named call and a global read are served by the
+;;; site's inline cache, as at top level, when no lexical frame of the closure's env binds
+;;; the name (`Heap::reads_global`). They were resolved through the env chain on every
+;;; execution: the body of every `(fn …)` handed to `map` or `fold`. What must still hold:
+;;; a `def` is seen at the next call (late binding), a local of the same name wins, and two
+;;; instances of one closure, sharing the site, each answer for themselves.
+
+(def *cgc-scale* 10)
+(defn cgc-step (x) (+ x 1))
+
+(defn- cgc-sum (offset items)
+  ;; the closure captures `offset`; `cgc-step` and `*cgc-scale*` are globals read inside it
+  (fold items 0 (fn (sum item) (+ sum (* *cgc-scale* (cgc-step (+ item offset)))))))
+
+(defn- cgc-shadowed (items)
+  ;; here `cgc-step` is a LOCAL the closure captures: the global of that name is not asked
+  (let (cgc-step (fn (x) (* x 100))
+        bias 1)
+    (seq/mapv items (fn (item) (+ bias (cgc-step item))))))
+
+(defn- cgc-maker (offset)
+  (fn (item) (* *cgc-scale* (cgc-step (+ item offset)))))
+
+(describe "a closure's global reads and named calls"
+  (test "answer as at top level, warm"
+    (assert= (cgc-sum 1 [1 2 3]) 120)
+    (assert= (fold (range 3000) 0 (fn (_ _) (cgc-sum 1 [1 2 3]))) 120))
+
+  (test "see a def made after they were cached"
+    (assert= (cgc-sum 0 [1 2]) 50)
+    (reflect/eval '(def closure-global-cache-test/*cgc-scale* 2))
+    (assert= (cgc-sum 0 [1 2]) 10)
+    (reflect/eval '(defn closure-global-cache-test/cgc-step (x) (+ x 5)))
+    (assert= (cgc-sum 0 [1 2]) 26)
+    (reflect/eval '(def closure-global-cache-test/*cgc-scale* 10))
+    (reflect/eval '(defn closure-global-cache-test/cgc-step (x) (+ x 1)))
+    (assert= (cgc-sum 0 [1 2]) 50))
+
+  (test "a local of the same name wins over the global"
+    (assert= (cgc-shadowed [1 2]) [101 201])
+    (assert= (fold (range 3000) nil (fn (_ _) (cgc-shadowed [1 2]))) [101 201]))
+
+  (test "two instances of one closure answer each for itself"
+    (let (one (cgc-maker 1)
+          two (cgc-maker 2))
+      (assert= (seq/mapv (range 4) (fn (index) (if (= 0 (math/mod index 2)) (one index) (two index))))
+        [20 40 40 60]))))

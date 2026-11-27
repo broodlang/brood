@@ -110,6 +110,22 @@ impl Heap {
         false
     }
 
+    /// Does a read of `sym` in `env` reach the GLOBAL scope — is `env` the global scope, or a
+    /// closure's env none of whose lexical frames binds `sym`? Then the read may be served by
+    /// the site's inline cache, as it is at top level: [`Self::env_get`] would walk the same
+    /// frames, find nothing, and end in the global table.
+    ///
+    /// The inline caches were consulted under the global env only, so every named call and
+    /// every global read INSIDE a closure that captures a local walked the chain and hashed
+    /// the name on each execution (and a call then looked its arm up by hash as well) — the
+    /// body of every `(fn …)` handed to `map`, `fold` or `seq/mapv`. The frames are checked
+    /// on each read, not once: a frame can gain a name after the closure was made
+    /// (`env_define`), and two instances of one closure share the site.
+    #[inline]
+    pub(crate) fn reads_global(&self, env: EnvId, sym: Symbol) -> bool {
+        env == self.global || !self.is_lexically_bound(env, sym)
+    }
+
     pub fn env_get(&self, env: EnvId, sym: Symbol) -> Option<Value> {
         crate::perf_bump!(env_get);
         let mut cur = Some(env);

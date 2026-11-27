@@ -3317,3 +3317,25 @@ for the hop as before (KI-11). The memo keeps a named function's entry across a 
 instructions on its game thread (`perf`, sampled, two lengths taken apart). Not measured on
 brood's benchmark rows: this machine does not run them. Run: the 55 test files of the JIT,
 tail calls, contracts, preemption and the checker; not `make test`.
+
+2026-11-27. **Inside a closure, named calls and global reads use the inline caches.** The
+call-site and global-read caches were consulted under the GLOBAL env only (`is_global`), the
+guard standing for "no local shadows the name". So in the body of every closure that captures
+a local — every `(fn …)` handed to `map`, `fold` or `seq/mapv` — each named call resolved its
+head through the env chain and the global table and then looked its arm up by hash, and each
+global read did the same walk, on every execution, on both tiers (`brood_rt_global_ic` 2.9%
+of womanblend's game thread, `env_get` under it; the VM's `dispatch` under `exec_chunk` 4%).
+`Heap::reads_global` asks what the guard meant: the env is the global one, or none of its
+lexical frames binds the name — checked on each read, since a frame can gain a name and two
+instances of a closure share a site. womanblend's serial tick 101.0 → 99.2 million
+instructions. Guard: `tests/closure_global_cache_test.blsp` (a `def` seen at the next call,
+a local of the same name winning, two instances of one closure).
+
+2026-11-27. **`process_floor` collects the spawner's heap before it reads.** CI's first run
+of c807c63c7 (with today's commits on top) read a parked process at 2 718 B against the
+2 700 floor. Nothing new is allocated per spawn: a parked process's four cache tables are the
+same before and after (`%ic-stats`), and the probe passes with its spawner spelled two other
+ways. `seq/mapv` over a range appends item by item, each append a vector value of its own, and
+since it walks the range natively no collection fell inside the probe's window: the reading
+was the spawner's garbage. The probe runs `%gc-collect` before each reading; the same tree
+reads 2 586, and the floor is 2 620.

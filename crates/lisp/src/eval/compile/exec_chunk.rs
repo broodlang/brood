@@ -377,7 +377,7 @@ pub(crate) fn exec_chunk(
             }
             Inst::GlobalIc { sym, site } => {
                 let env = heap.read_root_env(genv);
-                let v = if heap.is_global(env) {
+                let v = if heap.reads_global(env, *sym) {
                     let epoch = heap.global_epoch();
                     if let Some(v) = heap.vm_global_ic_probe(*site, *sym, epoch) {
                         crate::perf_bump!(global_ic_hit);
@@ -957,7 +957,7 @@ pub(crate) fn exec_chunk(
                     let v = heap.root_at(drop_base);
                     if let Some(sym) = head
                         && *site != NO_SITE
-                        && heap.is_global(cur_env)
+                        && heap.reads_global(cur_env, *sym)
                     {
                         let epoch = heap.global_epoch();
                         // A self-tail call first asks the non-cloning question the unstaged
@@ -1016,7 +1016,7 @@ pub(crate) fn exec_chunk(
                     (v, drop_base)
                 } else if let Some(sym) = head {
                     let drop_base = n - argc;
-                    if *site != NO_SITE && heap.is_global(cur_env) {
+                    if *site != NO_SITE && heap.reads_global(cur_env, *sym) {
                         let epoch = heap.global_epoch();
                         let self_hit = if self_tail_probe {
                             heap.vm_call_ic_self(*site, *sym, argc as u32, epoch, arm, cur_env)
