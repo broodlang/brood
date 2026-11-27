@@ -766,6 +766,307 @@ pub fn moved(
     (points, previous)
 }
 
+// ---- a lock planned natively (ADR-821 amended): b3d-hair's `moved-plan`, sum for sum, so the
+// frame's whole step is one call (the plan in Brood was most of the hair's cost a frame) ----
+
+/// A column-major 4×4 matrix, as b3d-math keeps one.
+pub type Matrix = [f64; 16];
+
+/// What b3d-hair's plan reads from its module's settings (`*rate*`, `*most-steps*`, `*drift*`,
+/// `*clearance*`'s furthest).
+#[derive(Clone, Copy, Debug)]
+pub struct PlanConstants {
+    pub rate: f64,
+    pub most_steps: usize,
+    pub drift: f64,
+    pub clearance: f64,
+}
+
+/// One lock as the state keeps it between frames: what `moved-plan` reads.
+#[derive(Clone, Debug)]
+pub struct Held {
+    pub points: Vec<Vector>,
+    pub previous: Vec<Vector>,
+    /// the last frame's sub-step length (`:step`), none on the first
+    pub last_step: Option<f64>,
+    /// its posed points where the last call left them (`:posed`), none on the first
+    pub posed: Option<Vec<Vector>>,
+    pub preload: Vec<Vector>,
+    pub up: Vector,
+    pub nears: Vec<Vec<usize>>,
+    /// where its points were when its near shapes were found (`:nears-at`)
+    pub nears_at: Option<Vec<Vector>>,
+    pub joints: Vec<usize>,
+    /// its root joint's parent, none when it hangs from the skeleton's base
+    pub root_parent: Option<usize>,
+    pub stiffness: Vec<f64>,
+    pub follows: Option<Vec<f64>>,
+    pub damping: Vec<f64>,
+    pub holds: Vec<f64>,
+    pub lengths: Vec<f64>,
+    pub margins: Vec<f64>,
+    /// its bend limits as groomed (`relaxed` here for how upright the head is)
+    pub limits: Vec<f64>,
+    pub thickness: Option<Vec<f64>>,
+}
+
+/// The frame every lock is planned in.
+pub struct Frame<'a> {
+    pub worlds: &'a [Matrix],
+    pub base: Matrix,
+    /// the head's turn about her spine (`head-twist`): its angle and the spine's up
+    pub twist: Option<(f64, Vector)>,
+    pub dt: f64,
+    pub moved_shapes: bool,
+    pub shapes: &'a [Shape],
+}
+
+/// A lock planned: the lock its sub-steps take, and what `moved-done` keeps.
+pub struct Planned {
+    pub lock: Lock,
+    pub steps: usize,
+    pub step: f64,
+    pub fresh: bool,
+}
+
+fn translation(matrix: &Matrix) -> Vector {
+    [matrix[12], matrix[13], matrix[14]]
+}
+
+/// `b3d-math/mat4-rotation` as the turn's three columns: each axis made a unit, and squared by two
+/// of Björck's steps unless already square (to 1e-9) or one is scaled to nothing
+fn rotation_columns(matrix: &Matrix) -> [Vector; 3] {
+    let unit_of = |axis: Vector| {
+        let length = size(axis);
+        let factor = if length < 1.0e-12 { 0.0 } else { 1.0 / length };
+        (scale(axis, factor), factor)
+    };
+    let (a, fa) = unit_of([matrix[0], matrix[1], matrix[2]]);
+    let (b, fb) = unit_of([matrix[4], matrix[5], matrix[6]]);
+    let (c, fc) = unit_of([matrix[8], matrix[9], matrix[10]]);
+    if dot(a, b).abs() + dot(a, c).abs() + dot(b, c).abs() < 1.0e-9
+        || fa == 0.0
+        || fb == 0.0
+        || fc == 0.0
+    {
+        return [a, b, c];
+    }
+    let squared = |[a, b, c]: [Vector; 3]| {
+        let (sa, sb, sc) = (
+            1.5 - 0.5 * dot(a, a),
+            1.5 - 0.5 * dot(b, b),
+            1.5 - 0.5 * dot(c, c),
+        );
+        let (ab, ac, bc) = (0.5 * dot(a, b), 0.5 * dot(a, c), 0.5 * dot(b, c));
+        [
+            subtract(subtract(scale(a, sa), scale(b, ab)), scale(c, ac)),
+            subtract(subtract(scale(b, sb), scale(a, ab)), scale(c, bc)),
+            subtract(subtract(scale(c, sc), scale(a, ac)), scale(b, bc)),
+        ]
+    };
+    squared(squared([a, b, c]))
+}
+
+/// `points-of`: each joint's head, then the tip a last length along the last bone
+fn points_of(worlds: &[Matrix], joints: &[usize], lengths: &[f64]) -> Vec<Vector> {
+    let mut points: Vec<Vector> = joints
+        .iter()
+        .map(|&joint| translation(&worlds[joint]))
+        .collect();
+    if let (Some(&last), Some(&length)) = (joints.last(), lengths.last()) {
+        let world = &worlds[last];
+        let along = normalize([world[4], world[5], world[6]]);
+        let head = *points.last().expect("a lock has joints");
+        points.push(add(head, scale(along, length)));
+    }
+    points
+}
+
+/// `spins-of`: each point's turn back about the spine, `[cos sin]`, none below a share of 1e-6
+fn spins_of(
+    follows: Option<&[f64]>,
+    twist: Option<(f64, Vector)>,
+) -> Option<Vec<Option<[f64; 2]>>> {
+    let (angle, _) = twist?;
+    if angle.abs() < 1.0e-5 {
+        return None;
+    }
+    Some(
+        follows?
+            .iter()
+            .map(|&share| {
+                (share >= 1.0e-6).then(|| {
+                    let turn = -1.0 * share * angle;
+                    [turn.cos(), turn.sin()]
+                })
+            })
+            .collect(),
+    )
+}
+
+/// `spun`: Rodrigues' formula written out, as b3d-hair writes it
+fn spun(vector: Vector, axis: Vector, [c, s]: [f64; 2]) -> Vector {
+    let [vx, vy, vz] = vector;
+    let [kx, ky, kz] = axis;
+    let along = (kx * vx + ky * vy + kz * vz) * (1.0 - c);
+    [
+        vx * c + s * (ky * vz - kz * vy) + kx * along,
+        vy * c + s * (kz * vx - kx * vz) + ky * along,
+        vz * c + s * (kx * vy - ky * vx) + kz * along,
+    ]
+}
+
+/// `within-drift?`
+fn within_drift(points: &[Vector], before: &[Vector], drift: f64) -> bool {
+    let limit = drift * drift;
+    points.len() <= before.len()
+        && points.iter().zip(before).all(|(&[x, y, z], &[a, b, c])| {
+            (x - a) * (x - a) + (y - b) * (y - b) + (z - c) * (z - c) <= limit
+        })
+}
+
+/// `within?`: whether a shape comes within `reach` of a point
+fn shape_within(shape: &Shape, [x, y, z]: Vector, reach: f64) -> bool {
+    let numbers = &shape.0;
+    let (dx, dy, dz) = (numbers[7] - x, numbers[8] - y, numbers[9] - z);
+    let apart = reach + numbers[10] + numbers[6];
+    dx * dx + dy * dy + dz * dz <= apart * apart
+}
+
+/// `near-shapes`: for each bone, the places of the shapes it could touch this frame
+fn near_shapes(points: &[Vector], shapes: &[Shape], constants: &PlanConstants) -> Vec<Vec<usize>> {
+    let count = points.len() as f64;
+    let sum = points
+        .iter()
+        .fold([0.0, 0.0, 0.0], |[sx, sy, sz], &[x, y, z]| {
+            [sx + x, sy + y, sz + z]
+        });
+    let centre = [sum[0] / count, sum[1] / count, sum[2] / count];
+    let spread = points.iter().fold(0.0f64, |far, &[x, y, z]| {
+        far.max(
+            (x - centre[0]) * (x - centre[0])
+                + (y - centre[1]) * (y - centre[1])
+                + (z - centre[2]) * (z - centre[2]),
+        )
+    });
+    let slack = 0.01 + 2.0 * constants.drift + constants.clearance;
+    let around: Vec<usize> = (0..shapes.len())
+        .filter(|&at| shape_within(&shapes[at], centre, slack + spread.sqrt()))
+        .collect();
+    (1..points.len())
+        .map(|index| {
+            let (p, q) = (points[index - 1], points[index]);
+            let u = subtract(q, p);
+            let reach = slack + 0.5 * (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+            let middle = [
+                0.5 * (p[0] + q[0]),
+                0.5 * (p[1] + q[1]),
+                0.5 * (p[2] + q[2]),
+            ];
+            around
+                .iter()
+                .copied()
+                .filter(|&at| shape_within(&shapes[at], middle, reach))
+                .collect()
+        })
+        .collect()
+}
+
+/// `relaxed`: the bend limits for a head `upright` (1 … 0)
+fn relaxed(limits: &[f64], upright: f64) -> Vec<f64> {
+    if upright >= 0.999 {
+        return limits.to_vec();
+    }
+    limits
+        .iter()
+        .map(|&limit| {
+            if limit <= -1.0 {
+                limit
+            } else {
+                (limit.clamp(-1.0, 1.0).acos() + (1.0 - upright) * 2.6)
+                    .min(3.1)
+                    .cos()
+            }
+        })
+        .collect()
+}
+
+/// `moved-plan` without its trial bounce (`bounce-tuning`, nil unless asked: b3d-hair plans in Brood
+/// then): what the lock's sub-steps take, from the lock as the state keeps it
+pub fn plan(held: &Held, frame: &Frame, constants: &PlanConstants) -> Planned {
+    let above = match held.root_parent {
+        Some(parent) => frame.worlds[parent],
+        None => frame.base,
+    };
+    let [a, b, c] = rotation_columns(&above);
+    // the turn applied to a vector, and its inverse to the world's up (b3d-math's `quat-rotate`)
+    let turned = |v: Vector| add(add(scale(a, v[0]), scale(b, v[1])), scale(c, v[2]));
+    let upright = dot(held.up, [a[1], b[1], c[1]]).max(0.0);
+    let spins = spins_of(held.follows.as_deref(), frame.twist);
+    let axis = frame.twist.map(|(_, axis)| axis).unwrap_or([0.0, 1.0, 0.0]);
+    let posed = points_of(frame.worlds, &held.joints, &held.lengths);
+    let pivot = translation(&above);
+    let now: Vec<Vector> = match &spins {
+        None => posed,
+        Some(spins) => (0..posed.len())
+            .map(|index| match spins.get(index).copied().flatten() {
+                None => posed[index],
+                Some(spin) => add(pivot, spun(subtract(posed[index], pivot), axis, spin)),
+            })
+            .collect(),
+    };
+    let before = held.posed.clone().unwrap_or_else(|| now.clone());
+    let steps = (constants.most_steps as f64)
+        .min((frame.dt * constants.rate + 0.999).floor().max(1.0)) as usize;
+    let step = frame.dt / steps as f64;
+    let stretch = step / held.last_step.unwrap_or(step);
+    let previous = slid(&held.points, &held.previous, stretch);
+    let carries = (0..held.preload.len())
+        .map(|index| {
+            let force = turned(held.preload[index]);
+            match spins
+                .as_ref()
+                .and_then(|spins| spins.get(index + 1).copied().flatten())
+            {
+                None => force,
+                Some(spin) => spun(force, axis, spin),
+            }
+        })
+        .collect();
+    let fresh = !frame.moved_shapes
+        && held
+            .nears_at
+            .as_ref()
+            .is_some_and(|at| within_drift(&held.points, at, constants.drift));
+    let nears = if fresh {
+        held.nears.clone()
+    } else {
+        near_shapes(&held.points, frame.shapes, constants)
+    };
+    Planned {
+        lock: Lock {
+            points: held.points.clone(),
+            previous,
+            before,
+            now,
+            carries,
+            nears,
+            stiffness: held.stiffness.clone(),
+            follows: held.follows.clone(),
+            damping: held.damping.clone(),
+            upright,
+            holds: held.holds.clone(),
+            lengths: held.lengths.clone(),
+            margins: held.margins.clone(),
+            limits: relaxed(&held.limits, upright),
+            thickness: held.thickness.clone(),
+        },
+        steps,
+        step,
+        fresh,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

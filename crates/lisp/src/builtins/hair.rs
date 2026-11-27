@@ -32,6 +32,231 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "Every lock of `locks` (maps of :points :previous :before :now :carries :nears :stiffness :follows :damping :upright :holds :lengths :margins :limits :thickness, as b3d-hair's `moved-with` holds them) `steps` sub-steps of `step` seconds on against her body's `shapes` (blended from `shapes-before` across the sub-steps when given), with b3d-hair's settings in `constants`: a vector of `[points previous]` a lock, each a vector of [x y z]. The same arithmetic as b3d-hair's `sub-step`, natively and in one call.",
         hair_moved,
     );
+    primitives.def(
+        "%hair-advance",
+        Arity::exact(10),
+        Sig::new(
+            vec![
+                vec_ty,
+                vec_ty,
+                vec_ty,
+                crate::types::Ty::of_tags(&[Tag::Vector, Tag::Nil]),
+                num,
+                crate::types::Ty::of_tags(&[Tag::Bool, Tag::Nil]),
+                vec_ty,
+                crate::types::Ty::of_tags(&[Tag::Vector, Tag::Nil]),
+                map_ty,
+                map_ty,
+            ],
+            vec_ty,
+        ),
+        &[
+            "locks",
+            "worlds",
+            "base",
+            "twist",
+            "dt",
+            "moved-shapes",
+            "shapes",
+            "shapes-before",
+            "constants",
+            "plan-constants",
+        ],
+        "Every lock of `locks` (b3d-hair's state locks, each with its :root-parent: the root joint's parent, nil for the skeleton's base) planned as b3d-hair's `moved-plan` plans it, from the frame's `worlds` (16 numbers a joint), `base`, the head's `twist` ([angle [x y z]] or nil), `dt` and whether the colliders `moved-shapes`, then its sub-steps taken against `shapes` (blended from `shapes-before`) as `%hair-moved` takes them, with b3d-hair's settings in `constants` and `plan-constants` (:rate :most-steps :drift :clearance): a vector of `[points previous now step fresh nears]` a lock. b3d-hair's plan and sub-steps for a whole frame natively, in one call (ADR-821 amended).",
+        hair_advance,
+    );
+}
+
+fn matrix(heap: &Heap, value: Value, what: &str) -> Result<crate::host::hair::Matrix, String> {
+    let numbers = numbers(heap, value, what)?;
+    numbers
+        .try_into()
+        .map_err(|numbers: Vec<f64>| format!("{what} has {} numbers, not 16", numbers.len()))
+}
+
+fn held_of(heap: &Heap, map: Value, count: usize) -> Result<crate::host::hair::Held, String> {
+    let place_lists = |value: Value, what: &str| -> Result<Vec<Vec<usize>>, String> {
+        items(heap, value, what)?
+            .into_iter()
+            .map(|places| {
+                numbers(heap, places, what)?
+                    .into_iter()
+                    .map(|place| {
+                        let place = place as usize;
+                        if place < count {
+                            Ok(place)
+                        } else {
+                            Err(format!("{what} names shape {place} of {count}"))
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let optional_vectors = |value: Value, what: &str| -> Result<Option<Vec<Vector>>, String> {
+        if matches!(value, Value::Nil) {
+            Ok(None)
+        } else {
+            vectors(heap, value, what).map(Some)
+        }
+    };
+    let up = match numbers(heap, field(heap, map, "up"), ":up")?.as_slice() {
+        [] => [0.0, 1.0, 0.0],
+        [x, y, z] => [*x, *y, *z],
+        _ => return Err(":up is not [x y z]".into()),
+    };
+    let root_parent = match field(heap, map, "root-parent") {
+        Value::Nil => None,
+        value => Some(number(heap, value, ":root-parent")? as usize),
+    };
+    let last_step = match field(heap, map, "step") {
+        Value::Nil => None,
+        value => Some(number(heap, value, ":step")?),
+    };
+    Ok(crate::host::hair::Held {
+        points: vectors(heap, field(heap, map, "points"), ":points")?,
+        previous: vectors(heap, field(heap, map, "previous"), ":previous")?,
+        last_step,
+        posed: optional_vectors(field(heap, map, "posed"), ":posed")?,
+        preload: vectors(heap, field(heap, map, "preload"), ":preload")?,
+        up,
+        nears: place_lists(field(heap, map, "nears"), ":nears")?,
+        nears_at: optional_vectors(field(heap, map, "nears-at"), ":nears-at")?,
+        joints: numbers(heap, field(heap, map, "joints"), ":joints")?
+            .into_iter()
+            .map(|joint| joint as usize)
+            .collect(),
+        root_parent,
+        stiffness: numbers(heap, field(heap, map, "stiffness"), ":stiffness")?,
+        follows: optional_numbers(heap, field(heap, map, "follows"), ":follows")?,
+        damping: numbers(heap, field(heap, map, "damping"), ":damping")?,
+        holds: numbers(heap, field(heap, map, "holds"), ":holds")?,
+        lengths: numbers(heap, field(heap, map, "lengths"), ":lengths")?,
+        margins: numbers(heap, field(heap, map, "margins"), ":margins")?,
+        limits: numbers(heap, field(heap, map, "limits"), ":limits")?,
+        thickness: optional_numbers(heap, field(heap, map, "thickness"), ":thickness")?,
+    })
+}
+
+/// `(%hair-advance locks worlds base twist dt moved-shapes shapes shapes-before constants plan-constants)`
+fn hair_advance(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use crate::host::hair::{Frame, PlanConstants, plan};
+    let who = "hair/advance";
+    let fail = |reason: String| LispError::runtime(format!("{who}: {reason}"));
+    let shapes_now = shapes(heap, arg(args, 6), "the shapes").map_err(fail)?;
+    let before = match arg(args, 7) {
+        Value::Nil => None,
+        value => Some(shapes(heap, value, "the shapes before").map_err(fail)?),
+    };
+    let worlds = items(heap, arg(args, 1), "the worlds")
+        .map_err(fail)?
+        .into_iter()
+        .map(|world| matrix(heap, world, "a world matrix"))
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(fail)?;
+    let base = matrix(heap, arg(args, 2), "the base").map_err(fail)?;
+    let twist = match arg(args, 3) {
+        Value::Nil => None,
+        value => {
+            let parts = items(heap, value, "the twist").map_err(fail)?;
+            match parts.as_slice() {
+                [angle, axis] => {
+                    let angle = number(heap, *angle, "the twist's angle").map_err(fail)?;
+                    let axis = match numbers(heap, *axis, "the twist's axis")
+                        .map_err(fail)?
+                        .as_slice()
+                    {
+                        [x, y, z] => [*x, *y, *z],
+                        _ => return Err(fail("the twist's axis is not [x y z]".into())),
+                    };
+                    Some((angle, axis))
+                }
+                _ => return Err(fail("the twist is not [angle axis]".into())),
+            }
+        }
+    };
+    let dt = number(heap, arg(args, 4), "dt").map_err(fail)?;
+    let moved_shapes = !matches!(arg(args, 5), Value::Nil | Value::Bool(false));
+    let constants = constants_of(heap, arg(args, 8)).map_err(fail)?;
+    let settings = arg(args, 9);
+    let setting = |name: &str| number(heap, field(heap, settings, name), name);
+    let plan_constants = PlanConstants {
+        rate: setting("rate").map_err(fail)?,
+        most_steps: setting("most-steps").map_err(fail)? as usize,
+        drift: setting("drift").map_err(fail)?,
+        clearance: setting("clearance").map_err(fail)?,
+    };
+    let held = items(heap, arg(args, 0), "the locks")
+        .map_err(fail)?
+        .into_iter()
+        .map(|map| held_of(heap, map, shapes_now.len()))
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(fail)?;
+    let frame = Frame {
+        worlds: &worlds,
+        base,
+        twist,
+        dt,
+        moved_shapes,
+        shapes: &shapes_now,
+    };
+    let mut out = Vec::with_capacity(held.len());
+    for lock in &held {
+        if lock
+            .joints
+            .iter()
+            .chain(lock.root_parent.iter())
+            .any(|&joint| joint >= worlds.len())
+        {
+            return Err(fail(format!(
+                "a lock names a joint past the {} worlds",
+                worlds.len()
+            )));
+        }
+        let planned = plan(lock, &frame, &plan_constants);
+        let (points, previous) = moved(
+            &planned.lock,
+            planned.steps,
+            planned.step,
+            before.as_deref(),
+            &shapes_now,
+            &constants,
+        );
+        let mut chain = |points: &[Vector]| {
+            let items: Vec<Value> = points
+                .iter()
+                .map(|&[x, y, z]| {
+                    heap.alloc_vector(vec![Value::float(x), Value::float(y), Value::float(z)])
+                })
+                .collect();
+            heap.alloc_vector(items)
+        };
+        let points = chain(&points);
+        let previous = chain(&previous);
+        let now = chain(&planned.lock.now);
+        let nears: Vec<Value> = planned
+            .lock
+            .nears
+            .iter()
+            .map(|places| {
+                let places: Vec<Value> = places
+                    .iter()
+                    .map(|&place| Value::Int(place as i64))
+                    .collect();
+                heap.alloc_vector(places)
+            })
+            .collect();
+        let nears = heap.alloc_vector(nears);
+        out.push(heap.alloc_vector(vec![
+            points,
+            previous,
+            now,
+            Value::float(planned.step),
+            Value::Bool(planned.fresh),
+            nears,
+        ]));
+    }
+    Ok(heap.alloc_vector(out))
 }
 
 fn field(heap: &Heap, map: Value, name: &str) -> Value {
