@@ -953,7 +953,7 @@ fn spins_of(
             .iter()
             .map(|&share| {
                 (share >= 1.0e-6).then(|| {
-                    let turn = -1.0 * share * angle;
+                    let turn = -share * angle;
                     [turn.cos(), turn.sin()]
                 })
             })
