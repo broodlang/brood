@@ -36,3 +36,23 @@
     (is (nil? (gui/image-thumb (string/->bytes "not an image") 8 8)))
     (is (nil? (gui/image-thumb *png-2x2* 0 8)))
     (is (nil? (gui/image-thumb *png-2x2* 8 -1)))))
+
+(describe "image-thumbs: many images decoded side by side"
+  (test "answers what image-thumb does for each, in order, a bad one nil"
+    (let (sources [*png-2x2* (string/->bytes "not an image") (apply bytes *png-2x2*) *png-2x2*]
+          thumbs (gui/image-thumbs sources 8 8))
+      (assert= (count thumbs) 4)
+      (assert= thumbs (seq/mapv sources (fn (source) (gui/image-thumb source 8 8))))
+      (is (nil? (nth thumbs 1)))
+      (assert= (get (nth thumbs 3) :width) 2)))
+
+  (test "many more images than cores keep their order"
+    (let (sources (seq/mapv (range 64) (fn (index) (if (= 0 (math/rem index 5)) [1 2 3] *png-2x2*)))
+          thumbs (gui/image-thumbs sources 1 1))
+      (assert= (seq/mapv thumbs (fn (thumb) (when thumb (get thumb :width))))
+        (seq/mapv (range 64) (fn (index) (if (= 0 (math/rem index 5)) nil 1))))))
+
+  (test "nothing, a list, and non-positive dims"
+    (assert= (gui/image-thumbs [] 8 8) [])
+    (assert= (count (gui/image-thumbs (list *png-2x2*) 8 8)) 1)
+    (assert= (gui/image-thumbs [*png-2x2* *png-2x2*] 0 8) [nil nil])))

@@ -3450,3 +3450,12 @@ inline path called. Not reproduced here (it needs a preempt to land in that wind
 abort is the evidence, and CI's runs after this are the check. Noted on the way:
 `crates/lisp/tests/preemption_shapes.rs` fails 2 to 4 of its 10 on this desktop at load 20 at
 every commit of the day, this morning's included, and passes in CI.
+
+2026-11-28. **`gui/image-thumbs`: many images decoded side by side.** womanblend's start decoded
+her model's nine textures one after another, 0.4 s, most of it two PNGs of 18.6 and 11.3 MB.
+Spread over processes (`seq/pmap`) the bytes went out and the pixels came back as copies, 35 MB
+of PNG and about 150 MB of RGBA; here each thread reads the image's blob where it lies (an
+`Arc`) and its pixels become the bytes value uncopied (`SharedBlob::from_owned_bytes`, which
+`gui/image-thumb` now uses too, a 64 MB copy saved on a 4096² image). At most one thread a core,
+each taking the next image; the answers are `gui/image-thumb`'s, in order. Guard:
+`tests/image_test.blsp` "image-thumbs".

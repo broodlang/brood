@@ -638,6 +638,12 @@ afterwards wins. Needs --features gui. Returns nil.
     (gui/image-thumb (file/slurp-bytes \"photo.jpg\") 64 64)   ;~> {:width 64 :height 48 :rgba …}, or nil"
   (%image-thumb bytes max-w max-h))
 
+(defn image-thumbs (sources max-w max-h)
+  "`image-thumb` over every item of `sources` (a vector or list of byte sequences), the images decoded side by side on threads of their own: a vector of what `image-thumb` answers for each, `{:width :height :rgba}` or nil, in `sources`' order. For a game's start that decodes its model's textures: one after another, a few large PNGs take a second and more. A bytes item is read where it lies and each image's pixels are not copied again, which spreading the work over processes (`seq/pmap`) cannot avoid.
+
+    (gui/image-thumbs [(file/slurp-bytes \"a.png\") (file/slurp-bytes \"b.jpg\")] 64 64)   ;~> [{:width 64 :height 48 :rgba …} nil]"
+  (%image-thumbs sources max-w max-h))
+
 ;; --- frame capture: what a window paints, as pixels (ADR-609) -------------------------
 
 (defn render-frame (frame &optional spec)

@@ -195,6 +195,7 @@ arg silently becoming `nil`.
 | | `%program-path` | 1–2 | Where a spawn with opts (`:cwd`, `:env`) finds prog — the one resolver every spawn uses (ADR-607) — or nil. `os/which` is it. |
 | | `%halt` | 1 | Terminate the process with exit code. Never returns. |
 | | `%image-thumb` | 3 | Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). |
+| | `%image-thumbs` | 3 | `%image-thumb` over every item of a vector or list of byte sequences, decoded side by side on threads (at most one a core), a bytes item read in place and each image's pixels uncopied: a vector of `{:width :height :rgba}` or nil, in order. Wrapped as `gui/image-thumbs`. |
 | | `%image-write-png` | 2–3 | Write a {:width :height :rgba} map (what image-thumb, `%gui-render-frame` and `%gui-capture` return) to path as a PNG and return path; opts `:crop [x y w h]` and `:scale n` (1..16, nearest neighbour). Wrapped as `gui/write-png`. ADR-609. |
 | **Macro support** | `reflect/macroexpand-1` `reflect/macroexpand` | 1 | expand a form (one step / fully) |
 | | `reflect/gensym` | 0–1 | a fresh, unique symbol (optional name prefix) |

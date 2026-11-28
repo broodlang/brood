@@ -48,6 +48,17 @@ impl SharedBlob {
         })
     }
 
+    /// A raw-bytes blob that takes ownership of `bytes`: the buffer becomes the blob (via
+    /// `into_boxed_slice`, which reallocates only to drop spare capacity) instead of being
+    /// copied, as [`new`](Self::new) must copy a borrowed slice. For a large buffer a native
+    /// made (a decoded image's pixels).
+    pub fn from_owned_bytes(bytes: Vec<u8>) -> Arc<Self> {
+        Arc::new(SharedBlob {
+            contents: Contents::Bytes(bytes.into_boxed_slice()),
+            digest: std::sync::OnceLock::new(),
+        })
+    }
+
     /// A text blob — the only constructor a string's storage may use.
     pub fn from_text(text: &str) -> Arc<Self> {
         Arc::new(SharedBlob {
