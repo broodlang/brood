@@ -192,6 +192,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The newest posed vertices read back for gui/scene-request-posed: {:draw i :positions bytes :normals bytes}, little-endian f32, three a vertex, world space; nil until one is read. Only a pressed (:deform) draw's vertices are kept on the GPU: a request for any other is never served. ADR-841.",
         gui_scene_posed);
     primitives.def(
+        "%gui-mesh-influences",
+        Arity::exact(0),
+        Sig::new(vec![], int),
+        &[],
+        "How many skin influences a vertex gui/mesh takes: 8 (a second four as :joints1 / :weights1, ADR-845). A loader asks it, by whether it is bound at all, to know whether a nest takes eight: one that does not draws only the first four, and the loader should then renormalise them.",
+        gui_mesh_influences);
+    primitives.def(
         "%gui-scene-watch-displacements",
         Arity::exact(2),
         Sig::new(vec![int, any], nil_ty),

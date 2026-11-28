@@ -34,7 +34,16 @@ type Sparse = Vec<(u16, f32)>;
 
 fn sparse(influences: impl IntoIterator<Item = (u16, f32)>) -> Sparse {
     let mut out: Sparse = Vec::with_capacity(8);
-    for (joint, weight) in influences {
+    let influences: Vec<(u16, f32)> = influences.into_iter().collect();
+    // (made to sum to one first, as `Mesh::from_parts` makes them before skinning: a mesh read four
+    // of eight influences gives weights summing to less, and centres worked out from those parted
+    // from the skinning's by up to 55 mm on her body, ADR-845)
+    let total: f32 = influences.iter().map(|(_, weight)| weight.max(0.0)).sum();
+    let scale = if total > 0.0 { 1.0 / total } else { 0.0 };
+    for (joint, weight) in influences
+        .into_iter()
+        .map(|(joint, weight)| (joint, weight * scale))
+    {
         if weight <= 0.0 {
             continue;
         }

@@ -45,6 +45,7 @@ wasm_unsupported_builtins!(
     gui_scene_request_posed,
     gui_scene_posed,
     gui_scene_watch_displacements,
+    gui_mesh_influences,
     gui_scene_displacements,
     gui_key_repeat,
     gui_key_repeats,

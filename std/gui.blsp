@@ -158,6 +158,12 @@
     (or (nil? (gui/scene-posed)) (map? (gui/scene-posed)))   ;=> true"
   (%gui-scene-posed))
 
+(defn mesh-influences ()
+  "How many skin influences a vertex `gui/mesh` takes: 8, its first four as `:joints` / `:weights` and a second four as `:joints1` / `:weights1`, the eight weights made to sum to one together (ADR-845). A loader that may meet an older nest asks `(bound? '%gui-mesh-influences)`: where it is not bound the nest draws only the first four, so the loader renormalises them and leaves the second set out.
+
+    (gui/mesh-influences)   ;=> 8"
+  (%gui-mesh-influences))
+
 (defn scene-watch-displacements (draw vertices)
   "Watch draw `draw`'s displacement (its index in the first scene's `:draws`) at `vertices`, u32 little-endian bytes of vertex indices into its mesh, every frame it can be read: what the contact passes moved each listed vertex by this frame, its drawn place less its skinned place (the relax, the press and its smoothing; ADR-846). nil `vertices` stops it. Read with `gui/scene-displacements`, a frame or two behind: for a solve on the CPU that must follow her drawn skin. Only a pressed (`:deform`) draw is served (ADR-847).
 

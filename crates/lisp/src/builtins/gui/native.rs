@@ -3593,6 +3593,11 @@ pub(in crate::builtins) fn gui_scene_posed(_: &[Value], _: EnvId, heap: &mut Hea
     ]))
 }
 
+/// `(%gui-mesh-influences)` — how many skin influences a vertex gui/mesh takes (ADR-845).
+pub(in crate::builtins) fn gui_mesh_influences(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::int(8))
+}
+
 /// `(%gui-scene-watch-displacements draw vertices)` — watch draw `draw`'s displacement at `vertices`
 /// (u32 bytes), or stop with nil (ADR-847).
 pub(in crate::builtins) fn gui_scene_watch_displacements(
