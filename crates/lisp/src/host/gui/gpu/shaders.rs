@@ -1173,23 +1173,18 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         let out = measured.xyz;
         let distance = measured.w;
-        // a garment (ADR-839) is cloth, not flesh: inside a contact it is laid on the surface, no
-        // eased band, inset or ring, so it stays parallel to her skin pressed a cover deeper by the
-        // same contact along the same direction (a ringed cup and her plain skin crossed near a
-        // finger's end, 61 [10cd1d], 2026-11-27)
-        if ((draw.flags.y & 8192u) != 0u) {
-            if (distance < 0.0) {
-                point = point - out * distance * weight;
-                normal = safe_normalize(normal + (-out - normal) * weight);
-            }
-            continue;
-        }
+        // a garment (ADR-839, amended): pressed as the skin under it is, its eased band and its ring
+        // with it, a cover's standoff short of the contact (`vertex_standoff`), so the two stay one
+        // surface round a hand; only the firm inset is flesh's alone. Laid flat while her skin round
+        // it eased in and rose in a ring, her breast came up through the cup round her hand
+        // (womanblend-67, 2026-11-28, docs/film/bikini-67/rub-2026-11-28/)
+        let cloth = (draw.flags.y & 8192u) != 0u;
         // (`mesh::deform_by_contacts`: the patch's edge eased over a band, a firm part sunk a
         // little behind the surface, the ring rising from nothing at the edge)
         let band = EDGE_BAND + EDGE_SPREAD * depth;
         let eased = smooth_outside(distance, band);
         let into = 1.0 - smoothstep(-band, band, distance);
-        let inset = FIRM_INSET * depth * clamp(1.0 - softness / FIRM_SOFTNESS, 0.0, 1.0) * into;
+        let inset = select(FIRM_INSET * depth * clamp(1.0 - softness / FIRM_SOFTNESS, 0.0, 1.0) * into, 0.0, cloth);
         let moved = min(eased - distance - inset, MAX_SQUASH * softness) * weight;
         var lift = 0.0;
         var slope = 0.0;
