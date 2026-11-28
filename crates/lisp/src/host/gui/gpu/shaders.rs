@@ -1221,6 +1221,84 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
     posed_out[at + 1u] = vec4<f32>(normal, 0.0);
     posed_out[at + 2u] = vec4<f32>(safe_normalize(tangent.xyz - normal * dot(normal, tangent.xyz)), tangent.w);
 }
+// The press made unable to fold its skin (ADR-844). `cs_contact_deform` moves each vertex on its
+// own, along the contact's direction by its own distance: where her skin curves into a fold (the top
+// of her inner thigh into her groin) points on both sides of the curve were laid onto one strip of
+// the contact's plane and the triangles between them turned over, and the fold cast the lamp's
+// shadow as a dark crease. So the press is taken as a displacement a point (what it moved each
+// point by, against where the relax left it), that field smoothed over the skin's rings
+// `PRESS_SMOOTH_ITERATIONS` times (`PRESS_SMOOTH_STEP` of the way to its ring's mean a pass, the
+// pressed area grown by a ring a pass, so its edge eases out too), and each vertex put back where
+// the relax left its point plus its point's smoothed displacement. A field smoothed this way changes
+// slowly from point to point, so neighbours on two sides of a curve can no longer land together.
+const PRESS_SMOOTH_STEP: f32 = 0.5;
+
+// each point's press: where the press put its vertex less where the relax left it (the work's first
+// half), into the work's posed slots, `w` whether it moved
+@compute @workgroup_size(64)
+fn cs_press_gather(@builtin(global_invocation_id) id: vec3<u32>) {
+    let count = ring_point_count();
+    if (id.x >= count) {
+        return;
+    }
+    let before = ring_work(count + id.x).xyz;
+    let after = ring_posed(id.x);
+    let moved = after - before;
+    ring_set_work(id.x, vec4<f32>(moved, select(0.0, 1.0, dot(moved, moved) > 1e-14)));
+}
+
+// one smoothing pass of the press field from one set of slots into another: a point in or beside
+// the pressed area moved toward its ring's mean
+fn press_smooth(id: u32, read_from: u32, write_to: u32) {
+    let count = ring_point_count();
+    if (id >= count) {
+        return;
+    }
+    let here = ring_work(read_from + id);
+    let start = ring_offset(id);
+    let end = ring_offset(id + 1u);
+    if (end <= start) {
+        ring_set_work(write_to + id, here);
+        return;
+    }
+    var mean = vec3<f32>(0.0);
+    var near = here.w;
+    for (var slot = start; slot < end; slot = slot + 1u) {
+        let other = ring_work(read_from + ring_neighbour(slot));
+        mean = mean + other.xyz;
+        near = max(near, other.w);
+    }
+    mean = mean / f32(end - start);
+    if (near <= 0.0) {
+        ring_set_work(write_to + id, here);
+        return;
+    }
+    ring_set_work(write_to + id, vec4<f32>(here.xyz + (mean - here.xyz) * PRESS_SMOOTH_STEP, near));
+}
+
+@compute @workgroup_size(64)
+fn cs_press_smooth_out(@builtin(global_invocation_id) id: vec3<u32>) {
+    press_smooth(id.x, 0u, 2u * ring_point_count());
+}
+
+@compute @workgroup_size(64)
+fn cs_press_smooth_back(@builtin(global_invocation_id) id: vec3<u32>) {
+    press_smooth(id.x, 2u * ring_point_count(), 0u);
+}
+
+// each vertex where the relax left its point plus its point's smoothed press (the passes end in the
+// posed slots)
+@compute @workgroup_size(64)
+fn cs_press_scatter(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= draw.deform.w) {
+        return;
+    }
+    let count = ring_point_count();
+    let point = ring_weld(id.x);
+    let at = (draw.deform.y + id.x) * 3u;
+    posed_out[at] = vec4<f32>(ring_work(count + point).xyz + ring_work(point).xyz, 1.0);
+}
+
 // collider `index`'s centre this frame: its joints' palette blended by its weights, as a vertex
 // of the skin it was fitted to is skinned (linear: a sphere moves rigidly with its patch), then the
 // draw's model matrix; at rest where no joint of the palette moves it

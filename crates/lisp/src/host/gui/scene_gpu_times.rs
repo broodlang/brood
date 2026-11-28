@@ -20,6 +20,9 @@ pub struct SceneGpuSample {
     pub shadow_us: f64,
     /// The colour passes (rasterising, shading, the multisample resolve), over every scene timed.
     pub scene_us: f64,
+    /// The contact compute passes (posing, relax, press and its smoothing, ADR-844), over every
+    /// scene timed.
+    pub contacts_us: f64,
     /// How many scenes were timed (at most `gpu::scene_timer::TIMED_SCENES`).
     pub scenes: u32,
 }
@@ -52,6 +55,7 @@ mod tests {
             record(SceneGpuSample {
                 shadow_us: index as f64,
                 scene_us: 0.0,
+                contacts_us: 0.0,
                 scenes: 1,
             });
         }

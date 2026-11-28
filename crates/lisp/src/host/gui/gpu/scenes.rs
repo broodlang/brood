@@ -93,6 +93,12 @@ pub(super) struct MeshRing {
 /// of 16, 48 and 96 filmed side by side (c8's pick for the user, 2026-11-27).
 pub(super) const RELAX_ITERATIONS: u32 = 48;
 
+/// How many smoothing passes the press's displacement takes (ADR-844), each moving a point
+/// `PRESS_SMOOTH_STEP` of the way to its ring's mean: each reaches a ring further. Four take the
+/// kink out of the curve from her inner thigh into her groin as well as eight did (filmed side by
+/// side) at half the cost. Even, so the passes end where the scatter reads.
+pub(super) const PRESS_SMOOTH_ITERATIONS: u32 = 4;
+
 /// A pressed mesh's relax data (ADR-822), built once from its rest shape.
 fn mesh_ring(device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Mesh) -> Option<MeshRing> {
     let mut points: std::collections::HashMap<[i64; 3], u32> = std::collections::HashMap::new();
@@ -425,6 +431,8 @@ pub(super) struct MeshGpu {
     garment_push_out_pipeline: wgpu::ComputePipeline,
     /// The relax passes (ADR-822): gather, mask, even, odd, scatter.
     contact_relax_pipelines: [wgpu::ComputePipeline; 5],
+    /// The press smoothed so it cannot fold her skin (ADR-844): gather, out, back, scatter.
+    contact_press_pipelines: [wgpu::ComputePipeline; 4],
     no_ring: wgpu::Buffer,
     no_ring_work: wgpu::Buffer,
     no_posed: wgpu::Buffer,
@@ -1343,6 +1351,12 @@ impl MeshGpu {
             contact_pipeline("cs_relax_odd"),
             contact_pipeline("cs_relax_scatter"),
         ];
+        let contact_press_pipelines = [
+            contact_pipeline("cs_press_gather"),
+            contact_pipeline("cs_press_smooth_out"),
+            contact_pipeline("cs_press_smooth_back"),
+            contact_pipeline("cs_press_scatter"),
+        ];
         // bound where a scene presses nothing: a posed vertex's worth of zeros
         let no_posed = buffer(device, "no posed vertices", 48, storage_usage);
         // (bound for the relax of a pressed mesh that has none, ADR-822)
@@ -1356,6 +1370,7 @@ impl MeshGpu {
             contact_deform_pipeline,
             garment_push_out_pipeline,
             contact_relax_pipelines,
+            contact_press_pipelines,
             no_posed,
             no_ring,
             no_ring_work,
@@ -1941,7 +1956,16 @@ impl MeshGpu {
                     });
                 // posed once by the compute passes: pressed by contacts, or loose (with no contacts
                 // the passes only pose it)
-                let pressed = (!scene.contacts.is_empty() || loose.is_some())
+                // (and a draw a probe asked to read back, so it is posed even with nothing to press
+                // it, ADR-841 amended)
+                let asked_here = plans.is_empty()
+                    && posed_asked.is_some_and(|asked| {
+                        scene
+                            .draws
+                            .get(asked)
+                            .is_some_and(|wanted| std::ptr::eq(wanted, draw))
+                    });
+                let pressed = (!scene.contacts.is_empty() || loose.is_some() || asked_here)
                     && crate::host::gui::mesh::pressed(draw);
                 let deform = if pressed {
                     let start = pressed_vertices;
@@ -2380,34 +2404,57 @@ impl MeshGpu {
                         Some((draw.at, mesh.vertex_count, points, group))
                     })
                     .collect();
+                // (timed: `:contacts` in `gui/scene-gpu-times`, ADR-844)
+                let contact_stamps = self
+                    .timer
+                    .as_mut()
+                    .and_then(|timer| timer.contact_stamps(index));
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("scene contacts"),
-                    timestamp_writes: None,
+                    timestamp_writes: contact_stamps
+                        .and_then(|pair| Some(self.timer.as_ref()?.compute_writes(pair))),
                 });
                 // (posed; then its squeezed skin relaxed, ADR-822: gathered by point, masked by its
                 // squeeze, relaxed `RELAX_ITERATIONS` times between two halves, scattered back to
                 // its vertices; then pressed)
+                // (then the press, its displacement smoothed over the same rings so it cannot fold
+                // her skin, ADR-844: gathered by point, smoothed `PRESS_SMOOTH_ITERATIONS` times,
+                // scattered back; then the push-out net, a garment's vertices, every other draw
+                // returning at once). Each step: its pipeline, whether it runs by point, and whether
+                // it needs the mesh's rings (skipped for a mesh without)
                 let [gather, mask, even, odd, scatter] = &self.contact_relax_pipelines;
-                let mut steps: Vec<(&wgpu::ComputePipeline, bool)> = vec![
-                    (&self.contact_depth_pipeline, false),
-                    (gather, true),
-                    (mask, true),
+                let [press_gather, press_out, press_back, press_scatter] =
+                    &self.contact_press_pipelines;
+                let mut steps: Vec<(&wgpu::ComputePipeline, bool, bool)> = vec![
+                    (&self.contact_depth_pipeline, false, false),
+                    (gather, true, true),
+                    (mask, true, true),
                 ];
                 for iteration in 0..RELAX_ITERATIONS {
-                    steps.push((if iteration % 2 == 0 { even } else { odd }, true));
+                    steps.push((if iteration % 2 == 0 { even } else { odd }, true, true));
                 }
-                steps.push((scatter, false));
-                steps.push((&self.contact_deform_pipeline, false));
-                let last = steps.len() - 1;
-                // (then the push-out net: a garment's vertices, every other draw returning at once)
-                steps.push((&self.garment_push_out_pipeline, false));
-                for (step, (pipeline, by_point)) in steps.iter().enumerate() {
-                    let relaxing = step > 0 && step < last;
+                steps.push((scatter, false, true));
+                steps.push((&self.contact_deform_pipeline, false, false));
+                steps.push((press_gather, true, true));
+                for iteration in 0..PRESS_SMOOTH_ITERATIONS {
+                    steps.push((
+                        if iteration % 2 == 0 {
+                            press_out
+                        } else {
+                            press_back
+                        },
+                        true,
+                        true,
+                    ));
+                }
+                steps.push((press_scatter, false, true));
+                steps.push((&self.garment_push_out_pipeline, false, false));
+                for (pipeline, by_point, needs_ring) in steps.iter() {
                     pass.set_pipeline(pipeline);
                     pass.set_bind_group(0, &shadow_scene_group, &[scene_offset]);
                     pass.set_bind_group(2, &contact_morph_group, &[]);
                     for (at, vertex_count, points, group) in &pressed {
-                        if relaxing && *points == 0 {
+                        if *needs_ring && *points == 0 {
                             continue;
                         }
                         pass.set_bind_group(1, &draw_group, &[(*at as u64 * DRAW_BYTES) as u32]);

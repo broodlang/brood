@@ -13,8 +13,9 @@ use crate::host::gui::scene_gpu_times::{SceneGpuSample, record};
 
 /// How many scenes a frame are timed; any more are drawn untimed.
 pub(super) const TIMED_SCENES: usize = 4;
-/// Two stamps round the shadow passes and two round the colour pass, a scene.
-const PASS_QUERIES: u32 = 4 * TIMED_SCENES as u32;
+/// Two stamps round the shadow passes, two round the colour pass and two round the contact pass
+/// (ADR-844), a scene.
+const PASS_QUERIES: u32 = 6 * TIMED_SCENES as u32;
 /// Under `BROOD_GUI_GPU_TIMES=draws`, a stamp before each draw of a colour pass and one after
 /// its last, at most this many a frame: past it the rest of the frame's draws go untimed.
 const DRAW_QUERIES: u32 = 1024;
@@ -31,6 +32,8 @@ const FAILED: u8 = 3;
 struct SceneStamps {
     shadow: Option<(u32, u32)>,
     colour: Option<(u32, u32)>,
+    /// The contact compute pass (ADR-805, ADR-844): posed, relaxed, pressed, smoothed.
+    contacts: Option<(u32, u32)>,
     /// Each timed draw of the colour pass, in order, with the stamp written before it; the
     /// stamp after the last is `draws_end`.
     draws: Vec<DrawStamp>,
@@ -237,6 +240,25 @@ impl SceneTimer {
         pair
     }
 
+    /// Scene `scene`'s contact pass stamps (ADR-844).
+    pub(super) fn contact_stamps(&mut self, scene: usize) -> Option<(u32, u32)> {
+        if scene >= TIMED_SCENES {
+            return None;
+        }
+        let pair = self.take();
+        self.scene_entry(scene).contacts = pair;
+        pair
+    }
+
+    /// The contact pass's timestamp writes: its start and end index into the query set.
+    pub(super) fn compute_writes(&self, pair: (u32, u32)) -> wgpu::ComputePassTimestampWrites<'_> {
+        wgpu::ComputePassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: Some(pair.0),
+            end_of_pass_write_index: Some(pair.1),
+        }
+    }
+
     /// Scene `scene`'s colour pass stamps.
     pub(super) fn colour_stamps(&mut self, scene: usize) -> Option<(u32, u32)> {
         if scene >= TIMED_SCENES {
@@ -357,6 +379,7 @@ fn measure(stamps: &[SceneStamps], ticks: &[u64], period: f64) -> Option<SceneGp
     Some(SceneGpuSample {
         shadow_us: stamps.iter().map(|scene| span(scene.shadow)).sum(),
         scene_us: stamps.iter().map(|scene| span(scene.colour)).sum(),
+        contacts_us: stamps.iter().map(|scene| span(scene.contacts)).sum(),
         scenes: timed as u32,
     })
 }

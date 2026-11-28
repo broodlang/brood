@@ -3521,6 +3521,10 @@ pub(in crate::builtins) fn gui_scene_gpu_times(
         maps.push(heap.map_from_pairs(vec![
             (value::kw("shadow"), Value::float(sample.shadow_us / 1000.0)),
             (value::kw("scene"), Value::float(sample.scene_us / 1000.0)),
+            (
+                value::kw("contacts"),
+                Value::float(sample.contacts_us / 1000.0),
+            ),
             (value::kw("scenes"), Value::int(i64::from(sample.scenes))),
         ]));
     }
