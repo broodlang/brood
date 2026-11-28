@@ -14,7 +14,7 @@ use crate::host::gui::mesh::{
 
 /// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4,
 /// curvature 1.
-pub(super) const VERTEX_FLOATS: usize = 34;
+pub(super) const VERTEX_FLOATS: usize = 42;
 /// A posed vertex in a scene's posed buffer: five vec4 (place, normal, tangent as the contact
 /// passes leave them; place and normal as skinned, ADR-846), `POSED_STRIDE` in `MESH_SRC`.
 pub(super) const POSED_BYTES: u64 = 80;
@@ -882,7 +882,9 @@ impl MeshGpu {
                 7 => Float32x3,
                 8 => Float32x2,
                 9 => Float32,
-                10 => Float32
+                10 => Float32,
+                11 => Uint32x4,
+                12 => Float32x4
             ],
         });
         // a colour pipeline: its faces, whether it blends, and its fragment entry, depth state and
@@ -1526,6 +1528,13 @@ impl MeshGpu {
                     .unwrap_or(0.0)
                     .to_le_bytes(),
             );
+            // its second four joints and weights (ADR-845; none, all weight 0, for four)
+            let (joints1, weights1) = (
+                mesh.joints1.get(index).copied().unwrap_or([0u16; 4]),
+                mesh.weights1.get(index).copied().unwrap_or([0.0f32; 4]),
+            );
+            vertices.extend(words_bytes(&joints1.map(u32::from)));
+            vertices.extend(floats_bytes(&weights1));
             // the skin it lies on, for a garment carried by it (ADR-846): three vertex indices as
             // floats (exact below 2^24) and their barycentric weights; weights 0: not carried
             let (skin, bary) = mesh

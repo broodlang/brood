@@ -1369,6 +1369,8 @@ fn a_bent_tube_turns_about_its_centres_alike_on_both_painters() {
         &blended.indices,
         &blended.joints,
         &blended.weights,
+        &blended.joints1,
+        &blended.weights1,
         2,
     );
     let turning = Arc::new(
@@ -2406,6 +2408,131 @@ fn a_carried_garment_keeps_its_offset_over_the_pressed_skin_on_the_gpu() {
             failures.push(format!(
                 "{name}: the cloth does not keep its 5 mm over the pressed skin: skin {skin_z}, cloth {cloth_z}"
             ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn eight_influences_skin_on_the_gpu_as_on_the_cpu() {
+    // ADR-845: a vertex on eight joints, its weights spread over both sets of four and turned about
+    // its centre of rotation (ADR-814), posed by the GPU's compute passes (read back, ADR-841) as
+    // `skin_matrix` poses it on the CPU
+    use crate::host::gui::mesh::{JointRotations, joint_rotations, skin_matrix, transform};
+    use crate::host::gui::scene_posed;
+    let positions: Vec<f32> = vec![0.0, 0.0, 0.5, 0.1, 0.0, 0.5, 0.0, 0.1, 0.5];
+    let normals: Vec<f32> = [0.0, 0.0, -1.0].repeat(3);
+    let joints: Vec<u8> = (0..3).flat_map(|_| [0u8, 1, 2, 3]).collect();
+    let joints1: Vec<u8> = (0..3).flat_map(|_| [4u8, 5, 6, 7]).collect();
+    let weights: Vec<f32> = (0..3).flat_map(|_| [0.2f32, 0.15, 0.1, 0.1]).collect();
+    let weights1: Vec<f32> = (0..3).flat_map(|_| [0.15f32, 0.1, 0.1, 0.1]).collect();
+    let centres: Vec<f32> = [0.05, 0.03, 0.5].repeat(3);
+    let mesh = Arc::new(
+        Mesh::from_parts(MeshParts {
+            positions: bytes_of(&positions),
+            normals: bytes_of(&normals),
+            joints,
+            weights: bytes_of(&weights),
+            joints1,
+            weights1: bytes_of(&weights1),
+            centres: bytes_of(&centres),
+            ..MeshParts::default()
+        })
+        .expect("a triangle on eight joints"),
+    );
+    // eight joints each turned a little about its own axis and moved
+    let palette: Vec<f32> = (0..8)
+        .flat_map(|joint| {
+            let angle = 0.1 * (joint as f32 + 1.0);
+            let (sine, cosine) = angle.sin_cos();
+            let shift = 0.01 * joint as f32;
+            match joint % 3 {
+                0 => [
+                    1.0, 0.0, 0.0, 0.0, 0.0, cosine, sine, 0.0, 0.0, -sine, cosine, 0.0, shift,
+                    0.0, 0.0, 1.0,
+                ],
+                1 => [
+                    cosine, 0.0, -sine, 0.0, 0.0, 1.0, 0.0, 0.0, sine, 0.0, cosine, 0.0, 0.0,
+                    shift, 0.0, 1.0,
+                ],
+                _ => [
+                    cosine, sine, 0.0, 0.0, -sine, cosine, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+                    shift, 1.0,
+                ],
+            }
+        })
+        .collect();
+    let rotations: JointRotations = joint_rotations(&palette);
+    let expected: Vec<[f32; 3]> = (0..3)
+        .map(|index| {
+            let skin =
+                skin_matrix(&mesh, Some(&palette), Some(&rotations), index).expect("skinned");
+            let at = [
+                positions[index * 3],
+                positions[index * 3 + 1],
+                positions[index * 3 + 2],
+            ];
+            let moved = transform(&skin, at, 1.0);
+            [moved[0], moved[1], moved[2]]
+        })
+        .collect();
+    let mut scene = self::scene();
+    scene.palettes = vec![Arc::from(palette.clone())];
+    scene.draws = vec![Draw {
+        loose: None,
+        mesh: 1,
+        model: [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+        palette: Some(0),
+        morphs: vec![],
+        material: Material {
+            deform: true,
+            double_sided: true,
+            ..Material::default()
+        },
+    }];
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, 32, 32) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &mesh);
+        scene_posed::request(0);
+        let mut got = None;
+        for _ in 0..8 {
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if let Some(sample) = scene_posed::latest()
+                && scene_posed::requested().is_none()
+            {
+                got = Some(sample.positions);
+                break;
+            }
+        }
+        let Some(got) = got else {
+            failures.push(format!("{name}: never read back"));
+            continue;
+        };
+        for (index, want) in expected.iter().enumerate() {
+            let have = [got[index * 3], got[index * 3 + 1], got[index * 3 + 2]];
+            let off = (0..3)
+                .map(|axis| (have[axis] - want[axis]).abs())
+                .fold(0.0f32, f32::max);
+            if off > 1e-5 {
+                failures.push(format!(
+                    "{name}: vertex {index} at {have:?}, the CPU's {want:?}"
+                ));
+            }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

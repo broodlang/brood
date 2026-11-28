@@ -3297,6 +3297,8 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         joints: mesh_bytes(heap, map, "joints")?,
         joints_wide,
         weights: mesh_bytes(heap, map, "weights")?,
+        joints1: mesh_bytes(heap, map, "joints1")?,
+        weights1: mesh_bytes(heap, map, "weights1")?,
         indices: mesh_bytes(heap, map, "indices")?,
         indices_wide,
         morphs: Vec::new(),
@@ -3372,6 +3374,8 @@ pub(in crate::builtins) fn gui_skin_centres(
         joints: mesh_bytes(heap, map, "joints")?,
         joints_wide: keyword_is(heap, "joint-type", "u16"),
         weights: mesh_bytes(heap, map, "weights")?,
+        joints1: mesh_bytes(heap, map, "joints1")?,
+        weights1: mesh_bytes(heap, map, "weights1")?,
         indices: mesh_bytes(heap, map, "indices")?,
         indices_wide: keyword_is(heap, "index-type", "u32"),
         ..crate::host::gui::mesh::MeshParts::default()
@@ -3384,6 +3388,8 @@ pub(in crate::builtins) fn gui_skin_centres(
         &mesh.indices,
         &mesh.joints,
         &mesh.weights,
+        &mesh.joints1,
+        &mesh.weights1,
         workers,
     );
     let bytes: Vec<u8> = found
@@ -3444,6 +3450,8 @@ pub(in crate::builtins) fn gui_posed_positions(
         joints: mesh_bytes(heap, map, "joints")?,
         joints_wide: keyword_is(heap, "joint-type", "u16"),
         weights: mesh_bytes(heap, map, "weights")?,
+        joints1: mesh_bytes(heap, map, "joints1")?,
+        weights1: mesh_bytes(heap, map, "weights1")?,
         indices: mesh_bytes(heap, map, "indices")?,
         indices_wide: keyword_is(heap, "index-type", "u32"),
         centres: mesh_bytes(heap, map, "centres")?,

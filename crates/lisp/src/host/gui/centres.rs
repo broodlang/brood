@@ -32,9 +32,9 @@ pub const CUTOFF: f32 = 1e-6;
 /// A vertex's or triangle's weights as `(joint, weight)` pairs, the joints distinct.
 type Sparse = Vec<(u16, f32)>;
 
-fn sparse(joints: [u16; 4], weights: [f32; 4]) -> Sparse {
-    let mut out: Sparse = Vec::with_capacity(4);
-    for (joint, weight) in joints.into_iter().zip(weights) {
+fn sparse(influences: impl IntoIterator<Item = (u16, f32)>) -> Sparse {
+    let mut out: Sparse = Vec::with_capacity(8);
+    for (joint, weight) in influences {
         if weight <= 0.0 {
             continue;
         }
@@ -73,21 +73,29 @@ pub fn similarity(p: &[(u16, f32)], v: &[(u16, f32)]) -> f32 {
 }
 
 /// Every vertex's centre of rotation (see the module): `positions` at rest, triangles `indices`,
-/// and each vertex's four `joints` and `weights`; computed by `workers` threads.
+/// and each vertex's four `joints` and `weights`, with its second four `joints1` and `weights1`
+/// when it has eight (ADR-845; empty slices for four); computed by `workers` threads.
 pub fn centres(
     positions: &[[f32; 3]],
     indices: &[u32],
     joints: &[[u16; 4]],
     weights: &[[f32; 4]],
+    joints1: &[[u16; 4]],
+    weights1: &[[f32; 4]],
     workers: usize,
 ) -> Vec<[f32; 3]> {
     let count = positions.len();
     let vertex_weights: Vec<Sparse> = (0..count)
         .map(|index| {
-            sparse(
-                joints.get(index).copied().unwrap_or([0; 4]),
-                weights.get(index).copied().unwrap_or([0.0; 4]),
-            )
+            let set = |joints: &[[u16; 4]], weights: &[[f32; 4]]| {
+                joints
+                    .get(index)
+                    .copied()
+                    .unwrap_or([0; 4])
+                    .into_iter()
+                    .zip(weights.get(index).copied().unwrap_or([0.0; 4]))
+            };
+            sparse(set(joints, weights).chain(set(joints1, weights1)))
         })
         .collect();
     let triangles: Vec<[usize; 3]> = indices
@@ -247,7 +255,7 @@ mod tests {
                 indices.extend_from_slice(&[a, b, c, b, d, c]);
             }
         }
-        let found = centres(&positions, &indices, &joints, &weights, 4);
+        let found = centres(&positions, &indices, &joints, &weights, &[], &[], 4);
         // the ring at y = 0 (ring 10): blended half and half
         let blended = found[10 * sides];
         let off_axis = (blended[0] * blended[0] + blended[2] * blended[2]).sqrt();
@@ -321,6 +329,8 @@ mod tests {
             &plain.indices,
             &plain.joints,
             &plain.weights,
+            &plain.joints1,
+            &plain.weights1,
             2,
         );
         let mut turning = plain.clone();
@@ -402,7 +412,7 @@ mod tests {
                 indices.extend_from_slice(&[a, b, c, b, d, c]);
             }
         }
-        let found = centres(&positions, &indices, &joints, &weights, 2);
+        let found = centres(&positions, &indices, &joints, &weights, &[], &[], 2);
         // the seam's two vertices on the joint's ring: column 0 and column `sides`
         let (left, right) = (found[10 * columns], found[10 * columns + sides]);
         let apart = (0..3)

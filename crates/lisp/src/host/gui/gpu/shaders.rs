@@ -866,13 +866,14 @@ fn contact_skipped(slot: u32, input: VertexIn) -> bool {
     let only = contact_list.shapes[slot * 6u + 4u];
     var own = 0.0;
     var one = 0.0;
-    for (var at = 0u; at < 4u; at = at + 1u) {
-        let joint = f32(input.joints[at]);
+    for (var at = 0u; at < 8u; at = at + 1u) {
+        let joint = f32(influence_joint(input, at));
+        let weight = influence_weight(input, at);
         if (any(vec4<f32>(joint) == skip)) {
-            own = own + input.weights[at];
+            own = own + weight;
         }
         if (any(vec4<f32>(joint) == only)) {
-            one = one + input.weights[at];
+            one = one + weight;
         }
     }
     return own > 0.5 || (only.x >= 0.0 && one <= 0.5);
@@ -901,7 +902,7 @@ fn contact_within(slot: u32, point: vec3<f32>) -> f32 {
 
 // a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 28 a vertex)
 fn vertex_at(index: u32) -> VertexIn {
-    let at = index * 34u;
+    let at = index * 42u;
     var input: VertexIn;
     input.index = index;
     input.position = vec3<f32>(mesh_vertices[at], mesh_vertices[at + 1u], mesh_vertices[at + 2u]);
@@ -915,6 +916,8 @@ fn vertex_at(index: u32) -> VertexIn {
     input.uv2 = vec2<f32>(mesh_vertices[at + 24u], mesh_vertices[at + 25u]);
     input.loose_weight = mesh_vertices[at + 26u];
     input.standoff = mesh_vertices[at + 27u];
+    input.joints1 = vec4<u32>(bitcast<u32>(mesh_vertices[at + 28u]), bitcast<u32>(mesh_vertices[at + 29u]), bitcast<u32>(mesh_vertices[at + 30u]), bitcast<u32>(mesh_vertices[at + 31u]));
+    input.weights1 = vec4<f32>(mesh_vertices[at + 32u], mesh_vertices[at + 33u], mesh_vertices[at + 34u], mesh_vertices[at + 35u]);
     return input;
 }
 
@@ -923,9 +926,9 @@ fn vertex_at(index: u32) -> VertexIn {
 const POSED_STRIDE: u32 = 5u;
 
 // the skin vertex `index` of a garment's vertex lies on (ADR-846): its three skin vertices, as
-// indices into the carrying draw's mesh, and their barycentric weights; words 28 … 33 of the vertex
+// indices into the carrying draw's mesh, and their barycentric weights; words 36 … 41 of the vertex
 fn carried_skin(index: u32) -> array<vec4<f32>, 2> {
-    let at = index * 34u + 28u;
+    let at = index * 42u + 36u;
     return array<vec4<f32>, 2>(
         vec4<f32>(mesh_vertices[at], mesh_vertices[at + 1u], mesh_vertices[at + 2u], 0.0),
         vec4<f32>(mesh_vertices[at + 3u], mesh_vertices[at + 4u], mesh_vertices[at + 5u], 0.0));
@@ -1482,7 +1485,26 @@ struct VertexIn {
     @location(9) loose_weight: f32,
     // how far short of a contact's surface it stops when pressed (ADR-824: hair lying between)
     @location(10) standoff: f32,
+    // its second four joints and weights (ADR-845: eight influences a vertex; none, all weight 0,
+    // for a mesh that gives four)
+    @location(11) joints1: vec4<u32>,
+    @location(12) weights1: vec4<f32>,
 };
+
+// influence `slot` (0 … 7) of a vertex: its first four joints, then its second four (ADR-845)
+fn influence_joint(input: VertexIn, slot: u32) -> u32 {
+    if (slot < 4u) {
+        return input.joints[slot];
+    }
+    return input.joints1[slot - 4u];
+}
+
+fn influence_weight(input: VertexIn, slot: u32) -> f32 {
+    if (slot < 4u) {
+        return input.weights[slot];
+    }
+    return input.weights1[slot - 4u];
+}
 struct VertexOut {
     // invariant: the hair's depth pass and its front pass must put a sample at the same depth
     // to the bit, for the front pass's equal test (ADR-802)
@@ -1626,9 +1648,9 @@ fn skinning(input: VertexIn, start: u32, joint_count: u32) -> mat4x4<f32> {
     var moving = 0u;
     var heaviest = 0u;
     var most = 0.0;
-    for (var slot = 0u; slot < 4u; slot = slot + 1u) {
-        let joint = input.joints[slot];
-        let weight = input.weights[slot];
+    for (var slot = 0u; slot < 8u; slot = slot + 1u) {
+        let joint = influence_joint(input, slot);
+        let weight = influence_weight(input, slot);
         if (weight > 0.0 && joint < joint_count) {
             skin = skin + palette[start + joint] * weight;
             moving = moving + 1u;
@@ -1644,9 +1666,9 @@ fn skinning(input: VertexIn, start: u32, joint_count: u32) -> mat4x4<f32> {
     let reference = palette[start + joint_count + heaviest][0];
     var quaternion = vec4<f32>(0.0);
     var stretch = mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
-    for (var slot = 0u; slot < 4u; slot = slot + 1u) {
-        let joint = input.joints[slot];
-        let weight = input.weights[slot];
+    for (var slot = 0u; slot < 8u; slot = slot + 1u) {
+        let joint = influence_joint(input, slot);
+        let weight = influence_weight(input, slot);
         if (weight > 0.0 && joint < joint_count) {
             let entry = palette[start + joint_count + joint];
             let q = entry[0];

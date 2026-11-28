@@ -295,6 +295,10 @@ pub struct Mesh {
     /// weights; empty for a rigid mesh.
     pub joints: Vec<[u16; 4]>,
     pub weights: Vec<[f32; 4]>,
+    /// Its second four joints and weights (ADR-845: eight influences a vertex, glTF's JOINTS_1
+    /// and WEIGHTS_1), the eight weights summing to one together; empty for a mesh that gives four.
+    pub joints1: Vec<[u16; 4]>,
+    pub weights1: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
     pub morphs: Vec<Morph>,
     /// How sharply the surface curves at each vertex, 1 over its radius in the mesh's own
@@ -470,6 +474,8 @@ impl MeshBounds {
         positions: &[[f32; 3]],
         joints: &[[u16; 4]],
         weights: &[[f32; 4]],
+        joints1: &[[u16; 4]],
+        weights1: &[[f32; 4]],
         morphs: &[Morph],
     ) -> MeshBounds {
         let mut rigid = None;
@@ -477,7 +483,13 @@ impl MeshBounds {
         for (index, position) in positions.iter().enumerate() {
             let mut moved = false;
             if !joints.is_empty() {
-                for (joint, weight) in joints[index].iter().zip(weights[index]) {
+                let second = joints1.get(index).zip(weights1.get(index));
+                let influences = joints[index].iter().zip(weights[index]).chain(
+                    second
+                        .into_iter()
+                        .flat_map(|(joints, weights)| joints.iter().zip(*weights)),
+                );
+                for (joint, weight) in influences {
                     if weight > 0.0 {
                         moved = true;
                         let grown = extend(by_joint.get(joint).copied(), *position);
@@ -538,6 +550,10 @@ pub struct MeshParts {
     pub joints: Vec<u8>,
     pub joints_wide: bool,
     pub weights: Vec<u8>,
+    /// The second four joints (the same width) and weights, for eight influences a vertex
+    /// (ADR-845); empty for four.
+    pub joints1: Vec<u8>,
+    pub weights1: Vec<u8>,
     /// `u16` or `u32` indices, per `indices_wide`; empty for a plain triangle list (the
     /// vertices taken three at a time, as glTF allows).
     pub indices: Vec<u8>,
@@ -663,6 +679,24 @@ fn floats<const N: usize>(name: &str, bytes: &[u8], count: usize) -> Result<Vec<
 }
 
 impl Mesh {
+    /// Vertex `index`'s eight influences, `(joint, weight)`: its first four, then its second four
+    /// (ADR-845); a slot it does not have is joint 0 at weight 0, which every reader skips.
+    pub fn influences(&self, index: usize) -> [(u16, f32); 8] {
+        let mut out = [(0u16, 0.0f32); 8];
+        let sets = [
+            self.joints.get(index).zip(self.weights.get(index)),
+            self.joints1.get(index).zip(self.weights1.get(index)),
+        ];
+        for (set, found) in sets.into_iter().enumerate() {
+            if let Some((joints, weights)) = found {
+                for slot in 0..4 {
+                    out[set * 4 + slot] = (joints[slot], weights[slot]);
+                }
+            }
+        }
+        out
+    }
+
     /// The mesh `parts` describe, or why it is not one: a byte count that is not a whole
     /// number of entries per vertex, an index past the last vertex, a ragged triangle list, a
     /// mesh too big for the GPU target to hold.
@@ -764,19 +798,18 @@ impl Mesh {
         } else {
             Some(floats::<4>("tangents", &parts.tangents, count)?)
         };
-        let (joints, weights) = if parts.joints.is_empty() && parts.weights.is_empty() {
-            (Vec::new(), Vec::new())
-        } else {
+        // (each set of four: its joints at the parts' width and its weights; the second set
+        // optional, ADR-845)
+        let joint_set = |label: &str, bytes: &[u8], weight_label: &str, weight_bytes: &[u8]| {
             let width = if parts.joints_wide { 2 } else { 1 };
-            if parts.joints.len() != count * 4 * width {
+            if bytes.len() != count * 4 * width {
                 return Err(format!(
-                    "joints: {count} vertices need {} bytes, got {}",
+                    "{label}: {count} vertices need {} bytes, got {}",
                     count * 4 * width,
-                    parts.joints.len()
+                    bytes.len()
                 ));
             }
-            let joints = parts
-                .joints
+            let joints: Vec<[u16; 4]> = bytes
                 .chunks_exact(4 * width)
                 .map(|entry| {
                     let mut out = [0u16; 4];
@@ -790,19 +823,41 @@ impl Mesh {
                     out
                 })
                 .collect();
-            let mut weights = floats::<4>("weights", &parts.weights, count)?;
-            for weight in &mut weights {
-                let total: f32 = weight.iter().map(|share| share.max(0.0)).sum();
-                for share in weight.iter_mut() {
-                    *share = if total > 0.0 {
-                        share.max(0.0) / total
-                    } else {
-                        0.0
-                    };
-                }
-            }
-            (joints, weights)
+            let weights = floats::<4>(weight_label, weight_bytes, count)?;
+            Ok((joints, weights))
         };
+        let (joints, mut weights) = if parts.joints.is_empty() && parts.weights.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            joint_set("joints", &parts.joints, "weights", &parts.weights)?
+        };
+        let (joints1, mut weights1) = if parts.joints1.is_empty() && parts.weights1.is_empty() {
+            (Vec::new(), Vec::new())
+        } else if joints.is_empty() {
+            return Err("joints1: a second set of joints needs a first".to_string());
+        } else {
+            joint_set("joints1", &parts.joints1, "weights1", &parts.weights1)?
+        };
+        // the weights made to sum to one over every influence the vertex has, four or eight
+        for index in 0..weights.len() {
+            let second = weights1.get(index).copied().unwrap_or([0.0; 4]);
+            let total: f32 = weights[index]
+                .iter()
+                .chain(&second)
+                .map(|share| share.max(0.0))
+                .sum();
+            let scale = |share: &mut f32| {
+                *share = if total > 0.0 {
+                    share.max(0.0) / total
+                } else {
+                    0.0
+                };
+            };
+            weights[index].iter_mut().for_each(scale);
+            if let Some(more) = weights1.get_mut(index) {
+                more.iter_mut().for_each(scale);
+            }
+        }
         let indices: Vec<u32> = if parts.indices.is_empty() {
             if !count.is_multiple_of(3) {
                 return Err(format!(
@@ -935,7 +990,7 @@ impl Mesh {
             }
             morphs.push(morph);
         }
-        let bounds = MeshBounds::of(&positions, &joints, &weights, &morphs);
+        let bounds = MeshBounds::of(&positions, &joints, &weights, &joints1, &weights1, &morphs);
         let softness = if parts.softness.is_empty() {
             Vec::new()
         } else {
@@ -1006,6 +1061,8 @@ impl Mesh {
             tangents,
             joints,
             weights,
+            joints1,
+            weights1,
             indices,
             morphs,
             curvature,
@@ -4612,19 +4669,18 @@ pub fn skin_matrix(
     if mesh.joints.is_empty() {
         return None;
     }
-    let joints = mesh.joints[index];
-    let weights = mesh.weights[index];
+    let influences = mesh.influences(index);
     let mut out = [0.0f32; 16];
     let mut moving = 0;
     let mut heaviest: Option<(usize, f32)> = None;
-    for (joint, weight) in joints.iter().zip(weights) {
-        let start = *joint as usize * 16;
+    for &(joint, weight) in &influences {
+        let start = joint as usize * 16;
         if weight <= 0.0 || start + 16 > palette.len() {
             continue;
         }
         moving += 1;
         if heaviest.is_none_or(|(_, most)| weight > most) {
-            heaviest = Some((*joint as usize, weight));
+            heaviest = Some((joint as usize, weight));
         }
         for (slot, value) in out.iter_mut().zip(&palette[start..start + 16]) {
             *slot += weight * value;
@@ -4641,8 +4697,8 @@ pub fn skin_matrix(
     let reference = rotations.quaternions[first];
     let mut quaternion = [0.0f32; 4];
     let mut stretch = [0.0f32; 9];
-    for (joint, weight) in joints.iter().zip(weights) {
-        let joint = *joint as usize;
+    for &(joint, weight) in &influences {
+        let joint = joint as usize;
         if weight <= 0.0 || joint * 16 + 16 > palette.len() || joint >= rotations.quaternions.len()
         {
             continue;
@@ -5510,7 +5566,7 @@ pub fn softness_at(mesh: &Mesh, index: usize) -> f32 {
 /// Which of `skips` (each contact's own limb's joints) vertex `index` of `mesh` belongs to, as
 /// bits by contact: its skin weights on that contact's joints pass a half (ADR-805).
 pub fn skipped_by(mesh: &Mesh, index: usize, skips: &[[u16; 4]], onlys: &[[u16; 4]]) -> u64 {
-    let (Some(joints), Some(weights)) = (mesh.joints.get(index), mesh.weights.get(index)) else {
+    if mesh.joints.get(index).is_none() {
         // an unskinned vertex: only a contact with an `:only` passes it by
         return onlys
             .iter()
@@ -5518,12 +5574,12 @@ pub fn skipped_by(mesh: &Mesh, index: usize, skips: &[[u16; 4]], onlys: &[[u16; 
             .take(MAX_CONTACTS)
             .filter(|(_, only)| only[0] != u16::MAX)
             .fold(0u64, |bits, (slot, _)| bits | (1u64 << slot));
-    };
+    }
+    let influences = mesh.influences(index);
     let share = |set: &[u16; 4]| -> f32 {
-        joints
+        influences
             .iter()
-            .zip(weights)
-            .filter(|(joint, _)| set.contains(joint))
+            .filter(|(joint, weight)| *weight > 0.0 && set.contains(joint))
             .map(|(_, weight)| *weight)
             .sum()
     };

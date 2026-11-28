@@ -202,11 +202,11 @@ fn the_mesh_shader_validates() {
     );
     assert_eq!(
         scenes::VERTEX_FLOATS,
-        34,
-        "a vertex carries its curvature, its centre of rotation, its second UV set, its lag weight, its standoff and the skin it lies on (ADR-846)"
+        42,
+        "a vertex carries its curvature, its centre of rotation, its second UV set, its lag weight, its standoff, its second four joints and weights (ADR-845) and the skin it lies on (ADR-846)"
     );
     assert!(
-        MESH_SRC.contains("let at = index * 34u;"),
+        MESH_SRC.contains("let at = index * 42u;"),
         "the shader reads a vertex at the stride it is packed"
     );
     assert!(MESH_SRC.contains("@location(6) curvature: f32"));
