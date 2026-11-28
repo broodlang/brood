@@ -822,6 +822,14 @@ const RING_LIFT: f32 = 0.35;
 // backs of her thighs into each other (womanblend, 2026-11-28).
 // its width: `RING_WIDTH` plus this much a metre of the press's depth, by the skin's softness
 const SKIN_RING_SPREAD: f32 = 1.0;
+// Normals fitted to the drawn skin (trial, BROOD_NORMAL_FIT=1 replaces `false`): after every pass
+// that moves her skin, each point's normal is its keyed rest normal turned by the rotation that best
+// carries its ring of neighbours from their keyed rest places to where they are drawn (the polar
+// part of their edges' cross-covariance). Each vertex's normal carried by its own blended bones
+// stopped matching the shape where weights change fast across a small raised part (a nipple as her
+// hands turned her breast bones: shaded as a pit), and the relax and the press smoothing move places
+// without turning normals at all (womanblend, 2026-11-28).
+const NORMAL_FIT: bool = false;
 // a point no pressed patch reaches
 const SKIN_RING_FAR: f32 = 1.0e6;
 const EDGE_BAND: f32 = 0.004;
@@ -998,6 +1006,14 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     // displacement a garment carried by this skin adds, ADR-846)
     posed_out[at + 3u] = vec4<f32>(world, 1.0);
     posed_out[at + 4u] = vec4<f32>(normal, 0.0);
+    // (and, for the normals fitted to the drawn skin, its point's keyed rest place and normal)
+    if (NORMAL_FIT && ring_point_count() > 0u) {
+        let point_index = ring_weld(id.x);
+        if (ring_rep(point_index) == id.x) {
+            ring_set_work(5u * ring_point_count() + point_index, vec4<f32>(posed.position, 0.0));
+            ring_set_work(6u * ring_point_count() + point_index, vec4<f32>(posed.normal, 0.0));
+        }
+    }
     // bone, or the limb that presses (softness 0), neither pressed nor sizing a ring
     if (contact_softness(id.x) <= 0.0) {
         return;
@@ -1443,6 +1459,73 @@ fn cs_skin_ring_lift(@builtin(global_invocation_id) id: vec3<u32>) {
     posed_out[at] = vec4<f32>(posed_out[at].xyz + normal * ring.w, 1.0);
     posed_out[at + 1u] = vec4<f32>(turned, 0.0);
     posed_out[at + 2u] = vec4<f32>(safe_normalize(tangent.xyz - turned * dot(turned, tangent.xyz)), tangent.w);
+}
+
+// a 3x3 matrix's inverse by its cofactors, the zero matrix when it is (near) singular
+fn inverse3(m: mat3x3<f32>) -> mat3x3<f32> {
+    let det = determinant(m);
+    if (abs(det) < 1e-20) {
+        return mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    }
+    let a = m[0];
+    let b = m[1];
+    let c = m[2];
+    // (rows of the inverse are the columns' cross products over the determinant)
+    return transpose(mat3x3<f32>(cross(b, c), cross(c, a), cross(a, b))) * (1.0 / det);
+}
+
+// each point's normal fitted to the drawn skin (trial `NORMAL_FIT`): its ring's edges as drawn
+// against at keyed rest, their cross-covariance's polar part (Higham's iteration, X <- (X + X^-T)/2)
+// turning its keyed rest normal; into the work's fourth set with w 1, or w 0 where the fit is
+// degenerate or mirrored (a fold turned inside out: the normal it has is kept)
+@compute @workgroup_size(64)
+fn cs_normal_fit(@builtin(global_invocation_id) id: vec3<u32>) {
+    let count = ring_point_count();
+    if (!NORMAL_FIT || id.x >= count) {
+        return;
+    }
+    let here = ring_posed(id.x);
+    let rest = ring_work(5u * count + id.x).xyz;
+    var cross_covariance = mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    let start = ring_offset(id.x);
+    let end = ring_offset(id.x + 1u);
+    for (var slot = start; slot < end; slot = slot + 1u) {
+        let other = ring_neighbour(slot);
+        let drawn = ring_posed(other) - here;
+        let was = ring_work(5u * count + other).xyz - rest;
+        cross_covariance = cross_covariance + mat3x3<f32>(drawn * was.x, drawn * was.y, drawn * was.z);
+    }
+    var fitted = vec4<f32>(0.0);
+    let det = determinant(cross_covariance);
+    if (end > start + 1u && det > 1e-24) {
+        // (scaled to unit size first, so the iteration starts near its fixed point)
+        let size = length(cross_covariance[0]) + length(cross_covariance[1]) + length(cross_covariance[2]);
+        var turn = cross_covariance * (3.0 / size);
+        for (var step = 0u; step < 12u; step = step + 1u) {
+            turn = (turn + transpose(inverse3(turn))) * 0.5;
+        }
+        if (determinant(turn) > 0.5) {
+            fitted = vec4<f32>(safe_normalize(turn * ring_work(6u * count + id.x).xyz), 1.0);
+        }
+    }
+    ring_set_work(3u * count + id.x, fitted);
+}
+
+// each vertex given its point's fitted normal, its tangent kept square to it
+@compute @workgroup_size(64)
+fn cs_normal_apply(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (!NORMAL_FIT || id.x >= draw.deform.w || ring_point_count() == 0u) {
+        return;
+    }
+    let fitted = ring_work(3u * ring_point_count() + ring_weld(id.x));
+    if (fitted.w <= 0.0) {
+        return;
+    }
+    let at = (draw.deform.y + id.x) * POSED_STRIDE;
+    let normal = fitted.xyz;
+    let tangent = posed_out[at + 2u];
+    posed_out[at + 1u] = vec4<f32>(normal, 0.0);
+    posed_out[at + 2u] = vec4<f32>(safe_normalize(tangent.xyz - normal * dot(normal, tangent.xyz)), tangent.w);
 }
 
 // ADR-846: a garment carried by the skin under it. Each of its vertices that names the skin it lies

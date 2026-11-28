@@ -109,6 +109,12 @@ pub(super) const PRESS_SMOOTH_ITERATIONS: u32 = 4;
 /// ends where it began.
 pub(super) const SKIN_RING_PASSES: u32 = 24;
 
+/// Whether the trial normals fitted to the drawn skin are on (`BROOD_NORMAL_FIT=1`): a session's
+/// own switch for a before / after while it works, read once.
+fn normal_fit_on() -> bool {
+    std::env::var("BROOD_NORMAL_FIT").is_ok_and(|value| value == "1")
+}
+
 /// A pressed mesh's relax data (ADR-822), built once from its rest shape.
 fn mesh_ring(device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Mesh) -> Option<MeshRing> {
     let mut points: std::collections::HashMap<[i64; 3], u32> = std::collections::HashMap::new();
@@ -225,7 +231,9 @@ fn mesh_ring(device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Mesh) -> Option<
         data.extend_from_slice(&[here[0], here[1], here[2], 0.0]);
     }
     // (and two more vec4 a point for the press ring along the skin, ADR-849: its seed and spread)
-    data.resize(count * 7 * 4, 0.0);
+    // (and two more for the trial normals fitted to the drawn skin: each point's keyed rest place
+    // and normal)
+    data.resize(count * 9 * 4, 0.0);
     Some(MeshRing {
         index: store("mesh ring index", &words(&index)),
         data: store("mesh ring data", &floats_bytes(&data)),
@@ -450,6 +458,8 @@ pub(super) struct MeshGpu {
     contact_press_pipelines: [wgpu::ComputePipeline; 4],
     /// the press ring along the skin (ADR-849): spread out, back, mark, lift
     skin_ring_pipelines: [wgpu::ComputePipeline; 4],
+    /// the trial normals fitted to the drawn skin: fit, apply (`normal_fit_on`)
+    normal_fit_pipelines: Option<[wgpu::ComputePipeline; 2]>,
     no_ring: wgpu::Buffer,
     no_ring_work: wgpu::Buffer,
     no_posed: wgpu::Buffer,
@@ -658,7 +668,16 @@ impl MeshGpu {
     pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue, samples: u32) -> MeshGpu {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("brood gui meshes"),
-            source: wgpu::ShaderSource::Wgsl(MESH_SRC.into()),
+            source: wgpu::ShaderSource::Wgsl(if normal_fit_on() {
+                MESH_SRC
+                    .replace(
+                        "const NORMAL_FIT: bool = false;",
+                        "const NORMAL_FIT: bool = true;",
+                    )
+                    .into()
+            } else {
+                MESH_SRC.into()
+            }),
         });
         let uniform = |binding: u32, dynamic: bool| wgpu::BindGroupLayoutEntry {
             binding,
@@ -1388,6 +1407,12 @@ impl MeshGpu {
             contact_pipeline("cs_skin_ring_mark"),
             contact_pipeline("cs_skin_ring_lift"),
         ];
+        let normal_fit_pipelines = normal_fit_on().then(|| {
+            [
+                contact_pipeline("cs_normal_fit"),
+                contact_pipeline("cs_normal_apply"),
+            ]
+        });
         // bound where a scene presses nothing: a posed vertex's worth of zeros
         let no_posed = buffer(device, "no posed vertices", 48, storage_usage);
         // (bound for the relax of a pressed mesh that has none, ADR-822)
@@ -1405,6 +1430,7 @@ impl MeshGpu {
             contact_relax_pipelines,
             contact_press_pipelines,
             skin_ring_pipelines,
+            normal_fit_pipelines,
             no_posed,
             no_ring,
             no_ring_work,
@@ -2612,6 +2638,11 @@ impl MeshGpu {
                 }
                 steps.push((ring_mark, true, true));
                 steps.push((ring_lift, false, true));
+                // (the trial normals fitted to the drawn skin, every pass that moves it done)
+                if let Some([fit, apply]) = &self.normal_fit_pipelines {
+                    steps.push((fit, true, true));
+                    steps.push((apply, false, true));
+                }
                 // (a garment carried by its skin, every draw's own passes done, ADR-846)
                 steps.push((&self.garment_carry_pipeline, false, false));
                 steps.push((&self.garment_push_out_pipeline, false, false));
