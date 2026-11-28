@@ -93,17 +93,18 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     );
     primitives.def(
         "%cords-solved",
-        Arity::exact(3),
+        Arity::range(3, 4),
         Sig::new(
             vec![
                 bytes_ty,
                 vec_ty,
                 crate::types::Ty::of_tags(&[Tag::Vector, Tag::Nil]),
+                crate::types::Ty::of_tags(&[Tag::Vector, Tag::Nil]),
             ],
             vec_ty,
         ),
-        &["packed", "worlds", "key-weights"],
-        "Every cord `packed` (`%cords-packed`) drawn taut over her skin as womanblend's `cords-solved` draws it: each sphere's centre moved by its keys at `key-weights` (`[[target weight] …]`, her body's keys this frame; nil or [] for none) and each point and sphere started where its skin carries it through `worlds` (16 numbers a joint), then `:passes` passes of each inner point drawn toward its neighbours' middle (`:pull` of the way, at most `:step` metres) and every point put out of the deepest of its spheres (their radius and `:radius`, up to `:tries` times), its ends pinned where their skin carries them. A vector a cord of `[points bone-worlds]`: its points `[[x y z] …]` and each bone's world matrix (16 numbers), turned from its rest direction to its segment and stretched along it (ADR-843).",
+        &["packed", "worlds", "key-weights", "ends"],
+        "Every cord `packed` (`%cords-packed`) drawn taut over her skin as womanblend's `cords-solved` draws it: each sphere's centre moved by its keys at `key-weights` (`[[target weight] …]`, her body's keys this frame; nil or [] for none) and each point and sphere started where its skin carries it through `worlds` (16 numbers a joint), then `:passes` passes of each inner point drawn toward its neighbours' middle (`:pull` of the way, at most `:step` metres) and every point put out of the deepest of its spheres (their radius and `:radius`, up to `:tries` times), its ends pinned where their skin carries them, or where `ends` puts them (optional: a vector with an entry a cord in the packed order, each nil (as packed) or `[start end]`, each `[x y z]` in the world or nil for that end alone: the piece each end is sewn to as drawn). A vector a cord of `[points bone-worlds]`: its points `[[x y z] …]` and each bone's world matrix (16 numbers), turned from its rest direction to its segment and stretched along it (ADR-843).",
         cords_solved,
     );
 }
@@ -285,7 +286,7 @@ fn prepared_cords(
     })
 }
 
-/// `(%cords-solved packed worlds key-weights)`
+/// `(%cords-solved packed worlds key-weights ends)`, `ends` optional
 fn cords_solved(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let who = "cords/solved";
     let fail = |reason: String| LispError::runtime(format!("{who}: {reason}"));
@@ -328,12 +329,37 @@ fn cords_solved(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             }
         }
     }
+    let mut ends: Vec<crate::host::cords::Ends> = Vec::new();
+    if args.len() > 3 {
+        let point = |value: Value| -> Result<Option<[f64; 3]>, String> {
+            if matches!(value, Value::Nil) {
+                return Ok(None);
+            }
+            match numbers(heap, value, "a cord's end")?.as_slice() {
+                [x, y, z] => Ok(Some([*x, *y, *z])),
+                _ => Err("a cord's end is not [x y z] or nil".to_string()),
+            }
+        };
+        for pair in items(heap, arg(args, 3), "the ends").map_err(fail)? {
+            if matches!(pair, Value::Nil) {
+                ends.push([None, None]);
+                continue;
+            }
+            match items(heap, pair, "a cord's ends").map_err(fail)?.as_slice() {
+                [start, end] => {
+                    ends.push([point(*start).map_err(fail)?, point(*end).map_err(fail)?])
+                }
+                _ => return Err(fail("a cord's ends are not [start end]".to_string())),
+            }
+        }
+    }
     let solved = crate::host::cords::cords_solved(
         &prepared.cords,
         &prepared.meshes,
         &worlds,
         &prepared.inverse_binds,
         &weights,
+        &ends,
         &prepared.constants,
     );
     let mut out = Vec::with_capacity(solved.len());

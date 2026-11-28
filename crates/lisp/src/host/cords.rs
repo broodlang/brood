@@ -194,6 +194,7 @@ pub fn cord_solved(
     cord: &Cord,
     matrices: &[Option<Matrix>],
     spheres: &[(Vector, f64)],
+    ends: Ends,
     constants: &Constants,
 ) -> Vec<Vector> {
     let count = cord.rest.len();
@@ -205,6 +206,14 @@ pub fn cord_solved(
     let begun: Vec<Vector> = (0..count)
         .map(|k| carried(matrices, cord.skins.get(k).unwrap_or(&empty), cord.rest[k]))
         .collect();
+    // (its ends pinned where they are given, else where their skin carries them)
+    let mut begun = begun;
+    if let Some(start) = ends[0] {
+        begun[0] = start;
+    }
+    if let Some(end) = ends[1] {
+        begun[last] = end;
+    }
     let mut points = begun.clone();
     let none: Vec<usize> = Vec::new();
     for _ in 0..constants.passes {
@@ -349,15 +358,21 @@ pub fn prepare(bytes: &[u8]) -> Result<Prepared, String> {
     })
 }
 
+/// A cord's two ends where the caller pins them this frame (the piece each is sewn to, as drawn), each
+/// None where its skin carries it as packed.
+pub type Ends = [Option<Vector>; 2];
+
 /// Every cord solved against the skeleton's `worlds` and `inverse_binds`: each cord's points and
 /// bone worlds. Only the joints the skins name are multiplied out. `meshes` are the cords' sphere
-/// meshes (`sphere_mesh`, one a cord, None where not pivoted).
+/// meshes (`sphere_mesh`, one a cord, None where not pivoted); `ends` each cord's pinned ends
+/// (`Ends`; a cord past its end, or an empty slice, as packed).
 pub fn cords_solved(
     cords: &[Cord],
     meshes: &[Option<Mesh>],
     worlds: &[Matrix],
     inverse_binds: &[Matrix],
     weights: &[f64],
+    ends: &[Ends],
     constants: &Constants,
 ) -> Vec<(Vec<Vector>, Vec<Matrix>)> {
     let joints = worlds.len().min(inverse_binds.len());
@@ -406,7 +421,8 @@ pub fn cords_solved(
                     })
                     .collect(),
             };
-            let points = cord_solved(cord, &matrices, &spheres, constants);
+            let pinned = ends.get(index).copied().unwrap_or([None, None]);
+            let points = cord_solved(cord, &matrices, &spheres, pinned, constants);
             let bones = bone_worlds(cord, &points);
             (points, bones)
         })
@@ -649,6 +665,7 @@ mod tests {
             &[IDENTITY],
             &[IDENTITY],
             &[],
+            &[],
             &constants(),
         );
         let (points, bones) = &solved[0];
@@ -676,6 +693,7 @@ mod tests {
             &[IDENTITY],
             &[IDENTITY],
             &[],
+            &[],
             &constants(),
         )[0];
         let distance = length(subtract(points[2], [0.06, -0.01, 0.0]));
@@ -688,12 +706,38 @@ mod tests {
     }
 
     #[test]
+    fn given_ends_pin_the_cord_in_place_of_its_skins() {
+        // (womanblend-39: a cord's ends on the piece they are sewn to as drawn, not on their skin)
+        let cord = straight(5, Vec::new(), vec![Vec::new(); 5]);
+        let start = [0.0, 0.01, 0.0];
+        let (points, _) = &cords_solved(
+            std::slice::from_ref(&cord),
+            &[None],
+            &[IDENTITY],
+            &[IDENTITY],
+            &[],
+            &[[Some(start), None]],
+            &constants(),
+        )[0];
+        assert_eq!(points[0], start, "the given start");
+        assert_eq!(points[4], cord.rest[4], "the end left to its skin");
+        assert!(points[1][1] > 0.0, "the cord drawn toward the moved start");
+    }
+
+    #[test]
     fn a_moved_skin_carries_the_cord() {
         let cord = straight(3, Vec::new(), vec![Vec::new(); 3]);
         let mut moved = IDENTITY;
         moved[13] = 0.5;
-        let (points, bones) =
-            &cords_solved(&[cord], &[None], &[moved], &[IDENTITY], &[], &constants())[0];
+        let (points, bones) = &cords_solved(
+            &[cord],
+            &[None],
+            &[moved],
+            &[IDENTITY],
+            &[],
+            &[],
+            &constants(),
+        )[0];
         assert_eq!(points[1], [0.03, 0.5, 0.0]);
         assert!((bones[0][13] - 0.5).abs() < 1e-12);
     }
@@ -716,6 +760,7 @@ mod tests {
             &[IDENTITY],
             &[IDENTITY],
             &[],
+            &[],
             &constants(),
         )[0];
         assert_eq!(
@@ -728,6 +773,7 @@ mod tests {
             &[IDENTITY],
             &[IDENTITY],
             &[0.0, 1.0],
+            &[],
             &constants(),
         )[0];
         let distance = length(subtract(swollen[2], [0.06, -0.02, 0.0]));
