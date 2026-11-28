@@ -1178,4 +1178,8 @@ fn a_see_through_share_rides_in_the_materials_third_float_and_its_stretch_in_bit
         "lit = linear_to_srgb(mix(srgb_to_linear(lit), srgb_to_linear(behind), see_through));"
     ));
     assert!(MESH_SRC.contains("let stretch_view = (draw.flags.y & 32768u) != 0u;"));
+    // the stretch's warp read back from glTF's flipped v (ADR-842)
+    assert!(MESH_SRC.contains(
+        "return clamp(vec2<f32>(fragment.uv2.x, 1.0 - fragment.uv2.y), vec2<f32>(0.25), vec2<f32>(4.0));"
+    ));
 }

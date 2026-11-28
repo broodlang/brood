@@ -2018,7 +2018,7 @@ impl MeshGpu {
                     surface: material.surface,
                     pressed,
                     fibres: material.fibres,
-                    see_through: see_through_share(material) > 0.0,
+                    see_through: see_through_share(material) > 0.0 || material.knit_through(),
                     garment: material.garment,
                     hair_bounds: if material.fibres && material.cast_shadow {
                         draw_bounds(scene, draw, &mesh.bounds)
@@ -2524,7 +2524,10 @@ impl MeshGpu {
                     let instance = view_index as u32;
                     // (what is opaque: a `:fibres` mesh's shadow is its opacity maps', below)
                     for (draw, material) in plans[index].iter().zip(&materials) {
-                        if !draw.casts || draw.fibres || (view.casters_only && !draw.contact_caster)
+                        if !draw.casts
+                            || draw.fibres
+                            || (view.casters_only && !draw.contact_caster)
+                            || (view.beneath_only && (draw.garment || draw.see_through))
                         {
                             continue;
                         }
@@ -3233,6 +3236,8 @@ pub(super) fn draw_uniform(
     } else if knit {
         clamps[0] = material.knit_cover;
         clamps[1] = material.knit_layers;
+        // (and how far off her it still lets her skin through, ADR-842)
+        clamps[2] = material.knit_contact;
     }
     for (slot, plane) in planes.iter().enumerate() {
         clamps[slot * 4..slot * 4 + 4].copy_from_slice(plane);
@@ -3532,8 +3537,9 @@ fn scene_words(
         &[
             scene.exposure,
             scene.lights.len().min(MAX_LIGHTS) as f32,
-            // spare since ADR-800 (it was the one layer side): each view's `map` has its own
-            0.0,
+            // the camera's view beneath the cloth (ADR-842), one past its index, 0 none (spare
+            // from ADR-800 until then)
+            shadows.beneath.map_or(0.0, |view| (view + 1) as f32),
             f32::from(u8::from(scene.ambient_sh.is_some())),
         ],
     );

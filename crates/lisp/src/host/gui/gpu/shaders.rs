@@ -1451,12 +1451,15 @@ struct VertexOut {
 };
 
 // the garment's stretch at this fragment (ADR-840, `:stretch-from-uv2`: its second UV set holds
-// the cloth's stretch against its cut, weft and warp, 1 at rest); (1, 1) for any other draw
+// the cloth's stretch against its cut, weft and warp, 1 at rest); (1, 1) for any other draw. The
+// set is a glTF UV map, whose v is the maker's 1 − v (glTF's origin at the image's top left:
+// Blender's exporter writes every map so), so the warp is 1 − v (ADR-842; read as v it was about
+// −0.03 on the bikini, womanblend-61 [ddb383])
 fn fabric_stretch(fragment: VertexOut) -> vec2<f32> {
     if ((draw.flags.y & 16384u) == 0u) {
         return vec2<f32>(1.0);
     }
-    return clamp(fragment.uv2, vec2<f32>(0.25), vec2<f32>(4.0));
+    return clamp(vec2<f32>(fragment.uv2.x, 1.0 - fragment.uv2.y), vec2<f32>(0.25), vec2<f32>(4.0));
 }
 
 // how much of the light a stretched knit stops here (ADR-840): its yarn keeps its area while the
@@ -2440,6 +2443,40 @@ fn occlusion_tap(index: u32) -> vec3<f32> {
 
 // `mesh::ambient_occlusion`: how much of the ambient light reaches `world` past what the
 // camera's depth view (scene.occlusion.z, one past its index; 0 without) holds round it
+// how much of what lies behind a knit on an opaque garment shows through it here (ADR-842): its
+// opened cover's open share (`knit_alpha`), only where the camera's view beneath the cloth
+// (`scene.params.z`, one past its index) finds a surface within `:knit-contact`
+// (`DrawU::clamps[0].z`) of it, fading to none there: only skin the cloth lies on shows, never
+// what a panel stands off. The gap is taken square to the cloth (the view's along the eye's ray,
+// times how squarely the cloth faces it). 0 for any other draw, or with no such view
+fn knit_through(fragment: VertexOut, surface_normal: vec3<f32>) -> f32 {
+    let knit = draw.clamps[0];
+    let at = u32(scene.params.z);
+    if ((draw.flags.y & 16384u) == 0u || knit.x <= 0.0 || at == 0u || draw.flags.x == 3u) {
+        return 0.0;
+    }
+    let view = scene.shadows[at - 1u];
+    let clip = view.view_proj * vec4<f32>(fragment.world, 1.0);
+    if (clip.w <= 1e-6) {
+        return 0.0;
+    }
+    let across_unit = clip.x / clip.w * 0.5 + 0.5;
+    let down_unit = 0.5 - clip.y / clip.w * 0.5;
+    if (across_unit < 0.0 || across_unit >= 1.0 || down_unit < 0.0 || down_unit >= 1.0) {
+        return 0.0;
+    }
+    let side = u32(view.info.y);
+    let column = min(u32(across_unit * f32(side)), side - 1u);
+    let row = min(u32(down_unit * f32(side)), side - 1u);
+    let beneath = camera_distance(view.view_proj, map_load(view.map, vec2<i32>(i32(column), i32(row))));
+    let own = camera_distance(view.view_proj, clip.z / clip.w);
+    let to_eye = safe_normalize(scene.eye.xyz - fragment.world);
+    let facing = clamp(abs(dot(surface_normal, to_eye)), 0.05, 1.0);
+    let gap = max(beneath - own, 0.0) * facing;
+    let contact = 1.0 - smoothstep(0.0, max(knit.z, 1e-4), gap);
+    return (1.0 - knit_alpha(fragment)) * contact;
+}
+
 fn ambient_occlusion(world: vec3<f32>, normal: vec3<f32>) -> f32 {
     let radius = scene.occlusion.x;
     let at = u32(scene.occlusion.z);
@@ -3448,7 +3485,11 @@ fn mesh_lit(fragment: VertexOut, front: bool, texel: vec4<f32>, normal_texel: ve
     // `:fibres`): opaque, its colour mixed by the share toward what was drawn behind it at this
     // pixel before the see-through draws (never another of them: the colour pass is split), both
     // as displayed, decoded to light to be mixed; none while its stretch is shown
-    let see_through = select(draw.material.z, 0.0, (draw.flags.y & 512u) != 0u || stretch_view);
+    var see_through = select(draw.material.z, 0.0, (draw.flags.y & 512u) != 0u || stretch_view);
+    // (and a knit's own: its opened loops over the skin it lies on, ADR-842)
+    if (!stretch_view) {
+        see_through = max(see_through, knit_through(fragment, surface_normal));
+    }
     if (see_through > 0.0) {
         let behind = textureLoad(behind_picture, vec2<i32>(fragment.clip.xy), 0).rgb;
         lit = linear_to_srgb(mix(srgb_to_linear(lit), srgb_to_linear(behind), see_through));

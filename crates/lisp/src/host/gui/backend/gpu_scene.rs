@@ -1989,6 +1989,8 @@ fn a_cloths_stretch_is_shown_live_red_where_drawn_wider_than_made_on_the_gpu() {
     let positions: Vec<f32> = corners.iter().flat_map(|[x, z]| [*x, 0.0, *z]).collect();
     let normals: Vec<f32> = (0..4).flat_map(|_| [0.0, 1.0, 0.0]).collect();
     let uvs: Vec<f32> = corners.iter().flat_map(|[x, z]| [*x, -*z]).collect();
+    // (its fitted stretch at rest, weft 1 and warp 1, as a glTF UV map holds it: v = 1 − warp)
+    let uvs2: Vec<f32> = (0..4).flat_map(|_| [1.0, 0.0]).collect();
     let indices: Vec<u8> = [0u16, 1, 2, 0, 2, 3]
         .iter()
         .flat_map(|index| index.to_le_bytes())
@@ -1998,6 +2000,7 @@ fn a_cloths_stretch_is_shown_live_red_where_drawn_wider_than_made_on_the_gpu() {
             positions: bytes_of(&positions),
             normals: bytes_of(&normals),
             uvs: bytes_of(&uvs),
+            uvs2: bytes_of(&uvs2),
             indices,
             ..MeshParts::default()
         })
@@ -2013,7 +2016,7 @@ fn a_cloths_stretch_is_shown_live_red_where_drawn_wider_than_made_on_the_gpu() {
     scene.lights = vec![Light::directional([0.0, -1.0, 0.0], [1.0, 1.0, 1.0])];
     scene.sky = [0.0, 0.0, 0.0];
     scene.ground = [0.0, 0.0, 0.0];
-    let widened = |across: f32, along: f32| {
+    let widened = |across: f32, along: f32, fitted: bool| {
         let mut scene = scene.clone();
         scene.draws = vec![Draw {
             loose: None,
@@ -2027,6 +2030,7 @@ fn a_cloths_stretch_is_shown_live_red_where_drawn_wider_than_made_on_the_gpu() {
                 double_sided: true,
                 specular: 0.0,
                 show_stretch: true,
+                stretch_from_uv2: fitted,
                 ..Material::default()
             },
         }];
@@ -2067,11 +2071,19 @@ fn a_cloths_stretch_is_shown_live_red_where_drawn_wider_than_made_on_the_gpu() {
             gpu.read_pixels()
         };
         let (rest, wide, narrow, smaller) = (
-            at(&paint(&widened(1.0, 1.0))),
-            at(&paint(&widened(1.3, 1.0))),
-            at(&paint(&widened(0.8, 1.0))),
-            at(&paint(&widened(0.8, 0.8))),
+            at(&paint(&widened(1.0, 1.0, false))),
+            at(&paint(&widened(1.3, 1.0, false))),
+            at(&paint(&widened(0.8, 1.0, false))),
+            at(&paint(&widened(0.8, 0.8, false))),
         );
+        // (and with its fitted stretch read, at rest: rest's white, its warp read back from
+        // glTF's flipped v, never 0, the blue of a cloth slack to a quarter, ADR-842)
+        let fitted = at(&paint(&widened(1.0, 1.0, true)));
+        if fitted != rest {
+            failures.push(format!(
+                "{name}: its fitted stretch at rest is not rest's white: {fitted:?}"
+            ));
+        }
         eprintln!(
             "{name}: as made {rest:?}, 30 % wider {wide:?}, 20 % narrower {narrow:?}, 20 % smaller {smaller:?}"
         );
@@ -2089,6 +2101,132 @@ fn a_cloths_stretch_is_shown_live_red_where_drawn_wider_than_made_on_the_gpu() {
         if smaller[2] < smaller[0] + 60 {
             failures.push(format!(
                 "{name}: 20 % smaller both ways is not blue: {smaller:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_knit_lets_through_only_what_it_lies_on_on_the_gpu() {
+    // ADR-842: a white opaque knit card (its stretch read, at rest, a cover of 0.5: half its area
+    // open) over a red floor, seen from above with the ambient occlusion's view on. Lying 1 mm
+    // over the floor, within `:knit-contact` (3 mm), the floor shows through its open loops: red
+    // in the white. Standing 2 cm off, past it, nothing shows: plain white, as a knit stood off
+    // skin looks. The GPU painter only.
+    use crate::host::gui::mesh::AmbientOcclusion;
+    let side = 128u32;
+    let floor = Arc::new(square(0.0, 2.0));
+    let card = |height: f32| {
+        let half = 0.2f32;
+        let corners = [[-half, half], [half, half], [half, -half], [-half, -half]];
+        let positions: Vec<f32> = corners.iter().flat_map(|[x, z]| [*x, height, *z]).collect();
+        let normals: Vec<f32> = (0..4).flat_map(|_| [0.0, 1.0, 0.0]).collect();
+        let uvs: Vec<f32> = corners.iter().flat_map(|[x, z]| [*x, -*z]).collect();
+        // (weft 1, warp 1 as a glTF UV map holds it: v = 1 − warp)
+        let uvs2: Vec<f32> = (0..4).flat_map(|_| [1.0, 0.0]).collect();
+        let indices: Vec<u8> = [0u16, 1, 2, 0, 2, 3]
+            .iter()
+            .flat_map(|index| index.to_le_bytes())
+            .collect();
+        Arc::new(
+            Mesh::from_parts(MeshParts {
+                positions: bytes_of(&positions),
+                normals: bytes_of(&normals),
+                uvs: bytes_of(&uvs),
+                uvs2: bytes_of(&uvs2),
+                indices,
+                ..MeshParts::default()
+            })
+            .expect("a whole card"),
+        )
+    };
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    // a perspective-free view from above (as the see-through test's): x → clip x × 4, z → clip
+    // −y × 4, height → depth over 10 m
+    scene.view_proj = [
+        4.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1, 0.0, 0.0, -4.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0,
+    ];
+    scene.eye = [0.0, 10.0, 0.0];
+    scene.lights = vec![Light::directional([0.0, -1.0, 0.0], [1.0, 1.0, 1.0])];
+    scene.sky = [0.0, 0.0, 0.0];
+    scene.ground = [0.0, 0.0, 0.0];
+    scene.ambient_occlusion = Some(AmbientOcclusion {
+        radius: 0.01,
+        strength: 0.0,
+    });
+    let identity = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    scene.draws = vec![
+        Draw {
+            loose: None,
+            mesh: 1,
+            model: identity,
+            palette: None,
+            morphs: vec![],
+            material: Material {
+                color: [1.0, 0.0, 0.0, 1.0],
+                double_sided: true,
+                specular: 0.0,
+                ..Material::default()
+            },
+        },
+        Draw {
+            loose: None,
+            mesh: 2,
+            model: identity,
+            palette: None,
+            morphs: vec![],
+            material: Material {
+                color: [1.0, 1.0, 1.0, 1.0],
+                double_sided: true,
+                specular: 0.0,
+                garment: true,
+                stretch_from_uv2: true,
+                knit_cover: 0.5,
+                knit_layers: 1.0,
+                ..Material::default()
+            },
+        },
+    ];
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let at = |pixels: &[u8]| {
+        let start = (64 * side + 64) as usize * 3;
+        [0, 1, 2].map(|channel| i32::from(pixels[start + channel]))
+    };
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &floor);
+        let mut paint = |height: f32| {
+            gpu.upload_mesh(2, &card(height));
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            renderer.set_bg(Some([0, 0, 0]));
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            gpu.read_pixels()
+        };
+        let (lying, standing) = (at(&paint(0.001)), at(&paint(0.02)));
+        eprintln!("{name}: lying 1 mm on the floor {lying:?}, standing 2 cm off {standing:?}");
+        if lying[0] < lying[1] + 40 {
+            failures.push(format!(
+                "{name}: the floor does not show through the knit lying on it: {lying:?}"
+            ));
+        }
+        if (standing[0] - standing[1]).abs() > 4 || standing[1] < 200 {
+            failures.push(format!(
+                "{name}: the knit standing off shows what is behind it: {standing:?}"
             ));
         }
     }

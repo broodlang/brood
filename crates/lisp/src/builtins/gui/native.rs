@@ -1880,6 +1880,10 @@ fn scene_spec(
         if let Some(layers) = number("knit-layers") {
             material.knit_layers = layers.clamp(1.0, 8.0);
         }
+        // how far off her a knit may stand and still let her skin through (ADR-842)
+        if let Some(reach) = number("knit-contact") {
+            material.knit_contact = reach.clamp(0.0005, 0.05);
+        }
         // what shows through it, drawn opaque and mixed toward what is behind (ADR-842)
         if let Some(share) = number("see-through") {
             material.see_through = share.clamp(0.0, 1.0);
@@ -4731,10 +4735,16 @@ mod gui_scene_light_tests {
         assert!(material.show_stretch);
         let clamped = scene_with("[]", "{:see-through 1.5}").expect("a scene");
         assert_eq!(clamped.draws[0].material.see_through, 1.0);
+        // and how far off her a knit still lets her skin through (metres, 0.5 mm … 5 cm)
+        let reach = scene_with("[]", "{:knit-contact 0.004}").expect("a scene");
+        assert_eq!(reach.draws[0].material.knit_contact, 0.004);
+        let far = scene_with("[]", "{:knit-contact 1}").expect("a scene");
+        assert_eq!(far.draws[0].material.knit_contact, 0.05);
         let plain = scene_with("[]", "{}").expect("a scene");
         let material = &plain.draws[0].material;
         assert_eq!(material.see_through, 0.0);
         assert!(!material.show_stretch);
+        assert_eq!(material.knit_contact, 0.003);
     }
 
     #[test]

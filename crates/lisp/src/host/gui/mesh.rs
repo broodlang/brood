@@ -1228,6 +1228,11 @@ pub struct Material {
     /// alpha.
     pub knit_cover: f32,
     pub knit_layers: f32,
+    /// How far off her a knit may stand and still let her skin through (`:knit-contact`, metres;
+    /// 3 mm by default), ADR-842: on an opaque garment the knit's opened cover is mixed toward what
+    /// lies behind it only where the camera's view beneath the cloth finds a surface within this
+    /// of it, fading to none at it, so only skin the cloth lies on shows.
+    pub knit_contact: f32,
     /// How much of what the scene draws behind it shows through it, 0 … 1 (`:see-through`; 0, the
     /// default: none). The draw stays opaque (depth written, nothing sorted) and its lit colour is
     /// mixed by this share toward the colour already drawn at its pixel before the see-through
@@ -1270,6 +1275,23 @@ pub struct Material {
     pub wrinkles: Option<Wrinkles>,
 }
 
+/// How far off her a knit may stand and still let her skin through (ADR-842): 3 mm.
+pub const DEFAULT_KNIT_CONTACT: f32 = 0.003;
+
+impl Material {
+    /// Whether it is an opaque knit that lets the skin it lies on show through its opened loops
+    /// (ADR-842): its stretch read and a knit cover, on a surface drawn opaque.
+    pub fn knit_through(&self) -> bool {
+        self.stretch_from_uv2
+            && self.knit_cover > 0.0
+            && !self.fibres
+            && !matches!(
+                self.surface,
+                Surface::Blend | Surface::Hair | Surface::Strands
+            )
+    }
+}
+
 impl Default for Material {
     fn default() -> Self {
         Material {
@@ -1304,6 +1326,7 @@ impl Default for Material {
             stretch_from_uv2: false,
             knit_cover: 0.0,
             knit_layers: 1.0,
+            knit_contact: DEFAULT_KNIT_CONTACT,
             see_through: 0.0,
             show_stretch: false,
             fibres: false,
@@ -3164,6 +3187,9 @@ pub struct ShadowView {
     pub map: ShadowMapSlot,
     /// Only `:contact-caster` draws are drawn into it (ADR-837: the camera's casters view).
     pub casters_only: bool,
+    /// Only what lies under the garments is drawn into it, no `:garment` or see-through draw
+    /// (ADR-842: the camera's view beneath the cloth, how far a knit stands off her skin).
+    pub beneath_only: bool,
 }
 
 /// Where a shadow view's map is kept (ADR-800): which of the scene's two map arrays (0, the
@@ -3252,6 +3278,9 @@ pub struct ShadowPlan {
     /// Which view is the camera's depth of `:contact-caster` draws alone (ADR-837) — none
     /// without the occlusion's view, a caster, or room.
     pub casters: Option<u32>,
+    /// Which view is the camera's depth of what lies under the garments (ADR-842) — none
+    /// without the occlusion's view, a knit letting skin through, or room.
+    pub beneath: Option<u32>,
 }
 
 /// Where `draw`'s vertices can be in the world this frame — morphed, skinned and moved — from
@@ -3484,6 +3513,7 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
                 perspective: false,
                 map: ShadowMapSlot::default(),
                 casters_only: false,
+                beneath_only: false,
             }]
         }
         LightKind::Spot => {
@@ -3505,6 +3535,7 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
                 perspective: true,
                 map: ShadowMapSlot::default(),
                 casters_only: false,
+                beneath_only: false,
             }]
         }
         LightKind::Point => {
@@ -3524,6 +3555,7 @@ fn light_views(light: &Light, shadow: &Shadow, world: Option<Bounds>) -> Vec<Sha
                     perspective: true,
                     map: ShadowMapSlot::default(),
                     casters_only: false,
+                    beneath_only: false,
                 })
                 .collect()
         }
@@ -3542,6 +3574,7 @@ pub fn shadow_plan(scene: &Scene, world: Option<Bounds>) -> ShadowPlan {
         arrays: ShadowArrays::default(),
         occlusion: None,
         casters: None,
+        beneath: None,
     };
     // the texels the plan's views and `more` would need together
     let texels_with = |views: &[ShadowView], more: &[u32]| {
@@ -3589,6 +3622,7 @@ pub fn shadow_plan(scene: &Scene, world: Option<Bounds>) -> ShadowPlan {
                 perspective: false,
                 map: ShadowMapSlot::default(),
                 casters_only: false,
+                beneath_only: false,
             });
             // and the same view of the `:contact-caster` draws alone (ADR-837), when there are
             // any: what a skin's contact march reads, so cloth shades the skin under its edges
@@ -3601,6 +3635,19 @@ pub fn shadow_plan(scene: &Scene, world: Option<Bounds>) -> ShadowPlan {
                 plan.casters = Some(plan.views.len() as u32);
                 let mut view = plan.views[plan.views.len() - 1].clone();
                 view.casters_only = true;
+                plan.views.push(view);
+            }
+            // and the same view of what lies under the garments (ADR-842), when a knit lets her
+            // skin through: how far the cloth stands off what is beneath it at each pixel
+            let knits = scene.draws.iter().any(|draw| draw.material.knit_through());
+            if knits
+                && plan.views.len() < MAX_SHADOW_VIEWS
+                && texels_with(&plan.views, &[side]) <= MAX_SHADOW_TEXELS
+            {
+                plan.beneath = Some(plan.views.len() as u32);
+                let mut view = plan.views[plan.occlusion.unwrap_or(0) as usize].clone();
+                view.casters_only = false;
+                view.beneath_only = true;
                 plan.views.push(view);
             }
         }
@@ -5661,10 +5708,10 @@ pub fn rasterize<'t>(
     let shadow_maps: Vec<Vec<f32>> = shadows
         .views
         .iter()
-        // (the casters' view, ADR-837, is the GPU painter's alone: the frozen CPU painter never
-        // reads it, so it is not drawn)
+        // (the casters' view, ADR-837, and the view beneath the cloth, ADR-842, are the GPU
+        // painter's alone: the frozen CPU painter never reads them, so they are not drawn)
         .map(|view| {
-            if view.casters_only {
+            if view.casters_only || view.beneath_only {
                 Vec::new()
             } else {
                 render_shadow_map(view, &posed, textures)
@@ -7015,6 +7062,36 @@ mod tests {
         // no occlusion, no casters' view either
         scene.ambient_occlusion = None;
         assert_eq!(shadow_plan(&scene, None).casters, None);
+    }
+
+    #[test]
+    fn a_knit_letting_skin_through_adds_the_cameras_view_beneath_the_cloth() {
+        // ADR-842: with the ambient occlusion's view there, an opaque knit with its stretch and a
+        // cover adds the camera's view of what lies under the garments; a blended knit (ADR-840's
+        // path) or no knit adds none, nor does a scene without the occlusion's view
+        let (mut scene, _meshes) = floor_and_card(slanted());
+        scene.ambient_occlusion = Some(AmbientOcclusion {
+            radius: 0.015,
+            strength: 0.6,
+        });
+        assert_eq!(shadow_plan(&scene, None).beneath, None);
+        scene.draws[1].material.stretch_from_uv2 = true;
+        scene.draws[1].material.knit_cover = 0.96;
+        let with = shadow_plan(&scene, None);
+        let occlusion = with.occlusion.expect("the occlusion's view");
+        let beneath = with.beneath.expect("the view beneath the cloth");
+        assert!(with.views[beneath as usize].beneath_only);
+        assert!(!with.views[beneath as usize].casters_only);
+        assert!(!with.views[occlusion as usize].beneath_only);
+        assert_eq!(
+            with.views[beneath as usize].view_proj,
+            with.views[occlusion as usize].view_proj
+        );
+        scene.draws[1].material.surface = Surface::Blend;
+        assert_eq!(shadow_plan(&scene, None).beneath, None);
+        scene.draws[1].material.surface = Surface::Standard;
+        scene.ambient_occlusion = None;
+        assert_eq!(shadow_plan(&scene, None).beneath, None);
     }
 
     #[test]
