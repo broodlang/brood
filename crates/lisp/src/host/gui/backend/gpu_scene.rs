@@ -2235,8 +2235,16 @@ fn a_knit_lets_through_only_what_it_lies_on_on_the_gpu() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The process-wide read-backs (ADR-841's posed positions, ADR-847's displacement watch) serve one
+/// asker: GPU tests that use them hold this while they do, or each reads the other's sample.
+static READBACK_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn a_carried_garment_keeps_its_offset_over_the_pressed_skin_on_the_gpu() {
+    // (the posed and displacement read-backs are one per process: tests that ask for them take turns)
+    let _turn = READBACK_TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // ADR-846: a soft slab pressed by a ball, and a garment slab 5 mm in front of it paired vertex
     // for vertex with it (`:carried-by 0`). Pressed on its own the garment would lie on the ball
     // with the skin; carried, it stays 5 mm off the skin's pressed middle.
@@ -2415,6 +2423,10 @@ fn a_carried_garment_keeps_its_offset_over_the_pressed_skin_on_the_gpu() {
 
 #[test]
 fn eight_influences_skin_on_the_gpu_as_on_the_cpu() {
+    // (the posed and displacement read-backs are one per process: tests that ask for them take turns)
+    let _turn = READBACK_TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // ADR-845: a vertex on eight joints, its weights spread over both sets of four and turned about
     // its centre of rotation (ADR-814), posed by the GPU's compute passes (read back, ADR-841) as
     // `skin_matrix` poses it on the CPU
