@@ -3585,6 +3585,67 @@ pub(in crate::builtins) fn gui_scene_posed(_: &[Value], _: EnvId, heap: &mut Hea
     ]))
 }
 
+/// `(%gui-scene-watch-displacements draw vertices)` — watch draw `draw`'s displacement at `vertices`
+/// (u32 bytes), or stop with nil (ADR-847).
+pub(in crate::builtins) fn gui_scene_watch_displacements(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let draw = match args.first() {
+        Some(Value::Int(draw)) if *draw >= 0 => *draw as usize,
+        _ => {
+            return Err(LispError::runtime(
+                "%gui-scene-watch-displacements: a draw's index in the scene's :draws, 0 or more",
+            ));
+        }
+    };
+    match arg(args, 1) {
+        Value::Nil => crate::host::gui::scene_displacements::watch(None),
+        given => {
+            let bytes = crate::builtins::bytes::collect_bytes(
+                "%gui-scene-watch-displacements",
+                given,
+                heap,
+            )?;
+            if bytes.len() % 4 != 0 {
+                return Err(LispError::runtime(
+                    "%gui-scene-watch-displacements: vertices are u32 bytes, four a vertex",
+                ));
+            }
+            let vertices = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| u32::from_le_bytes(*word))
+                .collect();
+            crate::host::gui::scene_displacements::watch(Some((draw, vertices)));
+        }
+    }
+    Ok(Value::Nil)
+}
+
+/// `(%gui-scene-displacements)` — the newest watched displacements (ADR-847), or nil.
+pub(in crate::builtins) fn gui_scene_displacements(
+    _: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let Some(sample) = crate::host::gui::scene_displacements::latest() else {
+        return Ok(Value::Nil);
+    };
+    let bytes: Vec<u8> = sample
+        .displacements
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let displacements = crate::builtins::bytes::bytes_to_value(bytes, heap);
+    Ok(heap.map_from_pairs(vec![
+        (value::kw("draw"), Value::int(sample.draw as i64)),
+        (value::kw("displacements"), displacements),
+    ]))
+}
+
 /// `(%gui-scene-push-outs)` — how many garment vertices the push-out net moved on recent frames
 /// (ADR-839), oldest first.
 pub(in crate::builtins) fn gui_scene_push_outs(

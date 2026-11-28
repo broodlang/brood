@@ -157,6 +157,9 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // a probe's asked draw and its posed vertices read back (ADR-841): one GPU per process
     ("host/gui/scene_posed.rs", "REQUEST", Diagnostic),
     ("host/gui/scene_posed.rs", "LATEST", Diagnostic),
+    // a standing watch of a draw's vertices' displacements and the newest read back (ADR-847)
+    ("host/gui/scene_displacements.rs", "WATCH", Diagnostic),
+    ("host/gui/scene_displacements.rs", "LATEST", Diagnostic),
     // the offscreen painter's one thread (gui/render-frame, ADR-609): text shaping cannot
     // move between threads, so every runtime in the process sends its frames to this one
     ("host/gui/backend/offscreen.rs", "T", OneMachine),

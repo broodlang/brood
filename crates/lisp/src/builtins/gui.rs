@@ -192,6 +192,20 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The newest posed vertices read back for gui/scene-request-posed: {:draw i :positions bytes :normals bytes}, little-endian f32, three a vertex, world space; nil until one is read. Only a pressed (:deform) draw's vertices are kept on the GPU: a request for any other is never served. ADR-841.",
         gui_scene_posed);
     primitives.def(
+        "%gui-scene-watch-displacements",
+        Arity::exact(2),
+        Sig::new(vec![int, any], nil_ty),
+        &["draw", "vertices"],
+        "Watch draw `draw`'s (its index in the first scene's :draws) displacement at `vertices` (u32 little-endian bytes: vertex indices into its mesh) every frame it can be read: what the contact passes moved each by (its drawn place less its skinned place). nil vertices stops the watch. Read with gui/scene-displacements, a frame or two behind. Only a pressed (:deform) draw is served. ADR-847.",
+        gui_scene_watch_displacements);
+    primitives.def(
+        "%gui-scene-displacements",
+        Arity::exact(0),
+        Sig::new(vec![], any),
+        &[],
+        "The newest displacements read back for gui/scene-watch-displacements: {:draw i :displacements bytes}, little-endian f32, three a watched vertex in the watched order; nil until one is read. ADR-847.",
+        gui_scene_displacements);
+    primitives.def(
         "%gui-key-repeat?",
         Arity::exact(1),
         Sig::new(vec![int], bool_ty),

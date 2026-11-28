@@ -1599,6 +1599,7 @@ pub mod scene_gpu_times;
 pub mod scene_push_outs;
 
 // a pressed draw's vertices as the GPU drew them, read back for one frame (ADR-841)
+pub mod scene_displacements;
 pub mod scene_posed;
 
 #[cfg(feature = "gui-gpu")]

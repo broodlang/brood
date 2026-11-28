@@ -2372,6 +2372,27 @@ fn a_carried_garment_keeps_its_offset_over_the_pressed_skin_on_the_gpu() {
             failures.push(format!("{name}: the posed slabs were never read back"));
             continue;
         };
+        // (and the skin's middle watched for its displacement, ADR-847: what the press moved it by)
+        crate::host::gui::scene_displacements::watch(Some((0, vec![middle as u32])));
+        let mut displaced = None;
+        for _ in 0..8 {
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if let Some(sample) = crate::host::gui::scene_displacements::latest() {
+                displaced = sample.displacements.get(2).copied();
+                break;
+            }
+        }
+        crate::host::gui::scene_displacements::watch(None);
+        match displaced {
+            Some(dz) if (dz - (skin_z - 0.5)).abs() < 0.0002 => {}
+            other => failures.push(format!(
+                "{name}: the watched displacement {other:?} is not the press's {}",
+                skin_z - 0.5
+            )),
+        }
         eprintln!(
             "{name}: the skin's middle at z {skin_z:.4}, the carried cloth's at {cloth_z:.4}"
         );

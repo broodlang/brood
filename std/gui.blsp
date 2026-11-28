@@ -158,6 +158,18 @@
     (or (nil? (gui/scene-posed)) (map? (gui/scene-posed)))   ;=> true"
   (%gui-scene-posed))
 
+(defn scene-watch-displacements (draw vertices)
+  "Watch draw `draw`'s displacement (its index in the first scene's `:draws`) at `vertices`, u32 little-endian bytes of vertex indices into its mesh, every frame it can be read: what the contact passes moved each listed vertex by this frame, its drawn place less its skinned place (the relax, the press and its smoothing; ADR-846). nil `vertices` stops it. Read with `gui/scene-displacements`, a frame or two behind: for a solve on the CPU that must follow her drawn skin. Only a pressed (`:deform`) draw is served (ADR-847).
+
+    (gui/scene-watch-displacements 0 nil)   ;=> nil"
+  (%gui-scene-watch-displacements draw vertices))
+
+(defn scene-displacements ()
+  "The newest displacements read back for `gui/scene-watch-displacements`: `{:draw i :displacements bytes}`, little-endian f32, three a watched vertex in the watched order; nil until one has been read, or after the watch stops (ADR-847).
+
+    (or (nil? (gui/scene-displacements)) (map? (gui/scene-displacements)))   ;=> true"
+  (%gui-scene-displacements))
+
 (def- *empty-latency* {:count 0 :max-us 0 :buckets {}})
 
 (defn latency-merge (a b)

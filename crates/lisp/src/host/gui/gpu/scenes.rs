@@ -489,6 +489,8 @@ pub(super) struct MeshGpu {
     pub(super) push_outs: super::push_outs::PushOutReader,
     /// A pressed draw's posed vertices read back for a probe (ADR-841).
     pub(super) posed_reader: super::posed_reader::PosedReader,
+    /// A pressed draw's displacement at listed vertices read back (ADR-847).
+    pub(super) displacement_reader: super::displacement_reader::DisplacementReader,
 }
 
 fn floats_bytes(values: &[f32]) -> Vec<u8> {
@@ -1449,6 +1451,7 @@ impl MeshGpu {
             timer: super::scene_timer::SceneTimer::new(device, queue),
             push_outs: super::push_outs::PushOutReader::new(device),
             posed_reader: super::posed_reader::PosedReader::new(),
+            displacement_reader: super::displacement_reader::DisplacementReader::new(),
         }
     }
 
@@ -1831,6 +1834,10 @@ impl MeshGpu {
         let posed_asked =
             crate::host::gui::scene_posed::requested().filter(|_| self.posed_reader.free());
         let mut posed_wanted: Option<(usize, u32, u32)> = None;
+        // and the draw whose listed vertices' displacements are watched (ADR-847)
+        let watched = crate::host::gui::scene_displacements::watched()
+            .filter(|_| self.displacement_reader.free());
+        let mut watch_range: Option<(u32, u32)> = None;
         for scene in scenes {
             let world = scene.draws.iter().fold(None, |bounds, draw| {
                 let more = self
@@ -2001,6 +2008,15 @@ impl MeshGpu {
                     let start = pressed_vertices;
                     pressed_vertices += mesh.vertex_count;
                     posed_ranges.push((std::ptr::from_ref(draw), start, mesh.vertex_count));
+                    if plans.is_empty()
+                        && let Some((asked, _)) = &watched
+                        && scene
+                            .draws
+                            .get(*asked)
+                            .is_some_and(|wanted| std::ptr::eq(wanted, draw))
+                    {
+                        watch_range = Some((start, mesh.vertex_count));
+                    }
                     if plans.is_empty()
                         && let Some(asked) = posed_asked
                         && scene
@@ -2336,6 +2352,7 @@ impl MeshGpu {
         }
         self.push_outs.begin_frame(device);
         self.posed_reader.begin_frame(device);
+        self.displacement_reader.begin_frame(device);
         for (index, scene) in scenes.iter().enumerate() {
             // the material bind groups this scene's draws sample
             let materials: Vec<wgpu::BindGroup> = scene
@@ -2559,6 +2576,21 @@ impl MeshGpu {
                 {
                     self.posed_reader
                         .copy(device, encoder, &contacts.posed, draw, start, count);
+                }
+                // (and the watched vertices' displacements, ADR-847)
+                if index == 0
+                    && let (Some((draw, vertices)), Some((start, count))) = (&watched, watch_range)
+                {
+                    self.displacement_reader.gather(
+                        device,
+                        queue,
+                        encoder,
+                        &contacts.posed,
+                        *draw,
+                        start,
+                        count,
+                        vertices,
+                    );
                 }
             }
             // the shadow maps: every casting draw, once a view, the view by instance index, into
