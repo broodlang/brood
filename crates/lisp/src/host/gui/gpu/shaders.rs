@@ -901,7 +901,7 @@ fn contact_within(slot: u32, point: vec3<f32>) -> f32 {
 
 // a mesh's vertex `index` read from its vertex buffer as storage (`VERTEX_FLOATS` 28 a vertex)
 fn vertex_at(index: u32) -> VertexIn {
-    let at = index * 28u;
+    let at = index * 34u;
     var input: VertexIn;
     input.index = index;
     input.position = vec3<f32>(mesh_vertices[at], mesh_vertices[at + 1u], mesh_vertices[at + 2u]);
@@ -916,6 +916,19 @@ fn vertex_at(index: u32) -> VertexIn {
     input.loose_weight = mesh_vertices[at + 26u];
     input.standoff = mesh_vertices[at + 27u];
     return input;
+}
+
+// A posed vertex is five vec4 in the scene's posed buffer: its place, normal and tangent as the
+// contact passes leave them, then its place and normal as skinned, before any contact pass (ADR-846)
+const POSED_STRIDE: u32 = 5u;
+
+// the skin vertex `index` of a garment's vertex lies on (ADR-846): its three skin vertices, as
+// indices into the carrying draw's mesh, and their barycentric weights; words 28 … 33 of the vertex
+fn carried_skin(index: u32) -> array<vec4<f32>, 2> {
+    let at = index * 34u + 28u;
+    return array<vec4<f32>, 2>(
+        vec4<f32>(mesh_vertices[at], mesh_vertices[at + 1u], mesh_vertices[at + 2u], 0.0),
+        vec4<f32>(mesh_vertices[at + 3u], mesh_vertices[at + 4u], mesh_vertices[at + 5u], 0.0));
 }
 
 // `mesh::softness_at`: a pressed vertex's softness, wholly soft for a mesh without one
@@ -964,10 +977,14 @@ fn cs_contact_depth(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let normal = safe_normalize((posed.matrix * vec4<f32>(posed.normal, 0.0)).xyz);
     let tangent = safe_normalize((posed.matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz);
-    let at = (draw.deform.y + id.x) * 3u;
+    let at = (draw.deform.y + id.x) * POSED_STRIDE;
     posed_out[at] = vec4<f32>(world, 1.0);
     posed_out[at + 1u] = vec4<f32>(normal, 0.0);
     posed_out[at + 2u] = vec4<f32>(tangent, input.tangent.w);
+    // (and its place and normal as skinned, kept: what the contact passes then move it by is the
+    // displacement a garment carried by this skin adds, ADR-846)
+    posed_out[at + 3u] = vec4<f32>(world, 1.0);
+    posed_out[at + 4u] = vec4<f32>(normal, 0.0);
     // bone, or the limb that presses (softness 0), neither pressed nor sizing a ring
     if (contact_softness(id.x) <= 0.0) {
         return;
@@ -1036,11 +1053,11 @@ fn ring_set_work(at: u32, value: vec4<f32>) {
 
 // a point's posed place and the normal its bones and keys carry there
 fn ring_posed(point: u32) -> vec3<f32> {
-    return posed_out[(draw.deform.y + ring_rep(point)) * 3u].xyz;
+    return posed_out[(draw.deform.y + ring_rep(point)) * POSED_STRIDE].xyz;
 }
 
 fn ring_carried(point: u32) -> vec3<f32> {
-    return safe_normalize(posed_out[(draw.deform.y + ring_rep(point)) * 3u + 1u].xyz);
+    return safe_normalize(posed_out[(draw.deform.y + ring_rep(point)) * POSED_STRIDE + 1u].xyz);
 }
 
 // each point as posed, into the work and its first half
@@ -1136,7 +1153,7 @@ fn cs_relax_scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let count = ring_point_count();
-    posed_out[(draw.deform.y + id.x) * 3u] = vec4<f32>(ring_work(count + ring_weld(id.x)).xyz, 1.0);
+    posed_out[(draw.deform.y + id.x) * POSED_STRIDE] = vec4<f32>(ring_work(count + ring_weld(id.x)).xyz, 1.0);
 }
 
 // pass B: each posed vertex pressed (`mesh::deform_by_contacts`), its tangent kept square to its
@@ -1146,7 +1163,7 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= draw.deform.w) {
         return;
     }
-    let at = (draw.deform.y + id.x) * 3u;
+    let at = (draw.deform.y + id.x) * POSED_STRIDE;
     var point = posed_out[at].xyz;
     var normal = posed_out[at + 1u].xyz;
     let tangent = posed_out[at + 2u];
@@ -1290,8 +1307,55 @@ fn cs_press_scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let count = ring_point_count();
     let point = ring_weld(id.x);
-    let at = (draw.deform.y + id.x) * 3u;
+    let at = (draw.deform.y + id.x) * POSED_STRIDE;
     posed_out[at] = vec4<f32>(ring_work(count + point).xyz + ring_work(point).xyz, 1.0);
+}
+
+// ADR-846: a garment carried by the skin under it. Each of its vertices that names the skin it lies
+// on (`:skin-vertices`, `:skin-bary`) takes that skin's displacement this frame (its drawn place less
+// its skinned place, interpolated from the three skin vertices), faded by how far it lies off that
+// skin as skinned: whole within `CARRY_NEAR`, none from `CARRY_FAR`. Where the carry fades, it keeps
+// what its own passes did in proportion. Its normal is turned the same way. The carrying draw's
+// first posed vertex and its vertex count ride in `draw.eye_uv` (x, y as bits; z 1 when carried):
+// a garment is never an eye. The last contact step but the push-out net, after every draw's own
+const CARRY_NEAR: f32 = 0.008;
+const CARRY_FAR: f32 = 0.03;
+@compute @workgroup_size(64)
+fn cs_garment_carry(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= draw.deform.w || draw.eye_uv.z < 0.5) {
+        return;
+    }
+    let skin = carried_skin(id.x);
+    let bary = skin[1].xyz;
+    if (bary.x + bary.y + bary.z < 0.5) {
+        return;
+    }
+    let carrier = bitcast<u32>(draw.eye_uv.x);
+    let carrier_count = bitcast<u32>(draw.eye_uv.y);
+    var moved = vec3<f32>(0.0);
+    var turned = vec3<f32>(0.0);
+    var skinned = vec3<f32>(0.0);
+    for (var corner = 0u; corner < 3u; corner = corner + 1u) {
+        let vertex = u32(skin[0][corner] + 0.5);
+        if (vertex >= carrier_count) {
+            return;
+        }
+        let source = (carrier + vertex) * POSED_STRIDE;
+        let weight = bary[corner];
+        moved = moved + (posed_out[source].xyz - posed_out[source + 3u].xyz) * weight;
+        turned = turned + (posed_out[source + 1u].xyz - posed_out[source + 4u].xyz) * weight;
+        skinned = skinned + posed_out[source + 3u].xyz * weight;
+    }
+    let at = (draw.deform.y + id.x) * POSED_STRIDE;
+    let own_skinned = posed_out[at + 3u].xyz;
+    let own_now = posed_out[at].xyz;
+    let fade = 1.0 - smoothstep(CARRY_NEAR, CARRY_FAR, length(own_skinned - skinned));
+    let placed = own_skinned + moved * fade + (own_now - own_skinned) * (1.0 - fade);
+    let normal = safe_normalize(mix(posed_out[at + 1u].xyz, posed_out[at + 4u].xyz + turned, fade));
+    let tangent = posed_out[at + 2u];
+    posed_out[at] = vec4<f32>(placed, posed_out[at].w);
+    posed_out[at + 1u] = vec4<f32>(normal, 0.0);
+    posed_out[at + 2u] = vec4<f32>(safe_normalize(tangent.xyz - normal * dot(normal, tangent.xyz)), tangent.w);
 }
 
 // collider `index`'s centre this frame: its joints' palette blended by its weights, as a vertex
@@ -1329,7 +1393,7 @@ fn cs_garment_push_out(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= draw.deform.w || (draw.flags.y & 8192u) == 0u) {
         return;
     }
-    let at = (draw.deform.y + id.x) * 3u;
+    let at = (draw.deform.y + id.x) * POSED_STRIDE;
     var point = posed_out[at].xyz;
     var pushed = false;
     let count = min(contact_list.count.x, 64u);
@@ -1628,7 +1692,7 @@ fn pose(input: VertexIn) -> Posed {
 fn vs_mesh(input: VertexIn) -> VertexOut {
     // a pressed draw (ADR-805): its vertex as the contact passes posed and pressed it
     if (draw.deform.x == 1u) {
-        let at = (draw.deform.y + input.index) * 3u;
+        let at = (draw.deform.y + input.index) * POSED_STRIDE;
         var pressed: VertexOut;
         pressed.world = posed_vertices[at].xyz;
         pressed.clip = scene.view_proj * vec4<f32>(pressed.world, 1.0);
@@ -3614,7 +3678,7 @@ fn vs_shadow(input: VertexIn, @builtin(instance_index) view_index: u32) -> Shado
     // a pressed draw (ADR-805): its vertex as the contact passes posed and pressed it
     if (draw.deform.x == 1u) {
         var pressed: ShadowOut;
-        pressed.clip = scene.shadows[view_index].view_proj * vec4<f32>(posed_vertices[(draw.deform.y + input.index) * 3u].xyz, 1.0);
+        pressed.clip = scene.shadows[view_index].view_proj * vec4<f32>(posed_vertices[(draw.deform.y + input.index) * POSED_STRIDE].xyz, 1.0);
         pressed.uv = input.uv;
         pressed.view = view_index;
         return pressed;

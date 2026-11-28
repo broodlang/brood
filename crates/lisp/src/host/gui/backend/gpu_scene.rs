@@ -2232,3 +2232,160 @@ fn a_knit_lets_through_only_what_it_lies_on_on_the_gpu() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn a_carried_garment_keeps_its_offset_over_the_pressed_skin_on_the_gpu() {
+    // ADR-846: a soft slab pressed by a ball, and a garment slab 5 mm in front of it paired vertex
+    // for vertex with it (`:carried-by 0`). Pressed on its own the garment would lie on the ball
+    // with the skin; carried, it stays 5 mm off the skin's pressed middle.
+    use crate::host::gui::mesh::Contact;
+    use crate::host::gui::scene_posed;
+    let side = 64u32;
+    let cells = 24usize;
+    let slab = |z: f32, paired: bool| {
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        for row in 0..=cells {
+            for column in 0..=cells {
+                let x = column as f32 / cells as f32 - 0.5;
+                let y = row as f32 / cells as f32 - 0.5;
+                positions.extend_from_slice(&[x, y, z]);
+                normals.extend_from_slice(&[0.0, 0.0, -1.0]);
+            }
+        }
+        let mut indices = Vec::new();
+        for row in 0..cells {
+            for column in 0..cells {
+                let corner = (row * (cells + 1) + column) as u32;
+                let next = corner + (cells + 1) as u32;
+                indices.extend_from_slice(&[corner, corner + 1, next, corner + 1, next + 1, next]);
+            }
+        }
+        let count = (cells + 1) * (cells + 1);
+        let (skin_vertices, skin_bary) = if paired {
+            (
+                (0..count as u32)
+                    .flat_map(|vertex| [vertex, vertex, vertex])
+                    .flat_map(|vertex| vertex.to_le_bytes())
+                    .collect(),
+                bytes_of(
+                    &(0..count)
+                        .flat_map(|_| [1.0f32, 0.0, 0.0])
+                        .collect::<Vec<_>>(),
+                ),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        Arc::new(
+            Mesh::from_parts(MeshParts {
+                positions: bytes_of(&positions),
+                normals: bytes_of(&normals),
+                indices: indices
+                    .iter()
+                    .flat_map(|index| index.to_le_bytes())
+                    .collect(),
+                indices_wide: true,
+                softness: bytes_of(&vec![1.0; count]),
+                skin_vertices,
+                skin_bary,
+                skin_vertex_count: paired.then_some(count as u32),
+                ..MeshParts::default()
+            })
+            .expect("a slab"),
+        )
+    };
+    let skin = slab(0.5, false);
+    let cloth = slab(0.495, true);
+    let mut scene = self::scene();
+    scene.w = side as f32;
+    scene.h = side as f32;
+    scene.lights = vec![Light::directional([0.6, -0.5, 0.6], [1.0, 1.0, 1.0])];
+    let identity = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    let draw = |mesh: u32, material: Material| Draw {
+        loose: None,
+        mesh,
+        model: identity,
+        palette: None,
+        morphs: vec![],
+        material,
+    };
+    scene.draws = vec![
+        draw(
+            1,
+            Material {
+                deform: true,
+                double_sided: true,
+                ..Material::default()
+            },
+        ),
+        draw(
+            2,
+            Material {
+                deform: true,
+                garment: true,
+                carried_by: Some(0),
+                double_sided: true,
+                ..Material::default()
+            },
+        ),
+    ];
+    // a ball reaching 5 cm past the skin, from in front
+    scene.contacts = vec![Contact::Sphere {
+        centre: [0.0, 0.0, 0.35],
+        radius: 0.2,
+    }];
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let middle = cells / 2 * (cells + 1) + cells / 2;
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, side, side) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &skin);
+        gpu.upload_mesh(2, &cloth);
+        let mut read = |draw: usize| -> Option<f32> {
+            scene_posed::request(draw);
+            for _ in 0..8 {
+                let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+                gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                    .expect("an offscreen frame is never skipped");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                if let Some(sample) = scene_posed::latest()
+                    && sample.draw == draw
+                    && scene_posed::requested().is_none()
+                {
+                    return sample.positions.get(middle * 3 + 2).copied();
+                }
+            }
+            None
+        };
+        let (Some(skin_z), Some(cloth_z)) = (read(0), read(1)) else {
+            failures.push(format!("{name}: the posed slabs were never read back"));
+            continue;
+        };
+        eprintln!(
+            "{name}: the skin's middle at z {skin_z:.4}, the carried cloth's at {cloth_z:.4}"
+        );
+        // (pressed away from the ball, toward +z, by up to `MAX_SQUASH`)
+        if skin_z < 0.51 {
+            failures.push(format!(
+                "{name}: the ball did not press the skin: z {skin_z}"
+            ));
+        }
+        if ((skin_z - cloth_z) - 0.005).abs() > 0.0005 {
+            failures.push(format!(
+                "{name}: the cloth does not keep its 5 mm over the pressed skin: skin {skin_z}, cloth {cloth_z}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

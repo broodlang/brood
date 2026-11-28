@@ -14,8 +14,7 @@ const MAPPING: u8 = 2;
 const MAPPED: u8 = 3;
 const FAILED: u8 = 4;
 
-/// The bytes a posed vertex takes: three vec4.
-const POSED_BYTES: u64 = 48;
+use super::scenes::POSED_BYTES;
 
 pub(super) struct PosedReader {
     buffer: Option<wgpu::Buffer>,
@@ -53,7 +52,7 @@ impl PosedReader {
                                 .collect();
                             let mut positions = Vec::with_capacity(self.count as usize * 3);
                             let mut normals = Vec::with_capacity(self.count as usize * 3);
-                            for vertex in floats.as_chunks::<12>().0 {
+                            for vertex in floats.as_chunks::<20>().0 {
                                 positions.extend_from_slice(&vertex[0..3]);
                                 normals.extend_from_slice(&vertex[4..7]);
                             }

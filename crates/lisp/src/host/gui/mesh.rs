@@ -308,6 +308,13 @@ pub struct Mesh {
     /// turns about it by its joints' blended rotation ([`skin_matrix`]); empty: its joints'
     /// matrices blended.
     pub centres: Vec<[f32; 3]>,
+    /// Each vertex's skin under it, for a garment carried by that skin (ADR-846): three vertex indices
+    /// into the carrying draw's mesh and their barycentric weights; empty: not carried. A vertex with
+    /// weights all 0 is not carried either.
+    pub skin_pairs: Vec<([u32; 3], [f32; 3])>,
+    /// The carrying mesh's vertex count its pairs were made against (`:skin-vertex-count`): a draw
+    /// carried by a mesh of another count is not carried.
+    pub skin_vertex_count: Option<u32>,
     /// Where its vertices can be, for fitting a shadow map to a scene without posing them.
     pub bounds: MeshBounds,
 }
@@ -558,6 +565,12 @@ pub struct MeshParts {
     /// Each vertex's centre of rotation (ADR-814): three f32, `gui/skin-centres`; empty: skinned
     /// by blending its joints' matrices, as before.
     pub centres: Vec<u8>,
+    /// Each vertex's skin under it (ADR-846): three u32 vertex indices (`:skin-vertices`) and three
+    /// f32 barycentric weights (`:skin-bary`) a vertex; both empty: not carried.
+    pub skin_vertices: Vec<u8>,
+    pub skin_bary: Vec<u8>,
+    /// The carrying mesh's vertex count those indices were made against (`:skin-vertex-count`).
+    pub skin_vertex_count: Option<u32>,
 }
 
 /// A sparse morph target's listed vertices (`name` says which list, for an error): u32 a vertex,
@@ -945,6 +958,32 @@ impl Mesh {
         } else {
             floats::<3>("centres", &parts.centres, count)?
         };
+        // (each vertex's skin under it, for a garment carried by it, ADR-846)
+        let skin_pairs = if parts.skin_vertices.is_empty() && parts.skin_bary.is_empty() {
+            Vec::new()
+        } else {
+            if parts.skin_vertices.len() != count * 12 {
+                return Err(format!(
+                    "skin-vertices: {count} vertices need {} bytes, got {}",
+                    count * 12,
+                    parts.skin_vertices.len()
+                ));
+            }
+            let bary = floats::<3>("skin-bary", &parts.skin_bary, count)?;
+            parts
+                .skin_vertices
+                .as_chunks::<12>()
+                .0
+                .iter()
+                .zip(bary)
+                .map(|(entry, weights)| {
+                    let index = |at: usize| {
+                        u32::from_le_bytes([entry[at], entry[at + 1], entry[at + 2], entry[at + 3]])
+                    };
+                    ([index(0), index(4), index(8)], weights)
+                })
+                .collect()
+        };
         // a strand mesh's triangles ordered by their strand's own random number (ADR-813): each
         // strand's together, and any leading share of them an even random choice of its strands,
         // what the GPU's shadow pass draws (a fibre head's shadow from a share of its strands)
@@ -972,6 +1011,8 @@ impl Mesh {
             curvature,
             softness,
             centres,
+            skin_pairs,
+            skin_vertex_count: parts.skin_vertex_count,
             bounds,
         })
     }
@@ -1220,6 +1261,9 @@ pub struct Material {
     /// Its mesh's `:cover` in force (`:covered`, ADR-839): pressed, each vertex stops the larger of its
     /// standoff and its cover short of the contact (her skin under the garment she wears now).
     pub covered: bool,
+    /// The draw of the scene, by its index in `:draws`, whose skin carries this garment (`:carried-by`,
+    /// ADR-846): each vertex its mesh pairs with that skin moves with it.
+    pub carried_by: Option<usize>,
     /// Its second UV set read as the cloth's stretch, weft and warp, 1 at rest (`:stretch-from-uv2`,
     /// ADR-840): the detail tile opened by it.
     pub stretch_from_uv2: bool,
@@ -1323,6 +1367,7 @@ impl Default for Material {
             deform: false,
             garment: false,
             covered: false,
+            carried_by: None,
             stretch_from_uv2: false,
             knit_cover: 0.0,
             knit_layers: 1.0,

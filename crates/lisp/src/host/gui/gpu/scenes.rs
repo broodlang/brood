@@ -14,7 +14,10 @@ use crate::host::gui::mesh::{
 
 /// Floats a vertex: position 3, normal 3, uv 2, tangent 4, joints 4 (as u32), weights 4,
 /// curvature 1.
-pub(super) const VERTEX_FLOATS: usize = 28;
+pub(super) const VERTEX_FLOATS: usize = 34;
+/// A posed vertex in a scene's posed buffer: five vec4 (place, normal, tangent as the contact
+/// passes leave them; place and normal as skinned, ADR-846), `POSED_STRIDE` in `MESH_SRC`.
+pub(super) const POSED_BYTES: u64 = 80;
 
 /// A `:fibres` mesh casts its shadow from one strand in this many (its triangles ordered by each
 /// strand's random number, so the first share is an even choice), each drawn this many times as
@@ -71,6 +74,9 @@ pub(super) struct GpuMesh {
     has_cover: bool,
     /// For a mesh that can be pressed: what its squeezed skin is relaxed by (ADR-822).
     ring: Option<MeshRing>,
+    /// For a garment's mesh: the vertex count of the skin its vertices pair with, when they do
+    /// (ADR-846; the pairs ride in its vertex buffer).
+    skin_vertex_count: Option<u32>,
 }
 
 /// How a pressed mesh's skin is relaxed where skinning squeezes it (ADR-822): its vertices
@@ -429,6 +435,10 @@ pub(super) struct MeshGpu {
     contact_deform_pipeline: wgpu::ComputePipeline,
     /// The push-out net (ADR-839): a garment's vertices moved out of her skin's garment contacts.
     garment_push_out_pipeline: wgpu::ComputePipeline,
+    /// A garment carried by the skin under it (ADR-846), just before the push-out net.
+    garment_carry_pipeline: wgpu::ComputePipeline,
+    /// Whether a refused `:carried-by` has been said (once, ADR-846).
+    carry_refused: bool,
     /// The relax passes (ADR-822): gather, mask, even, odd, scatter.
     contact_relax_pipelines: [wgpu::ComputePipeline; 5],
     /// The press smoothed so it cannot fold her skin (ADR-844): gather, out, back, scatter.
@@ -1344,6 +1354,8 @@ impl MeshGpu {
         let contact_deform_pipeline = contact_pipeline("cs_contact_deform");
         // (and the push-out net for garments, last, ADR-839)
         let garment_push_out_pipeline = contact_pipeline("cs_garment_push_out");
+        // (and before it a garment carried by its skin, ADR-846)
+        let garment_carry_pipeline = contact_pipeline("cs_garment_carry");
         let contact_relax_pipelines = [
             contact_pipeline("cs_relax_gather"),
             contact_pipeline("cs_relax_mask"),
@@ -1369,6 +1381,8 @@ impl MeshGpu {
             contact_depth_pipeline,
             contact_deform_pipeline,
             garment_push_out_pipeline,
+            garment_carry_pipeline,
+            carry_refused: false,
             contact_relax_pipelines,
             contact_press_pipelines,
             no_posed,
@@ -1509,6 +1523,15 @@ impl MeshGpu {
                     .unwrap_or(0.0)
                     .to_le_bytes(),
             );
+            // the skin it lies on, for a garment carried by it (ADR-846): three vertex indices as
+            // floats (exact below 2^24) and their barycentric weights; weights 0: not carried
+            let (skin, bary) = mesh
+                .skin_pairs
+                .get(index)
+                .copied()
+                .unwrap_or(([0; 3], [0.0; 3]));
+            vertices.extend(floats_bytes(&skin.map(|vertex| vertex as f32)));
+            vertices.extend(floats_bytes(&bary));
         }
         let vertex_buffer = buffer(
             device,
@@ -1580,6 +1603,9 @@ impl MeshGpu {
                 has_softness,
                 has_cover,
                 ring,
+                skin_vertex_count: (!mesh.skin_pairs.is_empty())
+                    .then_some(mesh.skin_vertex_count)
+                    .flatten(),
             },
         );
     }
@@ -1840,6 +1866,10 @@ impl MeshGpu {
                 palette_floats.extend(joint_rotation_floats(whole));
             }
             let mut plan = Vec::new();
+            // (each pressed draw's posed range, and the garments carried by a skin, ADR-846: a
+            // carried draw's uniform is made again once its carrier's range is known)
+            let mut posed_ranges: Vec<(*const crate::host::gui::mesh::Draw, u32, u32)> = Vec::new();
+            let mut carried = Vec::new();
             for draw in scene.draw_order() {
                 let Some(mesh) = self.meshes.get(&draw.mesh) else {
                     continue;
@@ -1970,6 +2000,7 @@ impl MeshGpu {
                 let deform = if pressed {
                     let start = pressed_vertices;
                     pressed_vertices += mesh.vertex_count;
+                    posed_ranges.push((std::ptr::from_ref(draw), start, mesh.vertex_count));
                     if plans.is_empty()
                         && let Some(asked) = posed_asked
                         && scene
@@ -2004,10 +2035,31 @@ impl MeshGpu {
                     ],
                     deform,
                     loose.unwrap_or([0.0; 4]),
+                    None,
                 );
                 bytes.resize(DRAW_BYTES as usize, 0);
                 let at = draw_bytes.len() / DRAW_BYTES as usize;
                 draw_bytes.extend(bytes);
+                if pressed
+                    && let (Some(carrier), Some(skin_count)) =
+                        (material.carried_by, mesh.skin_vertex_count)
+                {
+                    carried.push((
+                        at,
+                        draw,
+                        [surface, bits, palette_start, skinned],
+                        [
+                            u32::from(morphed),
+                            mesh.vertex_count,
+                            palette_joints,
+                            morph_start,
+                        ],
+                        deform,
+                        loose.unwrap_or([0.0; 4]),
+                        carrier,
+                        skin_count,
+                    ));
+                }
                 plan.push(DrawPlan {
                     at,
                     mesh: draw.mesh,
@@ -2026,6 +2078,39 @@ impl MeshGpu {
                         None
                     },
                 });
+            }
+            // the carried garments' uniforms again, with their carrier's posed range (ADR-846): only
+            // a carrier that is pressed in this scene and whose mesh has the vertex count the
+            // pairs were made against; else drawn uncarried, said once
+            for (at, draw, flags, morph_info, deform, loose, carrier, skin_count) in carried {
+                let range = scene.draws.get(carrier).and_then(|wanted| {
+                    posed_ranges
+                        .iter()
+                        .find(|(seen, _, _)| std::ptr::eq(*seen, wanted))
+                        .map(|&(_, start, count)| (start, count))
+                });
+                match range {
+                    Some((start, count)) if count == skin_count => {
+                        let mut bytes = draw_uniform(
+                            draw,
+                            flags,
+                            morph_info,
+                            deform,
+                            loose,
+                            Some((start, count)),
+                        );
+                        bytes.resize(DRAW_BYTES as usize, 0);
+                        let from = at * DRAW_BYTES as usize;
+                        draw_bytes[from..from + DRAW_BYTES as usize].copy_from_slice(&bytes);
+                    }
+                    _ if !self.carry_refused => {
+                        self.carry_refused = true;
+                        eprintln!(
+                            "brood gui: a garment's :carried-by {carrier} names no pressed draw whose mesh has the {skin_count} vertices its skin pairs were made against; it is drawn uncarried (ADR-846)"
+                        );
+                    }
+                    _ => {}
+                }
             }
             plans.push(plan);
             pressed_totals.push(pressed_vertices);
@@ -2123,7 +2208,7 @@ impl MeshGpu {
                         posed: buffer(
                             device,
                             "posed vertices",
-                            u64::from(pressed) * 48,
+                            u64::from(pressed) * POSED_BYTES,
                             storage | wgpu::BufferUsages::COPY_SRC,
                         ),
                         capacity: pressed,
@@ -2448,6 +2533,8 @@ impl MeshGpu {
                     ));
                 }
                 steps.push((press_scatter, false, true));
+                // (a garment carried by its skin, every draw's own passes done, ADR-846)
+                steps.push((&self.garment_carry_pipeline, false, false));
                 steps.push((&self.garment_push_out_pipeline, false, false));
                 for (pipeline, by_point, needs_ring) in steps.iter() {
                     pass.set_pipeline(pipeline);
@@ -3130,6 +3217,7 @@ pub(super) fn draw_uniform(
     morph_info: [u32; 4],
     deform: [u32; 4],
     loose: [f32; 4],
+    carry: Option<(u32, u32)>,
 ) -> Vec<u8> {
     let material = &draw.material;
     let mut floats = Vec::with_capacity(32);
@@ -3178,7 +3266,15 @@ pub(super) fn draw_uniform(
         material.detail_strength,
         material.detail_cavity,
     ]));
-    bytes.extend(floats_bytes(&eye_floats(material)));
+    // (its `eye_uv`, for a garment carried by a skin, ADR-846: the carrier's first posed vertex and
+    // its vertex count as bits, and 1: a garment is never an eye)
+    let mut eye = eye_floats(material);
+    if let Some((start, count)) = carry {
+        eye[24] = f32::from_bits(start);
+        eye[25] = f32::from_bits(count);
+        eye[26] = 1.0;
+    }
+    bytes.extend(floats_bytes(&eye));
     // `DrawU::sheen`: a hair surface's second highlight's colour; any other surface's
     // `:surroundings` (ADR-831: no surface reads both); the fourth float 1 when given
     let sheen = match material.surface {

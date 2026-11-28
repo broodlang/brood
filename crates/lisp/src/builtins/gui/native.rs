@@ -1868,6 +1868,11 @@ fn scene_spec(
         material.garment = matches!(get(material_map, "garment"), Some(Value::Bool(true)));
         // and the mesh's garment cover in force over her skin (ADR-839)
         material.covered = matches!(get(material_map, "covered"), Some(Value::Bool(true)));
+        // and the draw whose skin carries it, by its index in the scene's `:draws` (ADR-846)
+        material.carried_by = match get(material_map, "carried-by") {
+            Some(Value::Int(index)) if index >= 0 => Some(index as usize),
+            _ => None,
+        };
         // and a garment's stretch read from its second UV set (ADR-840)
         material.stretch_from_uv2 = matches!(
             get(material_map, "stretch-from-uv2"),
@@ -3301,6 +3306,13 @@ pub(in crate::builtins) fn gui_mesh(args: &[Value], _: EnvId, heap: &mut Heap) -
         strand: mesh_bytes(heap, map, "strand")?,
         visibility: mesh_bytes(heap, map, "visibility")?,
         centres: mesh_bytes(heap, map, "centres")?,
+        // (each vertex's skin under it, for a garment carried by it, ADR-846)
+        skin_vertices: mesh_bytes(heap, map, "skin-vertices")?,
+        skin_bary: mesh_bytes(heap, map, "skin-bary")?,
+        skin_vertex_count: match heap.map_get(map, value::kw("skin-vertex-count")) {
+            Some(Value::Int(count)) if count >= 0 => Some(count as u32),
+            _ => None,
+        },
     };
     if let Some(Value::Vector(morphs)) = heap.map_get(map, value::kw("morphs")) {
         let targets = heap.vector(morphs).to_vec();

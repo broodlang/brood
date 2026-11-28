@@ -202,11 +202,11 @@ fn the_mesh_shader_validates() {
     );
     assert_eq!(
         scenes::VERTEX_FLOATS,
-        28,
-        "a vertex carries its curvature, its centre of rotation, its second UV set, its lag weight and its standoff"
+        34,
+        "a vertex carries its curvature, its centre of rotation, its second UV set, its lag weight, its standoff and the skin it lies on (ADR-846)"
     );
     assert!(
-        MESH_SRC.contains("let at = index * 28u;"),
+        MESH_SRC.contains("let at = index * 34u;"),
         "the shader reads a vertex at the stride it is packed"
     );
     assert!(MESH_SRC.contains("@location(6) curvature: f32"));
@@ -227,7 +227,7 @@ fn the_mesh_shader_validates() {
             ..Material::default()
         },
     };
-    let packed = scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4], [0.0; 4]);
+    let packed = scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4], [0.0; 4], None);
     assert_eq!(
         packed.len() as u64,
         draw_declared,
@@ -281,7 +281,7 @@ fn the_mesh_shader_validates() {
         },
         ..draw
     };
-    let packed = scenes::draw_uniform(&coated, [0; 4], [0; 4], [0; 4], [0.0; 4]);
+    let packed = scenes::draw_uniform(&coated, [0; 4], [0; 4], [0; 4], [0.0; 4], None);
     let floats: Vec<f32> = packed[80..112]
         .as_chunks::<4>()
         .0
@@ -345,7 +345,7 @@ fn the_mesh_shader_validates() {
                 ..Material::default()
             },
         };
-        let packed = scenes::draw_uniform(&eyed, [0; 4], [0; 4], [0; 4], [0.0; 4]);
+        let packed = scenes::draw_uniform(&eyed, [0; 4], [0; 4], [0; 4], [0.0; 4], None);
         assert_eq!(packed.len() as u64, draw_declared);
         packed[192..192 + 32 * 4]
             .as_chunks::<4>()
@@ -391,6 +391,7 @@ fn the_mesh_shader_validates() {
         [0; 4],
         [0; 4],
         [0.0; 4],
+        None,
     );
     let read = |at: usize| f32::from_le_bytes(pupils[at..at + 4].try_into().expect("a float"));
     let clamp_floats: Vec<f32> = (0..16).map(|index| read(384 + index * 4)).collect();
@@ -424,7 +425,7 @@ fn the_mesh_shader_validates() {
             ..Material::default()
         },
     };
-    let floats: Vec<f32> = scenes::draw_uniform(&hair, [0; 4], [0; 4], [0; 4], [0.0; 4])
+    let floats: Vec<f32> = scenes::draw_uniform(&hair, [0; 4], [0; 4], [0; 4], [0.0; 4], None)
         .as_chunks::<4>()
         .0
         .iter()
@@ -896,7 +897,7 @@ fn surroundings_ride_in_the_sheen_slot_of_a_surface_that_is_not_hair() {
             morphs: Vec::new(),
             material,
         };
-        scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4], [0.0; 4])
+        scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4], [0.0; 4], None)
             .as_chunks::<4>()
             .0
             .iter()
@@ -979,7 +980,7 @@ fn a_cloths_sheen_rides_in_the_strand_slot_of_a_surface_that_is_not_hair() {
             morphs: Vec::new(),
             material,
         };
-        let floats: Vec<f32> = scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4], [0.0; 4])
+        let floats: Vec<f32> = scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4], [0.0; 4], None)
             .as_chunks::<4>()
             .0
             .iter()
@@ -1064,6 +1065,11 @@ fn a_garments_contact_is_flagged_in_its_drags_fourth_float() {
     assert_eq!(float(4 + 11), 1.0, "the garment's flag");
     assert_eq!(float(4 + 24 + 11), 0.0, "an ordinary contact's");
     assert!(MESH_SRC.contains("fn cs_garment_push_out("));
+    assert!(MESH_SRC.contains("fn cs_garment_carry("));
+    assert!(MESH_SRC.contains(&format!(
+        "const POSED_STRIDE: u32 = {}u;",
+        scenes::POSED_BYTES / 16
+    )));
     assert!(MESH_SRC.contains(&format!(
         "var<storage, read_write> contact_depths: array<atomic<u32>, {}>;",
         MAX_CONTACTS + 1
@@ -1124,7 +1130,7 @@ fn a_stretched_knits_cover_rides_in_the_clamp_slots() {
             ..Material::default()
         },
     };
-    let packed = scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4], [0.0; 4]);
+    let packed = scenes::draw_uniform(&draw, [0; 4], [0; 4], [0; 4], [0.0; 4], None);
     let read = |at: usize| f32::from_le_bytes(packed[at..at + 4].try_into().expect("a float"));
     assert_eq!((read(384), read(388)), (0.96, 2.0));
     assert_eq!(read(368), 0.0, "a knit keeps to no clamp planes");
@@ -1150,7 +1156,7 @@ fn a_see_through_share_rides_in_the_materials_third_float_and_its_stretch_in_bit
         material,
     };
     let third = |material: Material| {
-        let packed = scenes::draw_uniform(&draw(material), [0; 4], [0; 4], [0; 4], [0.0; 4]);
+        let packed = scenes::draw_uniform(&draw(material), [0; 4], [0; 4], [0; 4], [0.0; 4], None);
         f32::from_le_bytes(packed[104..108].try_into().expect("a float"))
     };
     let garment = Material {
