@@ -269,6 +269,7 @@ pub fn sphere_mesh(cord: &Cord) -> Option<Mesh> {
         indices_wide: true,
         ..MeshParts::default()
     };
+    let eight = cord.spheres.iter().any(|sphere| sphere.skin.len() > 4);
     for (index, sphere) in cord.spheres.iter().enumerate() {
         sphere
             .centre
@@ -278,6 +279,15 @@ pub fn sphere_mesh(cord: &Cord) -> Option<Mesh> {
             let (joint, weight) = sphere.skin.get(slot).copied().unwrap_or((0, 0.0));
             parts.joints.extend((joint as u16).to_le_bytes());
             parts.weights.extend((weight as f32).to_le_bytes());
+        }
+        // (and its second four, eight influences, when any sphere of the cord has more than four:
+        // as gui/posed-positions reads a spec with `:joints1` / `:weights1`, ADR-845)
+        if eight {
+            for slot in 4..8 {
+                let (joint, weight) = sphere.skin.get(slot).copied().unwrap_or((0, 0.0));
+                parts.joints1.extend((joint as u16).to_le_bytes());
+                parts.weights1.extend((weight as f32).to_le_bytes());
+            }
         }
         let pivot = sphere.pivot.unwrap_or(sphere.centre);
         pivot
