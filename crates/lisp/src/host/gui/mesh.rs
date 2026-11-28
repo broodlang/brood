@@ -7087,6 +7087,12 @@ mod tests {
             with.views[beneath as usize].view_proj,
             with.views[occlusion as usize].view_proj
         );
+        // (at least a texel a pixel each way: the camera's projection into a square of the
+        // picture's longer side, up to MAX_OCCLUSION_SIDE; at the user's 1920 × 1080, 1 across and
+        // 1.78 down)
+        let (width, height) = scene.pixel_size();
+        let view = &with.views[beneath as usize];
+        assert!(view.resolution >= width.max(height).min(MAX_OCCLUSION_SIDE));
         scene.draws[1].material.surface = Surface::Blend;
         assert_eq!(shadow_plan(&scene, None).beneath, None);
         scene.draws[1].material.surface = Surface::Standard;

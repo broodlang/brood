@@ -2465,10 +2465,16 @@ fn knit_through(fragment: VertexOut, surface_normal: vec3<f32>) -> f32 {
     if (across_unit < 0.0 || across_unit >= 1.0 || down_unit < 0.0 || down_unit >= 1.0) {
         return 0.0;
     }
-    let side = u32(view.info.y);
-    let column = min(u32(across_unit * f32(side)), side - 1u);
-    let row = min(u32(down_unit * f32(side)), side - 1u);
-    let beneath = camera_distance(view.view_proj, map_load(view.map, vec2<i32>(i32(column), i32(row))));
+    // (the least gap of the 2×2 texels round the point, so the contact's edge fades smoothly as
+    // she moves rather than stepping texel by texel)
+    let side = i32(view.info.y);
+    let corner = vec2<i32>(floor(vec2<f32>(across_unit, down_unit) * f32(side) - vec2<f32>(0.5)));
+    var nearest = 1.0;
+    for (var tap = 0; tap < 4; tap = tap + 1) {
+        let texel = clamp(corner + vec2<i32>(tap % 2, tap / 2), vec2<i32>(0), vec2<i32>(side - 1));
+        nearest = min(nearest, map_load(view.map, texel));
+    }
+    let beneath = camera_distance(view.view_proj, nearest);
     let own = camera_distance(view.view_proj, clip.z / clip.w);
     let to_eye = safe_normalize(scene.eye.xyz - fragment.world);
     let facing = clamp(abs(dot(surface_normal, to_eye)), 0.05, 1.0);
