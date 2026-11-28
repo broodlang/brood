@@ -104,6 +104,10 @@ pub(super) const RELAX_ITERATIONS: u32 = 48;
 /// kink out of the curve from her inner thigh into her groin as well as eight did (filmed side by
 /// side) at half the cost. Even, so the passes end where the scatter reads.
 pub(super) const PRESS_SMOOTH_ITERATIONS: u32 = 4;
+/// How many passes carry the press ring's distance along the skin (`cs_skin_ring_out` / `back`,
+/// ADR-849): a ring three widths out reaches this many ring edges from its patch. Even, so it
+/// ends where it began.
+pub(super) const SKIN_RING_PASSES: u32 = 24;
 
 /// A pressed mesh's relax data (ADR-822), built once from its rest shape.
 fn mesh_ring(device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Mesh) -> Option<MeshRing> {
@@ -220,7 +224,8 @@ fn mesh_ring(device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Mesh) -> Option<
         let here = at(point);
         data.extend_from_slice(&[here[0], here[1], here[2], 0.0]);
     }
-    data.resize(count * 5 * 4, 0.0);
+    // (and two more vec4 a point for the press ring along the skin, ADR-849: its seed and spread)
+    data.resize(count * 7 * 4, 0.0);
     Some(MeshRing {
         index: store("mesh ring index", &words(&index)),
         data: store("mesh ring data", &floats_bytes(&data)),
@@ -443,6 +448,8 @@ pub(super) struct MeshGpu {
     contact_relax_pipelines: [wgpu::ComputePipeline; 5],
     /// The press smoothed so it cannot fold her skin (ADR-844): gather, out, back, scatter.
     contact_press_pipelines: [wgpu::ComputePipeline; 4],
+    /// the press ring along the skin (ADR-849): spread out, back, mark, lift
+    skin_ring_pipelines: [wgpu::ComputePipeline; 4],
     no_ring: wgpu::Buffer,
     no_ring_work: wgpu::Buffer,
     no_posed: wgpu::Buffer,
@@ -1375,6 +1382,12 @@ impl MeshGpu {
             contact_pipeline("cs_press_smooth_back"),
             contact_pipeline("cs_press_scatter"),
         ];
+        let skin_ring_pipelines = [
+            contact_pipeline("cs_skin_ring_out"),
+            contact_pipeline("cs_skin_ring_back"),
+            contact_pipeline("cs_skin_ring_mark"),
+            contact_pipeline("cs_skin_ring_lift"),
+        ];
         // bound where a scene presses nothing: a posed vertex's worth of zeros
         let no_posed = buffer(device, "no posed vertices", 48, storage_usage);
         // (bound for the relax of a pressed mesh that has none, ADR-822)
@@ -1391,6 +1404,7 @@ impl MeshGpu {
             carry_refused: false,
             contact_relax_pipelines,
             contact_press_pipelines,
+            skin_ring_pipelines,
             no_posed,
             no_ring,
             no_ring_work,
@@ -2582,6 +2596,22 @@ impl MeshGpu {
                     ));
                 }
                 steps.push((press_scatter, false, true));
+                // (the press's ring along the skin, ADR-849: its distance spread, each point's ring
+                // marked, each vertex lifted)
+                let [ring_out, ring_back, ring_mark, ring_lift] = &self.skin_ring_pipelines;
+                for iteration in 0..SKIN_RING_PASSES {
+                    steps.push((
+                        if iteration % 2 == 0 {
+                            ring_out
+                        } else {
+                            ring_back
+                        },
+                        true,
+                        true,
+                    ));
+                }
+                steps.push((ring_mark, true, true));
+                steps.push((ring_lift, false, true));
                 // (a garment carried by its skin, every draw's own passes done, ADR-846)
                 steps.push((&self.garment_carry_pipeline, false, false));
                 steps.push((&self.garment_push_out_pipeline, false, false));

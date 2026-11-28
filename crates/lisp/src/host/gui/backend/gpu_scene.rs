@@ -2452,6 +2452,132 @@ fn a_carried_garment_keeps_its_offset_over_the_pressed_skin_on_the_gpu() {
 }
 
 #[test]
+fn a_press_ring_rises_beside_the_dent_measured_along_the_skin_on_the_gpu() {
+    let _turn = READBACK_TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // ADR-849: a soft slab (1 m, 24 cells) pressed 5 cm by a ball from in front. The press is
+    // capped at 2 cm, so its ring is (RING_WIDTH + SKIN_RING_SPREAD x 2 cm) x (0.5 + softness 1)
+    // = 4.8 cm wide, and gone three widths (14 cm) along the skin past the pressed patch (13 cm
+    // round). One cell past the patch (16.7 cm from the middle) the skin rises toward the ball by
+    // millimetres; seven cells out (29 cm: 17 cm past the patch along the skin) it is untouched,
+    // where the ring measured straight to the ball lifted it ~2 mm.
+    use crate::host::gui::mesh::Contact;
+    use crate::host::gui::scene_posed;
+    let cells = 24usize;
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    for row in 0..=cells {
+        for column in 0..=cells {
+            positions.extend_from_slice(&[
+                column as f32 / cells as f32 - 0.5,
+                row as f32 / cells as f32 - 0.5,
+                0.5,
+            ]);
+            normals.extend_from_slice(&[0.0, 0.0, -1.0]);
+        }
+    }
+    let mut indices = Vec::new();
+    for row in 0..cells {
+        for column in 0..cells {
+            let corner = (row * (cells + 1) + column) as u32;
+            let next = corner + (cells + 1) as u32;
+            indices.extend_from_slice(&[corner, corner + 1, next, corner + 1, next + 1, next]);
+        }
+    }
+    let count = (cells + 1) * (cells + 1);
+    let skin = Arc::new(
+        Mesh::from_parts(MeshParts {
+            positions: bytes_of(&positions),
+            normals: bytes_of(&normals),
+            indices: indices
+                .iter()
+                .flat_map(|index| index.to_le_bytes())
+                .collect(),
+            indices_wide: true,
+            softness: bytes_of(&vec![1.0; count]),
+            ..MeshParts::default()
+        })
+        .expect("a slab"),
+    );
+    let mut scene = self::scene();
+    scene.w = 32.0;
+    scene.h = 32.0;
+    scene.lights = vec![Light::directional([0.6, -0.5, 0.6], [1.0, 1.0, 1.0])];
+    scene.draws = vec![Draw {
+        loose: None,
+        mesh: 1,
+        model: [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ],
+        palette: None,
+        morphs: vec![],
+        material: Material {
+            deform: true,
+            double_sided: true,
+            ..Material::default()
+        },
+    }];
+    scene.contacts = vec![Contact::Sphere {
+        centre: [0.0, 0.0, 0.35],
+        radius: 0.2,
+    }];
+    let adapters = hardware_adapters();
+    if adapters.is_empty() {
+        eprintln!("skipped the GPU: no hardware GPU adapter here (a software one does not count)");
+        return;
+    }
+    let middle = cells / 2 * (cells + 1) + cells / 2;
+    let mut failures = Vec::new();
+    for adapter in &adapters {
+        let info = adapter.get_info();
+        let name = format!("{} ({:?})", info.name, info.backend);
+        let Ok(mut gpu) = GpuWindow::offscreen(adapter, 32, 32) else {
+            continue;
+        };
+        gpu.upload_mesh(1, &skin);
+        scene_posed::request(0);
+        let mut got = None;
+        for _ in 0..8 {
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if let Some(sample) = scene_posed::latest()
+                && scene_posed::requested().is_none()
+            {
+                got = Some(sample.positions);
+                break;
+            }
+        }
+        let Some(got) = got else {
+            failures.push(format!("{name}: never read back"));
+            continue;
+        };
+        let z = |vertex: usize| got[vertex * 3 + 2];
+        let (pressed, rim, far) = (z(middle), z(middle + 4), z(middle + 7));
+        eprintln!(
+            "{name}: middle z {pressed:.4}, one cell past the patch {rim:.4}, seven cells out {far:.4}"
+        );
+        if pressed < 0.51 {
+            failures.push(format!(
+                "{name}: the ball did not press the slab: z {pressed}"
+            ));
+        }
+        // (the rim rises toward the ball, -z, by millimetres)
+        if !(0.002..0.009).contains(&(0.5 - rim)) {
+            failures.push(format!("{name}: no ring beside the dent: z {rim}"));
+        }
+        if (far - 0.5).abs() > 0.0002 {
+            failures.push(format!(
+                "{name}: the ring reached 17 cm past the patch along the skin: z {far}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn eight_influences_skin_on_the_gpu_as_on_the_cpu() {
     // (the posed and displacement read-backs are one per process: tests that ask for them take turns)
     let _turn = READBACK_TURN

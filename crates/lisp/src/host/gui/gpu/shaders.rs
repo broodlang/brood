@@ -814,6 +814,16 @@ const PUSH_OUT_COUNTER: u32 = 64u;
 const RING_WIDTH: f32 = 0.012;
 const RING_SPREAD: f32 = 2.0;
 const RING_LIFT: f32 = 0.35;
+// The press's ring measured along the skin (ADR-849): a press marks its patch and the ring's height
+// and width there; passes over the skin's rings carry each point's distance along the skin from
+// the nearest pressed patch; a last pass lifts each vertex by the ring at that distance. Measured
+// straight to the contact (as it still is for a mesh with no rings, the CPU painter's way), the ring
+// of a seat 2 cm deep reached ~20 cm and lifted both walls of the fold where her bottom meets the
+// backs of her thighs into each other (womanblend, 2026-11-28).
+// its width: `RING_WIDTH` plus this much a metre of the press's depth, by the skin's softness
+const SKIN_RING_SPREAD: f32 = 1.0;
+// a point no pressed patch reaches
+const SKIN_RING_FAR: f32 = 1.0e6;
 const EDGE_BAND: f32 = 0.004;
 const EDGE_SPREAD: f32 = 0.5;
 const FIRM_INSET: f32 = 0.25;
@@ -1172,10 +1182,20 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
     let tangent = posed_out[at + 2u];
     let softness = contact_softness(id.x);
     if (softness <= 0.0) {
+        // (no patch here: its seed for the ring along the skin written every frame all the same)
+        if (ring_point_count() > 0u && ring_rep(ring_weld(id.x)) == id.x) {
+            ring_set_work(3u * ring_point_count() + ring_weld(id.x), vec4<f32>(SKIN_RING_FAR, 0.0, 0.0, 0.0));
+        }
         return;
     }
     let input = vertex_at(id.x);
     let count = min(contact_list.count.x, 64u);
+    // (the ring along the skin, ADR-849, for a mesh with rings: its patch and ring here, lifted
+    // later; a mesh with none is ringed straight to the contact, below)
+    let along = ring_point_count() > 0u;
+    var in_patch = false;
+    var crest_here = 0.0;
+    var width_here = 0.0;
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         // (a garment's contact pushes garments out, never her skin in, ADR-839)
         if (contact_skipped(slot, input) || contact_garment(slot)) {
@@ -1208,7 +1228,16 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
         let moved = min(eased - distance - inset, MAX_SQUASH * softness) * weight;
         var lift = 0.0;
         var slope = 0.0;
-        if (depth > 0.0 && distance > 0.0) {
+        if (along) {
+            if (into * weight > 0.5 && depth > 0.0) {
+                in_patch = true;
+                let crest = RING_LIFT * softness * depth * weight;
+                if (crest > crest_here) {
+                    crest_here = crest;
+                    width_here = (RING_WIDTH + SKIN_RING_SPREAD * depth) * (0.5 + softness);
+                }
+            }
+        } else if (depth > 0.0 && distance > 0.0) {
             let width = (RING_WIDTH + RING_SPREAD * depth) * (0.5 + softness);
             let reach = distance / width;
             if (reach < 3.0) {
@@ -1235,6 +1264,13 @@ fn cs_contact_deform(@builtin(global_invocation_id) id: vec3<u32>) {
     posed_out[at] = vec4<f32>(point, 1.0);
     posed_out[at + 1u] = vec4<f32>(normal, 0.0);
     posed_out[at + 2u] = vec4<f32>(safe_normalize(tangent.xyz - normal * dot(normal, tangent.xyz)), tangent.w);
+    if (along) {
+        let point_index = ring_weld(id.x);
+        if (ring_rep(point_index) == id.x) {
+            ring_set_work(3u * ring_point_count() + point_index,
+                vec4<f32>(select(SKIN_RING_FAR, 0.0, in_patch), select(0.0, crest_here, in_patch), width_here, 0.0));
+        }
+    }
 }
 // The press made unable to fold its skin (ADR-844). `cs_contact_deform` moves each vertex on its
 // own, along the contact's direction by its own distance: where her skin curves into a fold (the top
@@ -1312,6 +1348,101 @@ fn cs_press_scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let point = ring_weld(id.x);
     let at = (draw.deform.y + id.x) * POSED_STRIDE;
     posed_out[at] = vec4<f32>(ring_work(count + point).xyz + ring_work(point).xyz, 1.0);
+}
+
+// the ring along the skin (ADR-849): one pass of each point's distance from the nearest pressed patch
+// (its seed `x`, the patch's crest `y` and width `z`), from the work's fourth set into its fifth or back
+fn skin_ring_spread(id: u32, read_from: u32, write_to: u32) {
+    let count = ring_point_count();
+    if (id >= count) {
+        return;
+    }
+    var best = ring_work(read_from * count + id);
+    let here = ring_posed(id);
+    let start = ring_offset(id);
+    let end = ring_offset(id + 1u);
+    for (var slot = start; slot < end; slot = slot + 1u) {
+        let other = ring_neighbour(slot);
+        let seen = ring_work(read_from * count + other);
+        let reached = seen.x + length(ring_posed(other) - here);
+        if (seen.x < SKIN_RING_FAR && reached < best.x) {
+            best = vec4<f32>(reached, seen.y, seen.z, 0.0);
+        }
+    }
+    ring_set_work(write_to * count + id, best);
+}
+
+@compute @workgroup_size(64)
+fn cs_skin_ring_out(@builtin(global_invocation_id) id: vec3<u32>) {
+    skin_ring_spread(id.x, 3u, 4u);
+}
+
+@compute @workgroup_size(64)
+fn cs_skin_ring_back(@builtin(global_invocation_id) id: vec3<u32>) {
+    skin_ring_spread(id.x, 4u, 3u);
+}
+
+// the ring's lift at a point `seed` (distance along the skin, crest, width): rising from nothing at
+// the patch's edge to its crest a little out, gone by three widths (`mesh::deform_by_contacts`' shape)
+fn skin_ring_height(seed: vec4<f32>) -> f32 {
+    if (seed.y <= 0.0 || seed.z <= 0.0 || seed.x <= 0.0 || seed.x >= SKIN_RING_FAR) {
+        return 0.0;
+    }
+    let reach = seed.x / seed.z;
+    if (reach >= 3.0) {
+        return 0.0;
+    }
+    return seed.y * reach * exp(0.5 - reach * reach) * 1.41421356;
+}
+
+// each point's ring: its lift and slope (the lift's gradient across its normal, over its ring of
+// points), into the work's fifth set, while nothing moves (read by `cs_skin_ring_lift`: a vertex
+// lifted while its neighbours were read would make the slope hang on the GPU's thread order)
+@compute @workgroup_size(64)
+fn cs_skin_ring_mark(@builtin(global_invocation_id) id: vec3<u32>) {
+    let count = ring_point_count();
+    if (id.x >= count) {
+        return;
+    }
+    let lift = skin_ring_height(ring_work(3u * count + id.x));
+    let normal = ring_carried(id.x);
+    let here = ring_posed(id.x);
+    var slope = vec3<f32>(0.0);
+    let start = ring_offset(id.x);
+    let end = ring_offset(id.x + 1u);
+    for (var slot = start; slot < end; slot = slot + 1u) {
+        let other = ring_neighbour(slot);
+        let edge = ring_posed(other) - here;
+        let across = edge - normal * dot(edge, normal);
+        let span = dot(across, across);
+        if (span > 1e-12) {
+            slope = slope + across * ((skin_ring_height(ring_work(3u * count + other)) - lift) / span);
+        }
+    }
+    if (end > start) {
+        slope = slope / f32(end - start);
+    }
+    ring_set_work(4u * count + id.x, vec4<f32>(slope, lift));
+}
+
+// each vertex lifted along its normal by its point's ring, its normal tilted by the ring's slope
+@compute @workgroup_size(64)
+fn cs_skin_ring_lift(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= draw.deform.w || ring_point_count() == 0u) {
+        return;
+    }
+    let ring = ring_work(4u * ring_point_count() + ring_weld(id.x));
+    if (ring.w == 0.0 && dot(ring.xyz, ring.xyz) == 0.0) {
+        return;
+    }
+    let at = (draw.deform.y + id.x) * POSED_STRIDE;
+    let normal = safe_normalize(posed_out[at + 1u].xyz);
+    let slope = ring.xyz - normal * dot(ring.xyz, normal);
+    let turned = safe_normalize(normal - slope);
+    let tangent = posed_out[at + 2u];
+    posed_out[at] = vec4<f32>(posed_out[at].xyz + normal * ring.w, 1.0);
+    posed_out[at + 1u] = vec4<f32>(turned, 0.0);
+    posed_out[at + 2u] = vec4<f32>(safe_normalize(tangent.xyz - turned * dot(turned, tangent.xyz)), tangent.w);
 }
 
 // ADR-846: a garment carried by the skin under it. Each of its vertices that names the skin it lies
