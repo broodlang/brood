@@ -3459,3 +3459,17 @@ of PNG and about 150 MB of RGBA; here each thread reads the image's blob where i
 `gui/image-thumb` now uses too, a 64 MB copy saved on a 4096² image). At most one thread a core,
 each taking the next image; the answers are `gui/image-thumb`'s, in order. Guard:
 `tests/image_test.blsp` "image-thumbs".
+
+2026-11-28. **The exit gate shuts on a painter that is never idle.** GPU runs ending with a
+SIGSEGV rose from one or two a day to about 15 an hour this morning, every one on the
+`brood-offscreen` thread (the kernel's log: a jump into freed memory, or a fault inside
+`libnvidia-glcore`), all while several sessions drew at once. The exit's `close_gate` tried the
+gate's lock once a millisecond for a second, then gave up; a painter with frames queued lets go
+of the lock between one frame and the next for microseconds and takes it straight back, so
+under load the exit lost every try, gave up, and the driver's exit handler tore its state down
+under a frame being painted. The read-backs of ADR-847/848 made each frame longer, and the
+crashes followed. Now an exiting flag, read as each event starts, keeps every new event out,
+and the exit waits only for the one in hand (5 s at most, said on stderr when it runs out); an
+exit called from inside an event waits for nothing. Guard: `exit_gate::tests`, the
+never-idle painter failing with the old shutting (the painter kept the gate for its full
+second).
