@@ -213,6 +213,20 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "The newest displacements read back for gui/scene-watch-displacements: {:draw i :displacements bytes}, little-endian f32, three a watched vertex in the watched order; nil until one is read. ADR-847.",
         gui_scene_displacements);
     primitives.def(
+        "%gui-scene-watch-positions",
+        Arity::exact(1),
+        Sig::new(vec![any], nil_ty),
+        &["watch"],
+        "Watch listed vertices of several draws at their drawn places every frame they can be read: `watch` a vector of [draw vertices], draw an index into the first scene's :draws and vertices u32 little-endian bytes (indices into its mesh). Each vertex's world position as drawn: skinned about its centres, its keys, the loose lag, the contacts, a carried garment's carry and the push-out. nil stops the watch. Read with gui/scene-positions, a frame or two behind. Only a pressed (:deform) draw is served. ADR-848.",
+        gui_scene_watch_positions);
+    primitives.def(
+        "%gui-scene-positions",
+        Arity::exact(0),
+        Sig::new(vec![], any),
+        &[],
+        "The newest drawn places read back for gui/scene-watch-positions: {:positions bytes :posed [bool …]}: little-endian f32, three a watched vertex, the draws in the watched order and each draw's vertices in its order; :posed whether each draw was posed that frame (its vertices 0 where not). nil until one is read. ADR-848.",
+        gui_scene_positions);
+    primitives.def(
         "%gui-key-repeat?",
         Arity::exact(1),
         Sig::new(vec![int], bool_ty),

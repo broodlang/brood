@@ -491,6 +491,8 @@ pub(super) struct MeshGpu {
     pub(super) posed_reader: super::posed_reader::PosedReader,
     /// A pressed draw's displacement at listed vertices read back (ADR-847).
     pub(super) displacement_reader: super::displacement_reader::DisplacementReader,
+    /// the watched draws' listed vertices at their drawn places (ADR-848)
+    pub(super) position_reader: super::displacement_reader::DisplacementReader,
 }
 
 fn floats_bytes(values: &[f32]) -> Vec<u8> {
@@ -1454,6 +1456,7 @@ impl MeshGpu {
             push_outs: super::push_outs::PushOutReader::new(device),
             posed_reader: super::posed_reader::PosedReader::new(),
             displacement_reader: super::displacement_reader::DisplacementReader::new(),
+            position_reader: super::displacement_reader::DisplacementReader::new(),
         }
     }
 
@@ -1847,6 +1850,12 @@ impl MeshGpu {
         let watched = crate::host::gui::scene_displacements::watched()
             .filter(|_| self.displacement_reader.free());
         let mut watch_range: Option<(u32, u32)> = None;
+        // and the draws whose listed vertices' drawn places are watched (ADR-848), each draw's
+        // posed range this frame once found
+        let watched_places =
+            crate::host::gui::scene_positions::watched().filter(|_| self.position_reader.free());
+        let mut place_ranges: Vec<Option<(u32, u32)>> =
+            vec![None; watched_places.as_ref().map_or(0, Vec::len)];
         for scene in scenes {
             let world = scene.draws.iter().fold(None, |bounds, draw| {
                 let more = self
@@ -2025,6 +2034,19 @@ impl MeshGpu {
                             .is_some_and(|wanted| std::ptr::eq(wanted, draw))
                     {
                         watch_range = Some((start, mesh.vertex_count));
+                    }
+                    if plans.is_empty()
+                        && let Some(places) = &watched_places
+                    {
+                        for (slot, (asked, _)) in places.iter().enumerate() {
+                            if scene
+                                .draws
+                                .get(*asked)
+                                .is_some_and(|wanted| std::ptr::eq(wanted, draw))
+                            {
+                                place_ranges[slot] = Some((start, mesh.vertex_count));
+                            }
+                        }
                     }
                     if plans.is_empty()
                         && let Some(asked) = posed_asked
@@ -2362,6 +2384,7 @@ impl MeshGpu {
         self.push_outs.begin_frame(device);
         self.posed_reader.begin_frame(device);
         self.displacement_reader.begin_frame(device);
+        self.position_reader.begin_frame(device);
         for (index, scene) in scenes.iter().enumerate() {
             // the material bind groups this scene's draws sample
             let materials: Vec<wgpu::BindGroup> = scene
@@ -2595,10 +2618,30 @@ impl MeshGpu {
                         queue,
                         encoder,
                         &contacts.posed,
-                        *draw,
-                        start,
-                        count,
-                        vertices,
+                        super::displacement_reader::Kind::Displacements { draw: *draw },
+                        &super::displacement_reader::posed_indices(Some((start, count)), vertices),
+                    );
+                }
+                // (and the watched draws' listed vertices at their drawn places, ADR-848)
+                if index == 0
+                    && let Some(places) = &watched_places
+                {
+                    let indices: Vec<u32> = places
+                        .iter()
+                        .zip(&place_ranges)
+                        .flat_map(|((_, vertices), range)| {
+                            super::displacement_reader::posed_indices(*range, vertices)
+                        })
+                        .collect();
+                    self.position_reader.gather(
+                        device,
+                        queue,
+                        encoder,
+                        &contacts.posed,
+                        super::displacement_reader::Kind::Positions {
+                            posed: place_ranges.iter().map(Option::is_some).collect(),
+                        },
+                        &indices,
                     );
                 }
             }

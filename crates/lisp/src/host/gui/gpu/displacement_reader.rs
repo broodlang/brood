@@ -3,12 +3,23 @@
 //! less its skinned place (the posed buffer's first and fourth vec4, ADR-846) into a buffer, copied
 //! into a read-back buffer, mapped after submit and unpacked at a later frame's start into
 //! `scene_displacements::record`. One read-back in flight; a standing request is served whenever it
-//! is free.
+//! is free. The same gather reads listed vertices' drawn places instead (ADR-848, a reader of its
+//! own: `scene_positions::record`), several draws at once.
+
+/// What a reader gathers and where its samples go.
+#[derive(Clone, Debug)]
+pub(super) enum Kind {
+    /// One draw's displacements (ADR-847).
+    Displacements { draw: usize },
+    /// Several draws' drawn places (ADR-848): whether each watched draw was posed.
+    Positions { posed: Vec<bool> },
+}
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use crate::host::gui::scene_displacements::{DisplacementSample, record};
+use crate::host::gui::scene_displacements::DisplacementSample;
+use crate::host::gui::scene_positions::PositionSample;
 
 use super::scenes::POSED_BYTES;
 
@@ -18,8 +29,9 @@ const MAPPING: u8 = 2;
 const MAPPED: u8 = 3;
 const FAILED: u8 = 4;
 
-/// The gather: `list` holds the draw's first posed vertex, its vertex count, then the listed
-/// vertices; each listed vertex's displacement (0 past the draw's end) into `out`.
+/// The gather: `list` holds what to gather (0 each vertex's displacement, its drawn place less its
+/// skinned place; 1 its drawn place) then each listed vertex's index into the posed buffer
+/// (`UNPOSED` for one not posed this frame: 0 out); each into `out`.
 const GATHER_SRC: &str = "
 @group(0) @binding(0) var<storage, read> posed: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> list: array<u32>;
@@ -29,19 +41,38 @@ const STRIDE: u32 = POSED_VEC4S;
 
 @compute @workgroup_size(64)
 fn cs_gather(@builtin(global_invocation_id) id: vec3<u32>) {
-    let count = arrayLength(&list) - 2u;
+    let count = arrayLength(&list) - 1u;
     if (id.x >= count) {
         return;
     }
-    let vertex = list[2u + id.x];
-    if (vertex >= list[1]) {
+    let index = list[1u + id.x];
+    if (index == 0xffffffffu) {
         out[id.x] = vec4<f32>(0.0);
         return;
     }
-    let at = (list[0] + vertex) * STRIDE;
-    out[id.x] = vec4<f32>(posed[at].xyz - posed[at + 3u].xyz, 0.0);
+    let at = index * STRIDE;
+    if (list[0] == 1u) {
+        out[id.x] = vec4<f32>(posed[at].xyz, 1.0);
+    } else {
+        out[id.x] = vec4<f32>(posed[at].xyz - posed[at + 3u].xyz, 0.0);
+    }
 }
 ";
+
+/// A listed vertex not posed this frame (its draw not pressed, or past its draw's vertices).
+pub(super) const UNPOSED: u32 = u32::MAX;
+
+/// Each of `vertices` as an index into the posed buffer of a draw whose posed vertices start at
+/// `start` and number `count` (`UNPOSED` past its end, or every one where it was not posed).
+pub(super) fn posed_indices(range: Option<(u32, u32)>, vertices: &[u32]) -> Vec<u32> {
+    vertices
+        .iter()
+        .map(|&vertex| match range {
+            Some((start, count)) if vertex < count => start + vertex,
+            _ => UNPOSED,
+        })
+        .collect()
+}
 
 pub(super) struct DisplacementReader {
     pipeline: Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)>,
@@ -49,7 +80,7 @@ pub(super) struct DisplacementReader {
     out: Option<wgpu::Buffer>,
     readback: Option<wgpu::Buffer>,
     state: Arc<AtomicU8>,
-    draw: usize,
+    kind: Kind,
     count: u64,
 }
 
@@ -61,7 +92,7 @@ impl DisplacementReader {
             out: None,
             readback: None,
             state: Arc::new(AtomicU8::new(FREE)),
-            draw: 0,
+            kind: Kind::Displacements { draw: 0 },
             count: 0,
         }
     }
@@ -82,21 +113,30 @@ impl DisplacementReader {
                                 .iter()
                                 .map(|word| f32::from_le_bytes(*word))
                                 .collect();
-                            let displacements = floats
+                            floats
                                 .as_chunks::<4>()
                                 .0
                                 .iter()
                                 .flat_map(|vertex| [vertex[0], vertex[1], vertex[2]])
-                                .collect();
-                            DisplacementSample {
-                                draw: self.draw,
-                                displacements,
-                            }
+                                .collect::<Vec<f32>>()
                         })
                         .ok();
                     buffer.unmap();
-                    if let Some(sample) = sample {
-                        record(sample);
+                    if let Some(values) = sample {
+                        match &self.kind {
+                            Kind::Displacements { draw } => {
+                                crate::host::gui::scene_displacements::record(DisplacementSample {
+                                    draw: *draw,
+                                    displacements: values,
+                                })
+                            }
+                            Kind::Positions { posed } => {
+                                crate::host::gui::scene_positions::record(PositionSample {
+                                    positions: values,
+                                    posed: posed.clone(),
+                                })
+                            }
+                        }
                     }
                 }
                 self.state.store(FREE, Ordering::Release);
@@ -111,21 +151,18 @@ impl DisplacementReader {
         self.state.load(Ordering::Acquire) == FREE
     }
 
-    /// After the contact passes: gather `vertices` of the draw `draw` whose posed vertices start at
-    /// `start` and number `vertex_count`, from `posed`.
-    #[allow(clippy::too_many_arguments)]
+    /// After the contact passes: gather what `kind` asks of the posed vertices at `indices`
+    /// (`posed_indices`), from `posed`.
     pub(super) fn gather(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         posed: &wgpu::Buffer,
-        draw: usize,
-        start: u32,
-        vertex_count: u32,
-        vertices: &[u32],
+        kind: Kind,
+        indices: &[u32],
     ) {
-        if !self.free() || vertices.is_empty() {
+        if !self.free() || indices.is_empty() {
             return;
         }
         let (pipeline, layout) = self.pipeline.get_or_insert_with(|| {
@@ -163,11 +200,10 @@ impl DisplacementReader {
             });
             (pipeline, layout)
         });
-        let count = vertices.len() as u64;
-        let mut words = Vec::with_capacity(vertices.len() + 2);
-        words.push(start);
-        words.push(vertex_count);
-        words.extend_from_slice(vertices);
+        let count = indices.len() as u64;
+        let mut words = Vec::with_capacity(indices.len() + 1);
+        words.push(u32::from(matches!(kind, Kind::Positions { .. })));
+        words.extend_from_slice(indices);
         let list_bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
         let fits = |buffer: &Option<wgpu::Buffer>, size: u64| {
             buffer.as_ref().is_some_and(|buffer| buffer.size() == size)
@@ -227,7 +263,7 @@ impl DisplacementReader {
             pass.dispatch_workgroups((count as u32).div_ceil(64), 1, 1);
         }
         encoder.copy_buffer_to_buffer(out, 0, readback, 0, count * 16);
-        self.draw = draw;
+        self.kind = kind;
         self.count = count;
         self.state.store(COPIED, Ordering::Release);
     }

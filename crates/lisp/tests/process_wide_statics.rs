@@ -160,6 +160,10 @@ const PROCESS_WIDE: &[(&str, &str, Reason)] = &[
     // a standing watch of a draw's vertices' displacements and the newest read back (ADR-847)
     ("host/gui/scene_displacements.rs", "WATCH", Diagnostic),
     ("host/gui/scene_displacements.rs", "LATEST", Diagnostic),
+    ("host/gui/scene_positions.rs", "WATCH", Diagnostic),
+    ("host/gui/scene_positions.rs", "LATEST", Diagnostic),
+    // (a test's lock: the GPU tests that read the process-wide read-backs above take turns)
+    ("host/gui/backend/gpu_scene.rs", "READBACK_TURN", OneMachine),
     // the offscreen painter's one thread (gui/render-frame, ADR-609): text shaping cannot
     // move between threads, so every runtime in the process sends its frames to this one
     ("host/gui/backend/offscreen.rs", "T", OneMachine),

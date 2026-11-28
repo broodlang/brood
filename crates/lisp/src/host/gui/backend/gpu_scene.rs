@@ -2396,6 +2396,36 @@ fn a_carried_garment_keeps_its_offset_over_the_pressed_skin_on_the_gpu() {
             }
         }
         crate::host::gui::scene_displacements::watch(None);
+        // (and both slabs' middles watched at their drawn places in one request, ADR-848, with a
+        // draw past the scene's: not posed)
+        crate::host::gui::scene_positions::watch(Some(vec![
+            (0, vec![middle as u32]),
+            (1, vec![middle as u32]),
+            (7, vec![0]),
+        ]));
+        let mut places = None;
+        for _ in 0..8 {
+            let mut renderer = Renderer::new(1.0, default_families(), 15.0);
+            gpu.paint(&[Op::Scene(Arc::new(scene.clone()))], &mut renderer)
+                .expect("an offscreen frame is never skipped");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if let Some(sample) = crate::host::gui::scene_positions::latest() {
+                places = Some(sample);
+                break;
+            }
+        }
+        crate::host::gui::scene_positions::watch(None);
+        match places {
+            Some(sample)
+                if sample.posed == [true, true, false]
+                    && sample.positions.len() == 9
+                    && (sample.positions[2] - skin_z).abs() < 1e-5
+                    && (sample.positions[5] - cloth_z).abs() < 1e-5
+                    && sample.positions[6..9] == [0.0, 0.0, 0.0] => {}
+            other => failures.push(format!(
+                "{name}: the watched places {other:?} are not the posed skin's z {skin_z} and cloth's z {cloth_z}"
+            )),
+        }
         match displaced {
             Some(dz) if (dz - (skin_z - 0.5)).abs() < 0.0002 => {}
             other => failures.push(format!(

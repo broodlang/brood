@@ -882,6 +882,7 @@ impl GpuWindow {
             scenes.push_outs.after_submit();
             scenes.posed_reader.after_submit();
             scenes.displacement_reader.after_submit();
+            scenes.position_reader.after_submit();
         }
         if let Some(path) = dump_path() {
             dump_frame(

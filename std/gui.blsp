@@ -170,6 +170,18 @@
     (gui/scene-watch-displacements 0 nil)   ;=> nil"
   (%gui-scene-watch-displacements draw vertices))
 
+(defn scene-watch-positions (watch)
+  "Watch listed vertices of several draws at their drawn places (ADR-848): `watch` a vector of `[draw vertices]`, draw its index in the first scene's `:draws` and vertices u32 little-endian bytes of vertex indices into its mesh; nil stops the watch. Each vertex's world position as the GPU drew it (skinned about its centres, its keys, the loose lag, the contacts, a carried garment's carry, the push-out); only a pressed (`:deform`) draw is served. Read with `gui/scene-positions`.
+
+    (gui/scene-watch-positions nil)   ;=> nil"
+  (%gui-scene-watch-positions watch))
+
+(defn scene-positions ()
+  "The newest drawn places read back for `gui/scene-watch-positions`: `{:positions bytes :posed [bool …]}`, little-endian f32, three a watched vertex, the draws in the watched order and each draw's vertices in its order, `:posed` whether each draw was posed that frame (its vertices read 0 where not); nil until one is read, a frame or two behind.
+
+    (or (nil? (gui/scene-positions)) (map? (gui/scene-positions)))   ;=> true"
+  (%gui-scene-positions))
+
 (defn scene-displacements ()
   "The newest displacements read back for `gui/scene-watch-displacements`: `{:draw i :displacements bytes}`, little-endian f32, three a watched vertex in the watched order; nil until one has been read, or after the watch stops (ADR-847).
 

@@ -3659,6 +3659,82 @@ pub(in crate::builtins) fn gui_scene_displacements(
     ]))
 }
 
+/// `(%gui-scene-watch-positions watch)` — watch each `[draw vertices]` of `watch` at its drawn
+/// places (ADR-848), or stop with nil.
+pub(in crate::builtins) fn gui_scene_watch_positions(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let who = "%gui-scene-watch-positions";
+    let wrong = || {
+        LispError::runtime(format!(
+            "{who}: a vector of [draw vertices], draw an index into the scene's :draws and vertices u32 little-endian bytes, or nil"
+        ))
+    };
+    let entries = match arg(args, 0) {
+        Value::Nil => {
+            crate::host::gui::scene_positions::watch(None);
+            return Ok(Value::Nil);
+        }
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        _ => return Err(wrong()),
+    };
+    let mut request = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Value::Vector(id) = entry else {
+            return Err(wrong());
+        };
+        let pair = heap.vector(id).to_vec();
+        let [Value::Int(draw), vertices] = pair.as_slice() else {
+            return Err(wrong());
+        };
+        if *draw < 0 {
+            return Err(wrong());
+        }
+        let bytes = crate::builtins::bytes::collect_bytes(who, *vertices, heap)?;
+        if bytes.len() % 4 != 0 {
+            return Err(wrong());
+        }
+        let vertices = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect();
+        request.push((*draw as usize, vertices));
+    }
+    crate::host::gui::scene_positions::watch(Some(request));
+    Ok(Value::Nil)
+}
+
+/// `(%gui-scene-positions)` — the newest watched drawn places (ADR-848), or nil.
+pub(in crate::builtins) fn gui_scene_positions(
+    _: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let Some(sample) = crate::host::gui::scene_positions::latest() else {
+        return Ok(Value::Nil);
+    };
+    let bytes: Vec<u8> = sample
+        .positions
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let positions = crate::builtins::bytes::bytes_to_value(bytes, heap);
+    let posed = sample
+        .posed
+        .iter()
+        .map(|&posed| Value::Bool(posed))
+        .collect();
+    let posed = heap.alloc_vector(posed);
+    Ok(heap.map_from_pairs(vec![
+        (value::kw("positions"), positions),
+        (value::kw("posed"), posed),
+    ]))
+}
+
 /// `(%gui-scene-push-outs)` — how many garment vertices the push-out net moved on recent frames
 /// (ADR-839), oldest first.
 pub(in crate::builtins) fn gui_scene_push_outs(
