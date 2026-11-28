@@ -326,6 +326,9 @@ pub(crate) struct CheckDepRec {
     /// storing them would just bloat the manifest (a 1000-def file otherwise records
     /// ~1000 self-names — the 64MB-manifest bug).
     pub(crate) own: std::collections::HashSet<Symbol>,
+    /// Files a `(reflect/load "path")` of the checked file names, whose definitions the
+    /// check took as bound: their content is a dependency the file's own mtime cannot see.
+    pub(crate) files: std::collections::HashSet<String>,
 }
 
 /// What a bare name in the `(:use …)` import table resolves to (ADR-235). One

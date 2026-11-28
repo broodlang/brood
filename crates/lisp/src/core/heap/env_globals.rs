@@ -2175,6 +2175,16 @@ impl Heap {
             d.known_ns.insert(prefix.to_string());
         }
     }
+    /// Record a file a `reflect/load` in the checked file reads, whose definitions the
+    /// check took as bound.
+    pub(crate) fn rec_check_dep_file(&self, path: &str) {
+        if let Some(cell) = self.check.get()
+            && let Some(d) = cell.borrow_mut().dep_rec.as_mut()
+            && !d.files.contains(path)
+        {
+            d.files.insert(path.to_string());
+        }
+    }
     /// Record a `mod/` prefix whose export set was read.
     pub(crate) fn rec_check_dep_exports(&self, prefix: &str) {
         if let Some(cell) = self.check.get()

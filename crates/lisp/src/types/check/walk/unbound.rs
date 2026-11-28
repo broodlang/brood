@@ -275,6 +275,13 @@ pub(super) fn collect_def_names_inner(heap: &Heap, form: Value, ctx: &mut Ctx) {
                 ctx.add_file_arity(name, arity);
             }
         }
+    } else if value::symbol_is(head, "reflect/load") {
+        // A script that loads another (`(reflect/load "tools/kit.blsp")`) calls what that
+        // file defines: with a literal path, those names are bound here too.
+        if let Some(&Value::Str(id)) = items.get(1) {
+            let path = heap.string(id).to_string();
+            collect_loaded_names(heap, &path, ctx, &mut Vec::new());
+        }
     } else if ctx.is_file_macro(head) {
         // A call to a file-local macro the checker can't expand (single-file mode,
         // or a macro defined in a deferred `test` thunk). A bare-symbol argument may
@@ -291,6 +298,90 @@ pub(super) fn collect_def_names_inner(heap: &Heap, form: Value, ctx: &mut Ctx) {
     }
     for &item in &items[1..] {
         collect_def_names(heap, item, ctx);
+    }
+}
+
+/// The names the file at `path` defines at its top level (and in its `do`/`when` bodies),
+/// taken as bound in the checked file that `reflect/load`s it, the file recorded as a
+/// dependency of the check. Its own literal `reflect/load`s are followed too (`seen` keeps a
+/// cycle out). A file that is a module (`defmodule`) defines its names in that module, not
+/// in the loader, and a file that cannot be read or parsed adds nothing: the load fails at
+/// run time, which is no question for the checker. Read as written, not expanded: a name
+/// a macro of its own would define is not seen.
+fn collect_loaded_names(heap: &Heap, path: &str, ctx: &mut Ctx, seen: &mut Vec<String>) {
+    if seen.iter().any(|p| p == path) || seen.len() > 8 {
+        return;
+    }
+    seen.push(path.to_string());
+    heap.rec_check_dep_file(path);
+    let Ok(source) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut reader_heap = Heap::new();
+    let Ok(forms) = crate::syntax::reader::read_all(&mut reader_heap, &source) else {
+        return;
+    };
+    let is_module = forms.iter().any(|&form| {
+        list_items(&reader_heap, form)
+            .and_then(|items| items.first().copied())
+            .is_some_and(|head| matches!(head, Value::Sym(s) if value::symbol_is(s, "defmodule")))
+    });
+    if is_module {
+        return;
+    }
+    for &form in &forms {
+        loaded_def_names(heap, &reader_heap, form, ctx, seen);
+    }
+}
+
+/// The names one form of a loaded file defines (`reader_heap` holds the file as read; `heap`
+/// is the checked file's, for a nested load's dependency).
+fn loaded_def_names(
+    heap: &Heap,
+    reader_heap: &Heap,
+    form: Value,
+    ctx: &mut Ctx,
+    seen: &mut Vec<String>,
+) {
+    let Some(items) = list_items(reader_heap, form) else {
+        return;
+    };
+    let Some(&Value::Sym(head)) = items.first() else {
+        return;
+    };
+    if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
+        return;
+    }
+    let defines = [
+        kw::DEF,
+        kw::DEF_PRIVATE,
+        kw::DEFN,
+        kw::DEFN_PRIVATE,
+        kw::DEFDYN,
+    ]
+    .iter()
+    .any(|spelling| value::symbol_is(head, spelling));
+    if defines {
+        if let Some(&Value::Sym(name)) = items.get(1) {
+            ctx.add_file_global(name);
+        }
+        return;
+    }
+    if value::symbol_is(head, kw::DEFMACRO) {
+        if let Some(&Value::Sym(name)) = items.get(1) {
+            ctx.add_file_macro(name);
+        }
+        return;
+    }
+    if value::symbol_is(head, "reflect/load") {
+        if let Some(&Value::Str(id)) = items.get(1) {
+            let path = reader_heap.string(id).to_string();
+            collect_loaded_names(heap, &path, ctx, seen);
+        }
+        return;
+    }
+    for &item in &items[1..] {
+        loaded_def_names(heap, reader_heap, item, ctx, seen);
     }
 }
 

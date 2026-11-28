@@ -1127,3 +1127,68 @@ fn an_unbound_name_in_a_branch_typed_dead_is_still_reported() {
         "a dead clause's type findings stay unreported: {ws:?}"
     );
 }
+
+// ---- a script that `reflect/load`s another calls what that file defines ----
+
+#[test]
+fn reflect_load_of_a_literal_path_binds_what_the_file_defines() {
+    // A tool script loads a kit of helpers at run time (`(reflect/load "tools/kit.blsp")`)
+    // and calls them: those calls were every one "unbound symbol" (womanblend's tools, 33
+    // warnings). The checker now reads the loaded file's definitions; a name it does not
+    // define is still unbound, and a module file's names stay its module's.
+    let directory = std::env::temp_dir().join(format!("brood-load-check-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("scratch directory");
+    let kit = directory.join("kit.blsp");
+    let module = directory.join("module.blsp");
+    std::fs::write(
+        &kit,
+        "(def kit-value 1)\n(defn kit-call (x) x)\n(when true (defn- kit-later () 2))\n",
+    )
+    .expect("kit written");
+    std::fs::write(&module, "(defmodule some-kit)\n(defn module-call () 1)\n")
+        .expect("module written");
+    let source = format!(
+        "(reflect/load {:?})\n(reflect/load {:?})\n(def a (kit-call kit-value))\n(def b (kit-later))\n(def c (kit-missing))\n(def d (module-call))",
+        kit.to_string_lossy(),
+        module.to_string_lossy()
+    );
+    let mut interp = crate::Interp::new();
+    let forms = reader::read_all(&mut interp.heap, &source).expect("parse");
+    let (warnings, dep_keys) = check_file_with_deps(&mut interp.heap, &forms);
+    let unbound: Vec<&String> = warnings
+        .iter()
+        .map(|(_, message)| message)
+        .filter(|message| message.contains("unbound symbol"))
+        .collect();
+    for name in ["kit-call", "kit-value", "kit-later"] {
+        assert!(
+            unbound
+                .iter()
+                .all(|message| !message.contains(&format!("unbound symbol: {name}"))),
+            "`{name}` is defined by the loaded file: {unbound:?}"
+        );
+    }
+    for name in ["kit-missing", "module-call"] {
+        assert!(
+            unbound
+                .iter()
+                .any(|message| message.contains(&format!("unbound symbol: {name}"))),
+            "`{name}` is not defined for the loader, so it stays unbound: {unbound:?}"
+        );
+    }
+
+    // The loaded file is a dependency of the check: an edit of it flips the fingerprint.
+    let before = deps_fingerprint(&interp.heap, dep_keys);
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&kit)
+        .and_then(|file| file.set_modified(later))
+        .expect("kit touched");
+    assert_ne!(
+        before,
+        deps_fingerprint(&interp.heap, dep_keys),
+        "an edit of the loaded file re-checks the loader"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}

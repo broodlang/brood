@@ -119,9 +119,10 @@ pub(super) fn obs_registry(heap: &Heap, name: &str) -> Option<Value> {
 const K_SYMS: &str = "syms";
 const K_KNS: &str = "kns";
 const K_EXP: &str = "exp";
+const K_FILES: &str = "files";
 
 /// Take the recorded observations and build the serializable dep-keys value
-/// `{:syms [names] :kns [prefixes] :exp [prefixes]}` (sorted for a
+/// `{:syms [names] :kns [prefixes] :exp [prefixes] :files [paths]}` (sorted for a
 /// stable on-disk form). Empty record → empty lists.
 pub(super) fn take_dep_keys(heap: &mut Heap) -> Value {
     let dep = heap.take_check_dep_record().unwrap_or_default();
@@ -143,14 +144,18 @@ pub(super) fn take_dep_keys(heap: &mut Heap) -> Value {
     known_namespaces.sort_unstable();
     let mut exports: Vec<String> = dep.exports.into_iter().collect();
     exports.sort_unstable();
+    let mut files: Vec<String> = dep.files.into_iter().collect();
+    files.sort_unstable();
 
     let syms_list = string_list(heap, &syms);
     let known_namespaces_list = string_list(heap, &known_namespaces);
     let exports_list = string_list(heap, &exports);
+    let files_list = string_list(heap, &files);
     heap.map_from_pairs(vec![
         (Value::keyword(value::intern(K_SYMS)), syms_list),
         (Value::keyword(value::intern(K_KNS)), known_namespaces_list),
         (Value::keyword(value::intern(K_EXP)), exports_list),
+        (Value::keyword(value::intern(K_FILES)), files_list),
     ])
 }
 
@@ -502,6 +507,15 @@ pub(super) fn fingerprint(heap: &Heap, dep_keys: Value) -> String {
         buf.push_str(&p);
         buf.push('=');
         buf.push_str(&exports_fact(heap, &p));
+        buf.push(';');
+    }
+    // A `reflect/load`ed file's definitions were taken as bound: any edit of it may
+    // change which names are, so its mtime is its fact.
+    for path in field_strings(heap, id, K_FILES) {
+        buf.push_str("f:");
+        buf.push_str(&path);
+        buf.push('=');
+        buf.push_str(&mtime_stamp(&path));
         buf.push(';');
     }
     // Compact the (possibly large) fact string to a 64-bit FNV-1a hex stamp.
