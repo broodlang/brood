@@ -165,13 +165,13 @@
   (%gui-mesh-influences))
 
 (defn scene-watch-displacements (draw vertices)
-  "Watch draw `draw`'s displacement (its index in the first scene's `:draws`) at `vertices`, u32 little-endian bytes of vertex indices into its mesh, every frame it can be read: what the contact passes moved each listed vertex by this frame, its drawn place less its skinned place (the relax, the press and its smoothing; ADR-846). nil `vertices` stops it. Read with `gui/scene-displacements`, a frame or two behind: for a solve on the CPU that must follow her drawn skin. Only a pressed (`:deform`) draw is served (ADR-847).
+  "Watch draw `draw`'s displacement (its index in the first scene's `:draws`) at `vertices`, u32 little-endian bytes of vertex indices into its mesh, every frame it can be read: what the contact passes moved each listed vertex by this frame, its drawn place less its skinned place (the relax, the press and its smoothing; ADR-846). nil `vertices` stops it. Read with `gui/scene-displacements`, a frame or two behind. Only a pressed (`:deform`) draw is served (ADR-847). A reading of what the GPU drew never feeds what the game simulates (her updates and the drawn frames interleave by the machine's timing, so a reading reaches a different update each run): for probes and looks only (ADR-848).
 
     (gui/scene-watch-displacements 0 nil)   ;=> nil"
   (%gui-scene-watch-displacements draw vertices))
 
 (defn scene-watch-positions (watch)
-  "Watch listed vertices of several draws at their drawn places (ADR-848): `watch` a vector of `[draw vertices]`, draw its index in the first scene's `:draws` and vertices u32 little-endian bytes of vertex indices into its mesh; nil stops the watch. Each vertex's world position as the GPU drew it (skinned about its centres, its keys, the loose lag, the contacts, a carried garment's carry, the push-out); only a pressed (`:deform`) draw is served. Read with `gui/scene-positions`.
+  "Watch listed vertices of several draws at their drawn places (ADR-848): `watch` a vector of `[draw vertices]`, draw its index in the first scene's `:draws` and vertices u32 little-endian bytes of vertex indices into its mesh; nil stops the watch. Each vertex's world position as the GPU drew it (skinned about its centres, its keys, the loose lag, the contacts, a carried garment's carry, the push-out); only a pressed (`:deform`) draw is served. Read with `gui/scene-positions`. A reading of what the GPU drew never feeds what the game simulates (her updates and the drawn frames interleave by the machine's timing, so a reading reaches a different update each run): for probes and looks only.
 
     (gui/scene-watch-positions nil)   ;=> nil"
   (%gui-scene-watch-positions watch))

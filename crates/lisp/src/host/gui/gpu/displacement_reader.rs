@@ -82,6 +82,8 @@ pub(super) struct DisplacementReader {
     state: Arc<AtomicU8>,
     kind: Kind,
     count: u64,
+    /// the device it last gathered on: waited on when dropped with a read in flight
+    device: Option<wgpu::Device>,
 }
 
 impl DisplacementReader {
@@ -94,10 +96,15 @@ impl DisplacementReader {
             state: Arc::new(AtomicU8::new(FREE)),
             kind: Kind::Displacements { draw: 0 },
             count: 0,
+            device: None,
         }
     }
 
-    /// At a frame's start: unpack what an earlier frame read back.
+    /// At a frame's start: unpack what an earlier frame read back. (A reading reaches the game a
+    /// frame or more after its copy, by the GPU's timing and how the game's updates fall between
+    /// drawn frames: a game that steered by it drew different frames each run, womanblend-f9 and
+    /// womanblend-39, 2026-11-28, and waiting for the map did not cure it. Watch for a probe or a
+    /// look, never to steer what the game simulates.)
     pub(super) fn begin_frame(&mut self, device: &wgpu::Device) {
         let _ = device.poll(wgpu::PollType::Poll);
         match self.state.load(Ordering::Acquire) {
@@ -265,6 +272,7 @@ impl DisplacementReader {
         encoder.copy_buffer_to_buffer(out, 0, readback, 0, count * 16);
         self.kind = kind;
         self.count = count;
+        self.device = Some(device.clone());
         self.state.store(COPIED, Ordering::Release);
     }
 
@@ -284,5 +292,23 @@ impl DisplacementReader {
                 Ordering::Release,
             );
         });
+    }
+}
+
+impl Drop for DisplacementReader {
+    /// Never a read-back buffer dropped while it is being mapped or still mapped: the map's callback
+    /// or a mapped range outliving its buffer took the renderer thread down at a run's end
+    /// (SIGSEGV on brood-offscreen, womanblend-39, 2026-11-28).
+    fn drop(&mut self) {
+        if self.state.load(Ordering::Acquire) == MAPPING
+            && let Some(device) = &self.device
+        {
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        if self.state.load(Ordering::Acquire) == MAPPED
+            && let Some(buffer) = &self.readback
+        {
+            buffer.unmap();
+        }
     }
 }

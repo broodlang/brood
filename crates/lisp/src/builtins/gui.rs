@@ -203,7 +203,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(2),
         Sig::new(vec![int, any], nil_ty),
         &["draw", "vertices"],
-        "Watch draw `draw`'s (its index in the first scene's :draws) displacement at `vertices` (u32 little-endian bytes: vertex indices into its mesh) every frame it can be read: what the contact passes moved each by (its drawn place less its skinned place). nil vertices stops the watch. Read with gui/scene-displacements, a frame or two behind. Only a pressed (:deform) draw is served. ADR-847.",
+        "Watch draw `draw`'s (its index in the first scene's :draws) displacement at `vertices` (u32 little-endian bytes: vertex indices into its mesh) every frame it can be read: what the contact passes moved each by (its drawn place less its skinned place). nil vertices stops the watch. Read with gui/scene-displacements, a frame or two behind. Only a pressed (:deform) draw is served. A reading of what the GPU drew never feeds what the game simulates (her updates and the drawn frames interleave by the machine's timing, so a reading reaches a different update each run): for probes and looks only. ADR-847, ADR-848.",
         gui_scene_watch_displacements);
     primitives.def(
         "%gui-scene-displacements",
@@ -217,7 +217,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![any], nil_ty),
         &["watch"],
-        "Watch listed vertices of several draws at their drawn places every frame they can be read: `watch` a vector of [draw vertices], draw an index into the first scene's :draws and vertices u32 little-endian bytes (indices into its mesh). Each vertex's world position as drawn: skinned about its centres, its keys, the loose lag, the contacts, a carried garment's carry and the push-out. nil stops the watch. Read with gui/scene-positions, a frame or two behind. Only a pressed (:deform) draw is served. ADR-848.",
+        "Watch listed vertices of several draws at their drawn places every frame they can be read: `watch` a vector of [draw vertices], draw an index into the first scene's :draws and vertices u32 little-endian bytes (indices into its mesh). Each vertex's world position as drawn: skinned about its centres, its keys, the loose lag, the contacts, a carried garment's carry and the push-out. nil stops the watch. Read with gui/scene-positions, a frame or two behind. Only a pressed (:deform) draw is served. A reading of what the GPU drew never feeds what the game simulates (her updates and the drawn frames interleave by the machine's timing, so a reading reaches a different update each run): for probes and looks only. ADR-848.",
         gui_scene_watch_positions);
     primitives.def(
         "%gui-scene-positions",
